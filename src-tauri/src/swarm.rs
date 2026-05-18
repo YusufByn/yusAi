@@ -363,6 +363,10 @@ pub(super) async fn wake_main_agent_for_swarm_notice(
             workspace_root.clone(),
             skill_settings.clone(),
         )),
+        supabase: Arc::new(SupabaseQueryTool::with_credentials(
+            tool_settings.supabase_url(),
+            tool_settings.supabase_key(),
+        )),
         mcp: Arc::new(McpToolRegistry::new(mcp_settings.clone())),
         subagents: Some(Arc::new(SubAgentTool::new(
             workspace_root.clone(),

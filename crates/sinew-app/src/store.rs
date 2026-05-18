@@ -216,6 +216,10 @@ pub struct ToolSettings {
     pub web_search_provider: WebSearchProvider,
     #[serde(default)]
     pub linkup_api_key: String,
+    #[serde(default)]
+    pub supabase_url: String,
+    #[serde(default)]
+    pub supabase_key: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +266,8 @@ pub struct ToolSettingsView {
     pub nano_banana_api_key: String,
     pub web_search_provider: WebSearchProvider,
     pub linkup_api_key: String,
+    pub supabase_url: String,
+    pub supabase_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -317,6 +323,8 @@ impl ToolSettings {
         self.openai_image_api_key = self.openai_image_api_key.trim().to_string();
         self.nano_banana_api_key = self.nano_banana_api_key.trim().to_string();
         self.linkup_api_key = self.linkup_api_key.trim().to_string();
+        self.supabase_url = self.supabase_url.trim().trim_end_matches('/').to_string();
+        self.supabase_key = self.supabase_key.trim().to_string();
         self.tools = self
             .tools
             .into_iter()
@@ -426,6 +434,26 @@ impl ToolSettings {
     }
 }
 
+impl ToolSettings {
+    pub fn supabase_url(&self) -> Option<String> {
+        let value = self.supabase_url.trim().trim_end_matches('/');
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    }
+
+    pub fn supabase_key(&self) -> Option<String> {
+        let value = self.supabase_key.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    }
+}
+
 fn normalize_plan_mode_prompt(value: &str) -> String {
     let prompt = value.trim();
     if prompt.is_empty() || prompt == DEFAULT_PLAN_MODE_PROMPT.trim() {
@@ -452,6 +480,8 @@ pub fn tool_settings_view(settings: &ToolSettings, catalog: &[ToolDescriptor]) -
         nano_banana_api_key: settings.nano_banana_api_key.clone(),
         web_search_provider: settings.web_search_provider,
         linkup_api_key: settings.linkup_api_key.clone(),
+        supabase_url: settings.supabase_url.clone(),
+        supabase_key: settings.supabase_key.clone(),
         tools: catalog
             .iter()
             .filter_map(|descriptor| {
@@ -501,6 +531,7 @@ fn default_tool_display_name(name: &str) -> String {
         "TeamStatus" => "Team status".to_string(),
         "TeamStop" => "Team stop".to_string(),
         "SendMessage" => "Send message".to_string(),
+        "SupabaseQuery" => "Supabase query".to_string(),
         "clean_context" => "Clean context".to_string(),
         "update_goal" => "Update goal".to_string(),
         "context_compaction" => "Compact context".to_string(),

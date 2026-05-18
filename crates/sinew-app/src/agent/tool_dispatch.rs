@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     ApplyPatchTool, BashTool, CreateImageTool, GlobTool, GrepTool, McpToolRegistry, QuestionTool,
-    ReadTool, SkillTool, SubAgentTool, TeamTool, ToDoListTool, TodoListState, ToolRunResult,
-    ToolSettings, WebFetchTool, WebSearchTool,
+    ReadTool, SkillTool, SubAgentTool, SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState,
+    ToolRunResult, ToolSettings, WebFetchTool, WebSearchTool,
 };
 
 use super::{context::AgentMode, events::AgentEvent};
@@ -37,6 +37,7 @@ pub(super) async fn run_tool(
     web_search: &WebSearchTool,
     web_fetch: &WebFetchTool,
     skill: &SkillTool,
+    supabase: &SupabaseQueryTool,
     mcp: &McpToolRegistry,
     subagents: Option<&SubAgentTool>,
     teams: Option<&TeamTool>,
@@ -86,6 +87,8 @@ pub(super) async fn run_tool(
         web_search.run(input).await
     } else if name == "WebFetch" {
         web_fetch.run(input).await
+    } else if name == "SupabaseQuery" {
+        supabase.run(input).await
     } else if name == "skill" {
         skill.run(input).await
     } else if name.starts_with("subagent_") {

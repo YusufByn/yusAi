@@ -96,6 +96,10 @@ impl TeamTool {
                 self.workspace_root.clone(),
                 self.skill_settings.clone(),
             )),
+            supabase: Arc::new(SupabaseQueryTool::with_credentials(
+                self.tool_settings.supabase_url(),
+                self.tool_settings.supabase_key(),
+            )),
             mcp: Arc::new(McpToolRegistry::new(self.mcp_settings.clone())),
             subagents: None,
             teams: Some(team_tool),

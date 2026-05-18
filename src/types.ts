@@ -159,6 +159,8 @@ export type ToolSettings = {
   nanoBananaApiKey: string;
   webSearchProvider: WebSearchProvider;
   linkupApiKey: string;
+  supabaseUrl: string;
+  supabaseKey: string;
 };
 
 export type ProviderConnectionState =

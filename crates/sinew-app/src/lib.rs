@@ -12,6 +12,7 @@ mod ripgrep;
 pub mod skill;
 pub mod store;
 pub mod subagent;
+pub mod supabase;
 pub mod team;
 mod text;
 pub mod todo;
@@ -44,6 +45,10 @@ pub use store::{
 };
 pub use subagent::{
     is_subagent_tool_name, subagent_system_prompt, SubAgentConfig, SubAgentSettings, SubAgentTool,
+};
+pub use supabase::{
+    test_supabase_connection, SupabaseQueryTool, SUPABASE_QUERY_TOOL_DEFAULT_DESCRIPTION,
+    SUPABASE_QUERY_TOOL_NAME,
 };
 pub use team::{is_team_tool_name, TeamRuntime, TeamTool};
 pub use todo::{

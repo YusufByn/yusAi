@@ -371,6 +371,13 @@ pub(super) struct SaveToolSettingsInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct TestSupabaseConnectionInput {
+    pub(super) url: String,
+    pub(super) key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct SaveSkillSettingsInput {
     pub(super) workspace_path: String,
     pub(super) settings: SkillSettings,

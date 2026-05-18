@@ -243,6 +243,15 @@ pub(super) async fn save_tool_settings(
 }
 
 #[tauri::command]
+pub(super) async fn test_supabase_connection_command(
+    input: TestSupabaseConnectionInput,
+) -> std::result::Result<String, String> {
+    sinew_app::test_supabase_connection(&input.url, &input.key)
+        .await
+        .map_err(error_to_string)
+}
+
+#[tauri::command]
 pub(super) async fn list_sub_agent_settings(
     state: State<'_, DesktopState>,
 ) -> std::result::Result<SubAgentSettings, String> {

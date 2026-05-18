@@ -173,6 +173,10 @@ pub(super) async fn send_message(
             workspace_root.clone(),
             skill_settings.clone(),
         )),
+        supabase: Arc::new(SupabaseQueryTool::with_credentials(
+            tool_settings.supabase_url(),
+            tool_settings.supabase_key(),
+        )),
         mcp: Arc::new(McpToolRegistry::new(mcp_settings.clone())),
         subagents: Some(Arc::new(SubAgentTool::new(
             workspace_root.clone(),
@@ -1245,6 +1249,7 @@ pub(super) fn tool_descriptors_for_workspace(
         QuestionTool::new().descriptor(),
         WebSearchTool::new().descriptor(),
         WebFetchTool::new().descriptor(),
+        SupabaseQueryTool::new().descriptor(),
     ];
     if let Some(descriptor) =
         SkillTool::with_settings(workspace_root, skill_settings.clone()).descriptor()

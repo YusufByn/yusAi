@@ -52,6 +52,8 @@ const FALLBACK_TOOL_SETTINGS: ToolSettings = {
   nanoBananaApiKey: "",
   webSearchProvider: "classic",
   linkupApiKey: "",
+  supabaseUrl: "",
+  supabaseKey: "",
 };
 const PROVIDERS_CHANGED_EVENT = "sinew:providers-changed";
 const TOOL_SETTINGS_CHANGED_EVENT = "sinew:tool-settings-changed";
@@ -60,7 +62,14 @@ type Props = {
   workspacePath: string;
 };
 
-type Section = "about" | "providers" | "tools" | "mcp" | "skills" | "subagents";
+type Section =
+  | "about"
+  | "providers"
+  | "datasources"
+  | "tools"
+  | "mcp"
+  | "skills"
+  | "subagents";
 
 export function SettingsPane({ workspacePath }: Props) {
   const [section, setSection] = useState<Section>("about");
@@ -299,6 +308,18 @@ export function SettingsPane({ workspacePath }: Props) {
   const updateLinkupApiKey = useCallback((linkupApiKey: string) => {
     setToolSettings((current) =>
       current ? { ...current, linkupApiKey } : current,
+    );
+  }, []);
+
+  const updateSupabaseUrl = useCallback((supabaseUrl: string) => {
+    setToolSettings((current) =>
+      current ? { ...current, supabaseUrl } : current,
+    );
+  }, []);
+
+  const updateSupabaseKey = useCallback((supabaseKey: string) => {
+    setToolSettings((current) =>
+      current ? { ...current, supabaseKey } : current,
     );
   }, []);
 
@@ -1022,6 +1043,23 @@ export function SettingsPane({ workspacePath }: Props) {
         <button
           type="button"
           className="settings-pane__nav-item"
+          data-active={section === "datasources" ? "true" : "false"}
+          onClick={() => setSection("datasources")}
+        >
+          <Icon
+            icon="solar:database-linear"
+            width={15}
+            height={15}
+            className="settings-pane__nav-icon"
+          />
+          <span className="settings-pane__nav-label">Data Sources</span>
+          <span className="settings-pane__nav-count">
+            {toolSettings?.supabaseUrl && toolSettings?.supabaseKey ? 1 : 0}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="settings-pane__nav-item"
           data-active={section === "tools" ? "true" : "false"}
           onClick={() => setSection("tools")}
         >
@@ -1117,6 +1155,17 @@ export function SettingsPane({ workspacePath }: Props) {
             onOpenRouterStatusChange={setOpenRouterStatus}
             onOpenRouterModelsChange={setOpenRouterModels}
             onOpenRouterChanged={handleOpenRouterChanged}
+          />
+        ) : section === "datasources" ? (
+          <DataSourcesSection
+            settings={toolSettings}
+            loading={toolsLoading}
+            saving={toolsSaving}
+            dirty={toolsDirty}
+            status={toolsStatus}
+            onSave={() => void saveToolSettings()}
+            onSupabaseUrlChange={updateSupabaseUrl}
+            onSupabaseKeyChange={updateSupabaseKey}
           />
         ) : section === "tools" ? (
           <ToolsSection
@@ -2251,6 +2300,223 @@ type McpSectionProps = {
   onToggleEnabled: (id: string) => void;
   onMount: OnMount;
 };
+
+type DataSourcesSectionProps = {
+  settings: ToolSettings | null;
+  loading: boolean;
+  saving: boolean;
+  dirty: boolean;
+  status: string | null;
+  onSave: () => void;
+  onSupabaseUrlChange: (value: string) => void;
+  onSupabaseKeyChange: (value: string) => void;
+};
+
+function DataSourcesSection({
+  settings,
+  loading,
+  saving,
+  dirty,
+  status,
+  onSave,
+  onSupabaseUrlChange,
+  onSupabaseKeyChange,
+}: DataSourcesSectionProps) {
+  const supabaseUrl = settings?.supabaseUrl ?? "";
+  const supabaseKey = settings?.supabaseKey ?? "";
+  const [revealKey, setRevealKey] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  const configured = Boolean(supabaseUrl.trim() && supabaseKey.trim());
+
+  const handleTest = useCallback(async () => {
+    if (!supabaseUrl.trim() || !supabaseKey.trim()) {
+      setTestResult({
+        ok: false,
+        message: "Renseigne l'URL et la clé avant de tester.",
+      });
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const message = await api.testSupabaseConnection(
+        supabaseUrl.trim(),
+        supabaseKey.trim(),
+      );
+      setTestResult({ ok: true, message });
+    } catch (err) {
+      setTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setTesting(false);
+    }
+  }, [supabaseUrl, supabaseKey]);
+
+  return (
+    <>
+      <header className="settings-pane__header">
+        <div className="settings-pane__header-text">
+          <h1 className="settings-pane__title">Data Sources</h1>
+          <p className="settings-pane__subtitle">
+            {loading
+              ? "Loading…"
+              : configured
+                ? "Supabase configurée."
+                : "Aucune source configurée."}
+          </p>
+        </div>
+        <div className="settings-pane__actions">
+          {status && (
+            <span
+              className="settings-pane__status"
+              data-tone={
+                status === "Saved" || status === "Deleted" ? "ok" : "error"
+              }
+            >
+              {status}
+            </span>
+          )}
+          <button
+            type="button"
+            className="settings-pane__btn"
+            data-primary="true"
+            onClick={onSave}
+            disabled={loading || saving || !dirty}
+          >
+            <Icon
+              icon={saving ? "solar:refresh-linear" : "solar:diskette-linear"}
+              width={13}
+              height={13}
+            />
+            <span>{saving ? "Saving…" : "Save"}</span>
+          </button>
+        </div>
+      </header>
+
+      <div className="settings-pane__body settings-pane__body--providers">
+        <section className="settings-pane__provider-card">
+          <div className="settings-pane__provider-main">
+            <div className="settings-pane__provider-mark" aria-hidden>
+              <Icon icon="simple-icons:supabase" width={24} height={24} />
+            </div>
+            <div className="settings-pane__provider-copy">
+              <div className="settings-pane__provider-title-row">
+                <h2>Supabase</h2>
+                <span
+                  className="settings-pane__chip"
+                  data-tone={configured ? "ok" : "off"}
+                >
+                  <span className="settings-pane__chip-dot" />
+                  {configured ? "Configurée" : "Non configurée"}
+                </span>
+              </div>
+              <p>
+                Sert l'outil <code>SupabaseQuery</code>. L'URL et la clé sont
+                stockées dans le store local de configuration et ne sont jamais
+                envoyées aux modèles.
+              </p>
+              <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+                <label className="settings-pane__field settings-pane__field--grow">
+                  <span>URL Supabase</span>
+                  <input
+                    type="url"
+                    placeholder="https://xxxxx.supabase.co"
+                    value={supabaseUrl}
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      onSupabaseUrlChange(event.target.value)
+                    }
+                  />
+                </label>
+                <label className="settings-pane__field settings-pane__field--grow">
+                  <span>Clé API Supabase</span>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      alignItems: "stretch",
+                    }}
+                  >
+                    <input
+                      type={revealKey ? "text" : "password"}
+                      placeholder="anon ou service role key"
+                      value={supabaseKey}
+                      autoComplete="off"
+                      spellCheck={false}
+                      style={{ flex: 1 }}
+                      onChange={(event) =>
+                        onSupabaseKeyChange(event.target.value)
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="settings-pane__btn"
+                      onClick={() => setRevealKey((value) => !value)}
+                    >
+                      <Icon
+                        icon={
+                          revealKey
+                            ? "solar:eye-closed-linear"
+                            : "solar:eye-linear"
+                        }
+                        width={13}
+                        height={13}
+                      />
+                      <span>{revealKey ? "Masquer" : "Afficher"}</span>
+                    </button>
+                  </div>
+                </label>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="settings-pane__btn"
+                    onClick={() => void handleTest()}
+                    disabled={testing}
+                  >
+                    <Icon
+                      icon={
+                        testing
+                          ? "solar:refresh-linear"
+                          : "solar:bolt-circle-linear"
+                      }
+                      width={13}
+                      height={13}
+                    />
+                    <span>
+                      {testing ? "Test en cours…" : "Tester la connexion"}
+                    </span>
+                  </button>
+                  {testResult && (
+                    <span
+                      className="settings-pane__status"
+                      data-tone={testResult.ok ? "ok" : "error"}
+                    >
+                      {testResult.message}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </>
+  );
+}
 
 function McpSection({
   loading,
@@ -3430,6 +3696,8 @@ function normalizeToolSettings(settings: ToolSettings): ToolSettings {
     webSearchProvider:
       settings.webSearchProvider === "linkup" ? "linkup" : "classic",
     linkupApiKey: settings.linkupApiKey ?? "",
+    supabaseUrl: settings.supabaseUrl ?? "",
+    supabaseKey: settings.supabaseKey ?? "",
     tools: (settings.tools ?? []).flatMap((tool) => {
       const name = tool.name?.trim();
       if (!name || seen.has(name)) return [];

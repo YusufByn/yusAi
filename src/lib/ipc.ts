@@ -269,6 +269,11 @@ export const api = {
       input: { workspacePath, settings },
     });
   },
+  testSupabaseConnection(url: string, key: string) {
+    return invoke<string>("test_supabase_connection_command", {
+      input: { url, key },
+    });
+  },
   listSubAgentSettings() {
     return invoke<SubAgentSettings>("list_sub_agent_settings");
   },

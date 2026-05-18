@@ -58,6 +58,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
         web_search,
         web_fetch,
         skill,
+        supabase,
         mcp,
         subagents,
         teams,
@@ -104,6 +105,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             clean_context_descriptor(),
             web_search.descriptor(),
             web_fetch.descriptor(),
+            supabase.descriptor(),
         ];
         if let Some(question) = &question {
             tool_descriptors.insert(6, question.descriptor());
@@ -515,6 +517,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                         &web_search,
                         &web_fetch,
                         &skill,
+                        &supabase,
                         &mcp,
                         subagents.as_deref(),
                         teams.as_deref(),
@@ -555,6 +558,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                             &web_search,
                             &web_fetch,
                             &skill,
+                            &supabase,
                             &mcp,
                             subagents.as_deref(),
                             teams.as_deref(),
