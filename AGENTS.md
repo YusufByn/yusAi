@@ -67,6 +67,7 @@ Code map:
 │   │       ├── skill.rs
 │   │       ├── store.rs
 │   │       ├── subagent.rs
+│   │       ├── supabase.rs
 │   │       ├── team.rs
 │   │       ├── team
 │   │       │   ├── agent_turns.rs
