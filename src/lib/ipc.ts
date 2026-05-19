@@ -274,6 +274,16 @@ export const api = {
       input: { url, key },
     });
   },
+  testDatabaseConnection(input: {
+    kind: string;
+    host: string;
+    port: string;
+    user: string;
+    password: string;
+    database: string;
+  }) {
+    return invoke<string>("test_database_connection_command", { input });
+  },
   listSubAgentSettings() {
     return invoke<SubAgentSettings>("list_sub_agent_settings");
   },

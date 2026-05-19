@@ -378,6 +378,21 @@ pub(super) struct TestSupabaseConnectionInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct TestDatabaseConnectionInput {
+    pub(super) kind: String,
+    #[serde(default)]
+    pub(super) host: String,
+    #[serde(default)]
+    pub(super) port: String,
+    #[serde(default)]
+    pub(super) user: String,
+    #[serde(default)]
+    pub(super) password: String,
+    pub(super) database: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct SaveSkillSettingsInput {
     pub(super) workspace_path: String,
     pub(super) settings: SkillSettings,

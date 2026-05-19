@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentMode;
 use crate::bash::active_shell_display_name;
+use crate::database::{DatabaseConfig, DatabaseKind};
 use crate::mcp::McpSettings;
 use crate::skill::SkillSettings;
 use crate::subagent::SubAgentSettings;
@@ -220,6 +221,18 @@ pub struct ToolSettings {
     pub supabase_url: String,
     #[serde(default)]
     pub supabase_key: String,
+    #[serde(default)]
+    pub database_kind: DatabaseKindSetting,
+    #[serde(default)]
+    pub database_host: String,
+    #[serde(default)]
+    pub database_port: String,
+    #[serde(default)]
+    pub database_user: String,
+    #[serde(default)]
+    pub database_password: String,
+    #[serde(default)]
+    pub database_name: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +251,35 @@ pub enum WebSearchProvider {
     #[default]
     #[serde(rename = "classic")]
     Classic,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DatabaseKindSetting {
+    #[default]
+    #[serde(rename = "postgres", alias = "postgresql")]
+    Postgres,
+    #[serde(rename = "mysql", alias = "mariadb")]
+    MySql,
+    #[serde(rename = "sqlite")]
+    Sqlite,
+}
+
+impl DatabaseKindSetting {
+    pub fn to_kind(self) -> DatabaseKind {
+        match self {
+            Self::Postgres => DatabaseKind::Postgres,
+            Self::MySql => DatabaseKind::Mysql,
+            Self::Sqlite => DatabaseKind::Sqlite,
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Postgres => 5432,
+            Self::MySql => 3306,
+            Self::Sqlite => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +310,12 @@ pub struct ToolSettingsView {
     pub linkup_api_key: String,
     pub supabase_url: String,
     pub supabase_key: String,
+    pub database_kind: DatabaseKindSetting,
+    pub database_host: String,
+    pub database_port: String,
+    pub database_user: String,
+    pub database_password: String,
+    pub database_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -325,6 +373,10 @@ impl ToolSettings {
         self.linkup_api_key = self.linkup_api_key.trim().to_string();
         self.supabase_url = self.supabase_url.trim().trim_end_matches('/').to_string();
         self.supabase_key = self.supabase_key.trim().to_string();
+        self.database_host = self.database_host.trim().to_string();
+        self.database_port = self.database_port.trim().to_string();
+        self.database_user = self.database_user.trim().to_string();
+        self.database_name = self.database_name.trim().to_string();
         self.tools = self
             .tools
             .into_iter()
@@ -454,6 +506,50 @@ impl ToolSettings {
     }
 }
 
+impl ToolSettings {
+    /// Build a [`DatabaseConfig`] from the persisted fields, returning `None` if
+    /// the user has not configured enough information to attempt a connection.
+    pub fn database_config(&self) -> Option<DatabaseConfig> {
+        let kind = self.database_kind.to_kind();
+        let host = self.database_host.trim().to_string();
+        let database = self.database_name.trim().to_string();
+        let user = self.database_user.trim().to_string();
+        let password = self.database_password.clone();
+        let port = parse_database_port(&self.database_port)
+            .unwrap_or_else(|| self.database_kind.default_port());
+
+        match kind {
+            DatabaseKind::Sqlite => {
+                if database.is_empty() {
+                    return None;
+                }
+            }
+            DatabaseKind::Postgres | DatabaseKind::Mysql => {
+                if host.is_empty() || database.is_empty() {
+                    return None;
+                }
+            }
+        }
+
+        Some(DatabaseConfig {
+            kind,
+            host,
+            port,
+            user,
+            password,
+            database,
+        })
+    }
+}
+
+pub fn parse_database_port(value: &str) -> Option<u16> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u16>().ok()
+}
+
 fn normalize_plan_mode_prompt(value: &str) -> String {
     let prompt = value.trim();
     if prompt.is_empty() || prompt == DEFAULT_PLAN_MODE_PROMPT.trim() {
@@ -482,6 +578,12 @@ pub fn tool_settings_view(settings: &ToolSettings, catalog: &[ToolDescriptor]) -
         linkup_api_key: settings.linkup_api_key.clone(),
         supabase_url: settings.supabase_url.clone(),
         supabase_key: settings.supabase_key.clone(),
+        database_kind: settings.database_kind,
+        database_host: settings.database_host.clone(),
+        database_port: settings.database_port.clone(),
+        database_user: settings.database_user.clone(),
+        database_password: settings.database_password.clone(),
+        database_name: settings.database_name.clone(),
         tools: catalog
             .iter()
             .filter_map(|descriptor| {

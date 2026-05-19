@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod bash;
 pub mod compact;
+pub mod database;
 pub mod glob;
 pub mod grep;
 pub mod image;
@@ -49,6 +50,10 @@ pub use subagent::{
 pub use supabase::{
     test_supabase_connection, SupabaseQueryTool, SUPABASE_QUERY_TOOL_DEFAULT_DESCRIPTION,
     SUPABASE_QUERY_TOOL_NAME,
+};
+pub use database::{
+    test_database_connection, DatabaseConfig, DatabaseKind, DatabaseQueryTool,
+    DATABASE_QUERY_TOOL_DEFAULT_DESCRIPTION, DATABASE_QUERY_TOOL_NAME,
 };
 pub use team::{is_team_tool_name, TeamRuntime, TeamTool};
 pub use todo::{

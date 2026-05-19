@@ -4,9 +4,9 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
-    ApplyPatchTool, BashTool, CreateImageTool, GlobTool, GrepTool, McpToolRegistry, QuestionTool,
-    ReadTool, SkillTool, SubAgentTool, SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState,
-    ToolRunResult, ToolSettings, WebFetchTool, WebSearchTool,
+    ApplyPatchTool, BashTool, CreateImageTool, DatabaseQueryTool, GlobTool, GrepTool,
+    McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool, SupabaseQueryTool, TeamTool,
+    ToDoListTool, TodoListState, ToolRunResult, ToolSettings, WebFetchTool, WebSearchTool,
 };
 
 use super::{context::AgentMode, events::AgentEvent};
@@ -38,6 +38,7 @@ pub(super) async fn run_tool(
     web_fetch: &WebFetchTool,
     skill: &SkillTool,
     supabase: &SupabaseQueryTool,
+    database: &DatabaseQueryTool,
     mcp: &McpToolRegistry,
     subagents: Option<&SubAgentTool>,
     teams: Option<&TeamTool>,
@@ -89,6 +90,8 @@ pub(super) async fn run_tool(
         web_fetch.run(input).await
     } else if name == "SupabaseQuery" {
         supabase.run(input).await
+    } else if name == "DatabaseQuery" {
+        database.run(input).await
     } else if name == "skill" {
         skill.run(input).await
     } else if name.starts_with("subagent_") {

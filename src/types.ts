@@ -148,6 +148,7 @@ export type ToolConfig = {
 
 export type ImageProvider = "gptImage2" | "nanoBanana2";
 export type WebSearchProvider = "linkup" | "classic";
+export type DatabaseKind = "postgres" | "mysql" | "sqlite";
 
 export type ToolSettings = {
   tools: ToolConfig[];
@@ -161,6 +162,12 @@ export type ToolSettings = {
   linkupApiKey: string;
   supabaseUrl: string;
   supabaseKey: string;
+  databaseKind: DatabaseKind;
+  databaseHost: string;
+  databasePort: string;
+  databaseUser: string;
+  databasePassword: string;
+  databaseName: string;
 };
 
 export type ProviderConnectionState =

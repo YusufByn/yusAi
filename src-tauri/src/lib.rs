@@ -50,6 +50,7 @@ use sinew_app::{
     SubAgentConfig, SubAgentSettings, SubAgentTool, TeamRuntime, TeamTool, TerminalPathResolution,
     ToDoListTool, TodoListState, ToolSettings, ToolSettingsView, TurnCancel, TurnContext,
     SupabaseQueryTool,
+    DatabaseQueryTool,
     WebFetchTool, WebSearchTool, WorkspaceBootstrap, WorkspaceCopyOperation, WorkspaceDeletedEntry,
     WorkspaceFileChangeEvent, WorkspaceSearchResult,
 };
@@ -283,6 +284,7 @@ pub fn run() {
             conversations::list_tool_settings,
             conversations::save_tool_settings,
             conversations::test_supabase_connection_command,
+            conversations::test_database_connection_command,
             conversations::list_sub_agent_settings,
             conversations::save_sub_agent_settings,
             providers::list_configured_model_providers,

@@ -177,6 +177,9 @@ pub(super) async fn send_message(
             tool_settings.supabase_url(),
             tool_settings.supabase_key(),
         )),
+        database: Arc::new(DatabaseQueryTool::with_config(
+            tool_settings.database_config(),
+        )),
         mcp: Arc::new(McpToolRegistry::new(mcp_settings.clone())),
         subagents: Some(Arc::new(SubAgentTool::new(
             workspace_root.clone(),
@@ -1250,6 +1253,7 @@ pub(super) fn tool_descriptors_for_workspace(
         WebSearchTool::new().descriptor(),
         WebFetchTool::new().descriptor(),
         SupabaseQueryTool::new().descriptor(),
+        DatabaseQueryTool::new().descriptor(),
     ];
     if let Some(descriptor) =
         SkillTool::with_settings(workspace_root, skill_settings.clone()).descriptor()

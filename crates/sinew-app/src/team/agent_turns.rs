@@ -100,6 +100,9 @@ impl TeamTool {
                 self.tool_settings.supabase_url(),
                 self.tool_settings.supabase_key(),
             )),
+            database: Arc::new(DatabaseQueryTool::with_config(
+                self.tool_settings.database_config(),
+            )),
             mcp: Arc::new(McpToolRegistry::new(self.mcp_settings.clone())),
             subagents: None,
             teams: Some(team_tool),

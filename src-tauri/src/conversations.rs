@@ -252,6 +252,35 @@ pub(super) async fn test_supabase_connection_command(
 }
 
 #[tauri::command]
+pub(super) async fn test_database_connection_command(
+    input: TestDatabaseConnectionInput,
+) -> std::result::Result<String, String> {
+    let kind = sinew_app::DatabaseKind::parse(&input.kind)
+        .ok_or_else(|| format!("type de base inconnu: {}", input.kind))?;
+    let port = input
+        .port
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .unwrap_or(match kind {
+            sinew_app::DatabaseKind::Postgres => 5432,
+            sinew_app::DatabaseKind::Mysql => 3306,
+            sinew_app::DatabaseKind::Sqlite => 0,
+        });
+    let config = sinew_app::DatabaseConfig {
+        kind,
+        host: input.host.trim().to_string(),
+        port,
+        user: input.user.trim().to_string(),
+        password: input.password,
+        database: input.database.trim().to_string(),
+    };
+    sinew_app::test_database_connection(&config)
+        .await
+        .map_err(error_to_string)
+}
+
+#[tauri::command]
 pub(super) async fn list_sub_agent_settings(
     state: State<'_, DesktopState>,
 ) -> std::result::Result<SubAgentSettings, String> {

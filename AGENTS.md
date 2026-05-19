@@ -56,6 +56,7 @@ Code map:
 │   │       │   └── turn.rs
 │   │       ├── bash.rs
 │   │       ├── compact.rs
+│   │       ├── database.rs
 │   │       ├── glob.rs
 │   │       ├── grep.rs
 │   │       ├── image.rs

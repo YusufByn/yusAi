@@ -367,6 +367,9 @@ pub(super) async fn wake_main_agent_for_swarm_notice(
             tool_settings.supabase_url(),
             tool_settings.supabase_key(),
         )),
+        database: Arc::new(DatabaseQueryTool::with_config(
+            tool_settings.database_config(),
+        )),
         mcp: Arc::new(McpToolRegistry::new(mcp_settings.clone())),
         subagents: Some(Arc::new(SubAgentTool::new(
             workspace_root.clone(),

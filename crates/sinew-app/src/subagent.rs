@@ -8,9 +8,10 @@ use tokio::sync::mpsc;
 use crate::tool_run::FileChange;
 use crate::{
     run_turn, AgentEvent, AgentEventScope, AgentMode, ApplyPatchTool, BashTool, CreateImageTool,
-    GlobTool, GoalWorkflowState, GrepTool, McpSettings, McpToolRegistry, QuestionTool, ReadTool,
-    SkillSettings, SkillTool, SupabaseQueryTool, ToDoListTool, TodoListState, ToolRunResult,
-    ToolSettings, TurnCancel, TurnContext, WebFetchTool, WebSearchTool,
+    DatabaseQueryTool, GlobTool, GoalWorkflowState, GrepTool, McpSettings, McpToolRegistry,
+    QuestionTool, ReadTool, SkillSettings, SkillTool, SupabaseQueryTool, ToDoListTool,
+    TodoListState, ToolRunResult, ToolSettings, TurnCancel, TurnContext, WebFetchTool,
+    WebSearchTool,
 };
 
 const TOOL_PREFIX: &str = "subagent_";
@@ -233,6 +234,9 @@ impl SubAgentTool {
             supabase: Arc::new(SupabaseQueryTool::with_credentials(
                 self.tool_settings.supabase_url(),
                 self.tool_settings.supabase_key(),
+            )),
+            database: Arc::new(DatabaseQueryTool::with_config(
+                self.tool_settings.database_config(),
             )),
             mcp: Arc::new(McpToolRegistry::new(self.mcp_settings.clone())),
             subagents: None,

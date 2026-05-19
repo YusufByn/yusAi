@@ -56,6 +56,12 @@ const FALLBACK_TOOL_SETTINGS: ToolSettings = {
   linkupApiKey: "",
   supabaseUrl: "",
   supabaseKey: "",
+  databaseKind: "postgres",
+  databaseHost: "",
+  databasePort: "",
+  databaseUser: "",
+  databasePassword: "",
+  databaseName: "",
 };
 const PROVIDERS_CHANGED_EVENT = "sinew:providers-changed";
 const TOOL_SETTINGS_CHANGED_EVENT = "sinew:tool-settings-changed";
@@ -322,6 +328,42 @@ export function SettingsPane({ workspacePath }: Props) {
   const updateSupabaseKey = useCallback((supabaseKey: string) => {
     setToolSettings((current) =>
       current ? { ...current, supabaseKey } : current,
+    );
+  }, []);
+
+  const updateDatabaseKind = useCallback((databaseKind: ToolSettings["databaseKind"]) => {
+    setToolSettings((current) =>
+      current ? { ...current, databaseKind } : current,
+    );
+  }, []);
+
+  const updateDatabaseHost = useCallback((databaseHost: string) => {
+    setToolSettings((current) =>
+      current ? { ...current, databaseHost } : current,
+    );
+  }, []);
+
+  const updateDatabasePort = useCallback((databasePort: string) => {
+    setToolSettings((current) =>
+      current ? { ...current, databasePort } : current,
+    );
+  }, []);
+
+  const updateDatabaseUser = useCallback((databaseUser: string) => {
+    setToolSettings((current) =>
+      current ? { ...current, databaseUser } : current,
+    );
+  }, []);
+
+  const updateDatabasePassword = useCallback((databasePassword: string) => {
+    setToolSettings((current) =>
+      current ? { ...current, databasePassword } : current,
+    );
+  }, []);
+
+  const updateDatabaseName = useCallback((databaseName: string) => {
+    setToolSettings((current) =>
+      current ? { ...current, databaseName } : current,
     );
   }, []);
 
@@ -1015,7 +1057,14 @@ export function SettingsPane({ workspacePath }: Props) {
           />
           <span className="settings-pane__nav-label">Data Sources</span>
           <span className="settings-pane__nav-count">
-            {toolSettings?.supabaseUrl && toolSettings?.supabaseKey ? 1 : 0}
+            {(toolSettings?.supabaseUrl && toolSettings?.supabaseKey ? 1 : 0) +
+              (toolSettings &&
+              (toolSettings.databaseKind === "sqlite"
+                ? toolSettings.databaseName?.trim()
+                : toolSettings.databaseHost?.trim() &&
+                  toolSettings.databaseName?.trim())
+                ? 1
+                : 0)}
           </span>
         </button>
         <button
@@ -1127,6 +1176,12 @@ export function SettingsPane({ workspacePath }: Props) {
             onSave={() => void saveToolSettings()}
             onSupabaseUrlChange={updateSupabaseUrl}
             onSupabaseKeyChange={updateSupabaseKey}
+            onDatabaseKindChange={updateDatabaseKind}
+            onDatabaseHostChange={updateDatabaseHost}
+            onDatabasePortChange={updateDatabasePort}
+            onDatabaseUserChange={updateDatabaseUser}
+            onDatabasePasswordChange={updateDatabasePassword}
+            onDatabaseNameChange={updateDatabaseName}
           />
         ) : section === "tools" ? (
           <ToolsSection
@@ -2271,6 +2326,12 @@ type DataSourcesSectionProps = {
   onSave: () => void;
   onSupabaseUrlChange: (value: string) => void;
   onSupabaseKeyChange: (value: string) => void;
+  onDatabaseKindChange: (value: ToolSettings["databaseKind"]) => void;
+  onDatabaseHostChange: (value: string) => void;
+  onDatabasePortChange: (value: string) => void;
+  onDatabaseUserChange: (value: string) => void;
+  onDatabasePasswordChange: (value: string) => void;
+  onDatabaseNameChange: (value: string) => void;
 };
 
 function DataSourcesSection({
@@ -2282,6 +2343,12 @@ function DataSourcesSection({
   onSave,
   onSupabaseUrlChange,
   onSupabaseKeyChange,
+  onDatabaseKindChange,
+  onDatabaseHostChange,
+  onDatabasePortChange,
+  onDatabaseUserChange,
+  onDatabasePasswordChange,
+  onDatabaseNameChange,
 }: DataSourcesSectionProps) {
   const supabaseUrl = settings?.supabaseUrl ?? "";
   const supabaseKey = settings?.supabaseKey ?? "";
@@ -2292,6 +2359,69 @@ function DataSourcesSection({
     message: string;
   } | null>(null);
   const configured = Boolean(supabaseUrl.trim() && supabaseKey.trim());
+
+  const databaseKind = settings?.databaseKind ?? "postgres";
+  const databaseHost = settings?.databaseHost ?? "";
+  const databasePort = settings?.databasePort ?? "";
+  const databaseUser = settings?.databaseUser ?? "";
+  const databasePassword = settings?.databasePassword ?? "";
+  const databaseName = settings?.databaseName ?? "";
+  const [revealDbPassword, setRevealDbPassword] = useState(false);
+  const [dbTesting, setDbTesting] = useState(false);
+  const [dbTestResult, setDbTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  const dbConfigured =
+    databaseKind === "sqlite"
+      ? Boolean(databaseName.trim())
+      : Boolean(databaseHost.trim() && databaseName.trim());
+  const dbPortPlaceholder =
+    databaseKind === "postgres"
+      ? "5432"
+      : databaseKind === "mysql"
+        ? "3306"
+        : "—";
+  const handleDbTest = useCallback(async () => {
+    if (!dbConfigured) {
+      setDbTestResult({
+        ok: false,
+        message:
+          databaseKind === "sqlite"
+            ? "Renseigne le chemin du fichier SQLite avant de tester."
+            : "Renseigne au minimum Host et Database Name avant de tester.",
+      });
+      return;
+    }
+    setDbTesting(true);
+    setDbTestResult(null);
+    try {
+      const message = await api.testDatabaseConnection({
+        kind: databaseKind,
+        host: databaseHost.trim(),
+        port: databasePort.trim(),
+        user: databaseUser.trim(),
+        password: databasePassword,
+        database: databaseName.trim(),
+      });
+      setDbTestResult({ ok: true, message });
+    } catch (err) {
+      setDbTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setDbTesting(false);
+    }
+  }, [
+    dbConfigured,
+    databaseKind,
+    databaseHost,
+    databasePort,
+    databaseUser,
+    databasePassword,
+    databaseName,
+  ]);
 
   const handleTest = useCallback(async () => {
     if (!supabaseUrl.trim() || !supabaseKey.trim()) {
@@ -2327,9 +2457,14 @@ function DataSourcesSection({
           <p className="settings-pane__subtitle">
             {loading
               ? "Loading…"
-              : configured
-                ? "Supabase configurée."
-                : "Aucune source configurée."}
+              : (() => {
+                  const sources: string[] = [];
+                  if (configured) sources.push("Supabase");
+                  if (dbConfigured) sources.push("Database");
+                  return sources.length === 0
+                    ? "Aucune source configurée."
+                    : `${sources.join(" + ")} configurée${sources.length > 1 ? "s" : ""}.`;
+                })()}
           </p>
         </div>
         <div className="settings-pane__actions">
@@ -2467,6 +2602,200 @@ function DataSourcesSection({
                       data-tone={testResult.ok ? "ok" : "error"}
                     >
                       {testResult.message}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section className="settings-pane__provider-card">
+          <div className="settings-pane__provider-main">
+            <div className="settings-pane__provider-mark" aria-hidden>
+              <Icon icon="solar:database-linear" width={24} height={24} />
+            </div>
+            <div className="settings-pane__provider-copy">
+              <div className="settings-pane__provider-title-row">
+                <h2>Database</h2>
+                <span
+                  className="settings-pane__chip"
+                  data-tone={dbConfigured ? "ok" : "off"}
+                >
+                  <span className="settings-pane__chip-dot" />
+                  {dbConfigured ? "Configurée" : "Non configurée"}
+                </span>
+              </div>
+              <p>
+                Sert l'outil <code>DatabaseQuery</code> via le driver natif{" "}
+                <code>sqlx</code> (PostgreSQL, MySQL ou SQLite). Les
+                credentials sont stockés dans le store local de configuration
+                et ne sont jamais envoyés aux modèles. L'outil est en lecture
+                seule : DROP/DELETE/UPDATE sont refusés.
+              </p>
+              <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+                <label className="settings-pane__field settings-pane__field--grow">
+                  <span>Type de base</span>
+                  <select
+                    value={databaseKind}
+                    onChange={(event) =>
+                      onDatabaseKindChange(
+                        event.target.value as ToolSettings["databaseKind"],
+                      )
+                    }
+                  >
+                    <option value="postgres">PostgreSQL</option>
+                    <option value="mysql">MySQL</option>
+                    <option value="sqlite">SQLite</option>
+                  </select>
+                </label>
+                {databaseKind !== "sqlite" && (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "2fr 1fr",
+                      gap: 8,
+                    }}
+                  >
+                    <label className="settings-pane__field settings-pane__field--grow">
+                      <span>Host</span>
+                      <input
+                        type="text"
+                        placeholder="localhost ou db.example.com"
+                        value={databaseHost}
+                        autoComplete="off"
+                        spellCheck={false}
+                        onChange={(event) =>
+                          onDatabaseHostChange(event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="settings-pane__field settings-pane__field--grow">
+                      <span>Port</span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder={dbPortPlaceholder}
+                        value={databasePort}
+                        autoComplete="off"
+                        spellCheck={false}
+                        onChange={(event) =>
+                          onDatabasePortChange(event.target.value)
+                        }
+                      />
+                    </label>
+                  </div>
+                )}
+                {databaseKind !== "sqlite" && (
+                  <label className="settings-pane__field settings-pane__field--grow">
+                    <span>User</span>
+                    <input
+                      type="text"
+                      placeholder={
+                        databaseKind === "postgres" ? "postgres" : "root"
+                      }
+                      value={databaseUser}
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={(event) =>
+                        onDatabaseUserChange(event.target.value)
+                      }
+                    />
+                  </label>
+                )}
+                {databaseKind !== "sqlite" && (
+                  <label className="settings-pane__field settings-pane__field--grow">
+                    <span>Password</span>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 6,
+                        alignItems: "stretch",
+                      }}
+                    >
+                      <input
+                        type={revealDbPassword ? "text" : "password"}
+                        placeholder="••••••••"
+                        value={databasePassword}
+                        autoComplete="off"
+                        spellCheck={false}
+                        style={{ flex: 1 }}
+                        onChange={(event) =>
+                          onDatabasePasswordChange(event.target.value)
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="settings-pane__btn"
+                        onClick={() => setRevealDbPassword((value) => !value)}
+                      >
+                        <Icon
+                          icon={
+                            revealDbPassword
+                              ? "solar:eye-closed-linear"
+                              : "solar:eye-linear"
+                          }
+                          width={13}
+                          height={13}
+                        />
+                        <span>{revealDbPassword ? "Masquer" : "Afficher"}</span>
+                      </button>
+                    </div>
+                  </label>
+                )}
+                <label className="settings-pane__field settings-pane__field--grow">
+                  <span>
+                    {databaseKind === "sqlite"
+                      ? "Chemin du fichier SQLite"
+                      : "Database Name"}
+                  </span>
+                  <input
+                    type="text"
+                    placeholder={
+                      databaseKind === "sqlite"
+                        ? "C:\\chemin\\vers\\base.db ou :memory:"
+                        : "ma_base"
+                    }
+                    value={databaseName}
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      onDatabaseNameChange(event.target.value)
+                    }
+                  />
+                </label>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="settings-pane__btn"
+                    onClick={() => void handleDbTest()}
+                    disabled={dbTesting}
+                  >
+                    <Icon
+                      icon={
+                        dbTesting
+                          ? "solar:refresh-linear"
+                          : "solar:bolt-circle-linear"
+                      }
+                      width={13}
+                      height={13}
+                    />
+                    <span>
+                      {dbTesting ? "Test en cours…" : "Tester la connexion"}
+                    </span>
+                  </button>
+                  {dbTestResult && (
+                    <span
+                      className="settings-pane__status"
+                      data-tone={dbTestResult.ok ? "ok" : "error"}
+                    >
+                      {dbTestResult.message}
                     </span>
                   )}
                 </div>
@@ -3659,6 +3988,15 @@ function normalizeToolSettings(settings: ToolSettings): ToolSettings {
     linkupApiKey: settings.linkupApiKey ?? "",
     supabaseUrl: settings.supabaseUrl ?? "",
     supabaseKey: settings.supabaseKey ?? "",
+    databaseKind:
+      settings.databaseKind === "mysql" || settings.databaseKind === "sqlite"
+        ? settings.databaseKind
+        : "postgres",
+    databaseHost: settings.databaseHost ?? "",
+    databasePort: settings.databasePort ?? "",
+    databaseUser: settings.databaseUser ?? "",
+    databasePassword: settings.databasePassword ?? "",
+    databaseName: settings.databaseName ?? "",
     tools: (settings.tools ?? []).flatMap((tool) => {
       const name = tool.name?.trim();
       if (!name || seen.has(name)) return [];
