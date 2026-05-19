@@ -2084,6 +2084,23 @@ textarea {
   background: var(--bg-5);
 }
 
+/* Danger variant — used by "Déconnecter" actions that clear stored
+   credentials. Two-step confirm: idle is a low-tint pill; pressing it
+   once flips [data-confirm="true"] which deepens the tint so the user
+   sees they're about to commit. */
+.settings-pane__btn[data-danger="true"] {
+  background: var(--danger-tint-10);
+  color: var(--danger);
+}
+.settings-pane__btn[data-danger="true"]:hover {
+  background: var(--danger-tint-18);
+  color: var(--danger);
+}
+.settings-pane__btn[data-danger="true"][data-confirm="true"] {
+  background: var(--danger-tint-22);
+  color: var(--danger);
+}
+
 .settings-pane__btn:disabled {
   opacity: 0.4;
   cursor: default;

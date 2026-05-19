@@ -2382,6 +2382,77 @@ function DataSourcesSection({
       : databaseKind === "mysql"
         ? "3306"
         : "—";
+
+  // Two-step "Déconnecter" confirm. Showing the button at all is gated
+  // on `configured` / `dbConfigured`; the first click flips the flag so
+  // the button morphs into "Confirmer ?", the second click actually
+  // clears the fields. The flag self-resets after 4 s so an abandoned
+  // confirm doesn't linger.
+  const [supabaseConfirmDisconnect, setSupabaseConfirmDisconnect] =
+    useState(false);
+  const [dbConfirmDisconnect, setDbConfirmDisconnect] = useState(false);
+
+  useEffect(() => {
+    if (!supabaseConfirmDisconnect) return;
+    const timer = setTimeout(
+      () => setSupabaseConfirmDisconnect(false),
+      4000,
+    );
+    return () => clearTimeout(timer);
+  }, [supabaseConfirmDisconnect]);
+
+  useEffect(() => {
+    if (!dbConfirmDisconnect) return;
+    const timer = setTimeout(() => setDbConfirmDisconnect(false), 4000);
+    return () => clearTimeout(timer);
+  }, [dbConfirmDisconnect]);
+
+  const handleSupabaseDisconnect = useCallback(() => {
+    if (!supabaseConfirmDisconnect) {
+      setSupabaseConfirmDisconnect(true);
+      return;
+    }
+    // Clear locally — the actual backend wipe happens on the next Save.
+    onSupabaseUrlChange("");
+    onSupabaseKeyChange("");
+    setTestResult({
+      ok: true,
+      message: "Credentials effacés. Clique sur Save pour appliquer.",
+    });
+    setSupabaseConfirmDisconnect(false);
+  }, [
+    supabaseConfirmDisconnect,
+    onSupabaseUrlChange,
+    onSupabaseKeyChange,
+  ]);
+
+  const handleDatabaseDisconnect = useCallback(() => {
+    if (!dbConfirmDisconnect) {
+      setDbConfirmDisconnect(true);
+      return;
+    }
+    // We intentionally leave `databaseKind` untouched so the dropdown
+    // stays on the user's last choice (purely cosmetic — without
+    // host/name the tool is disabled anyway).
+    onDatabaseHostChange("");
+    onDatabasePortChange("");
+    onDatabaseUserChange("");
+    onDatabasePasswordChange("");
+    onDatabaseNameChange("");
+    setDbTestResult({
+      ok: true,
+      message: "Credentials effacés. Clique sur Save pour appliquer.",
+    });
+    setDbConfirmDisconnect(false);
+  }, [
+    dbConfirmDisconnect,
+    onDatabaseHostChange,
+    onDatabasePortChange,
+    onDatabaseUserChange,
+    onDatabasePasswordChange,
+    onDatabaseNameChange,
+  ]);
+
   const handleDbTest = useCallback(async () => {
     if (!dbConfigured) {
       setDbTestResult({
@@ -2596,6 +2667,37 @@ function DataSourcesSection({
                       {testing ? "Test en cours…" : "Tester la connexion"}
                     </span>
                   </button>
+                  {configured && (
+                    <button
+                      type="button"
+                      className="settings-pane__btn"
+                      data-danger="true"
+                      data-confirm={
+                        supabaseConfirmDisconnect ? "true" : "false"
+                      }
+                      onClick={handleSupabaseDisconnect}
+                      title={
+                        supabaseConfirmDisconnect
+                          ? "Cliquer pour confirmer"
+                          : "Vider l'URL et la clé enregistrées"
+                      }
+                    >
+                      <Icon
+                        icon={
+                          supabaseConfirmDisconnect
+                            ? "solar:trash-bin-trash-bold"
+                            : "solar:eraser-linear"
+                        }
+                        width={13}
+                        height={13}
+                      />
+                      <span>
+                        {supabaseConfirmDisconnect
+                          ? "Confirmer ?"
+                          : "Effacer"}
+                      </span>
+                    </button>
+                  )}
                   {testResult && (
                     <span
                       className="settings-pane__status"
@@ -2790,6 +2892,33 @@ function DataSourcesSection({
                       {dbTesting ? "Test en cours…" : "Tester la connexion"}
                     </span>
                   </button>
+                  {dbConfigured && (
+                    <button
+                      type="button"
+                      className="settings-pane__btn"
+                      data-danger="true"
+                      data-confirm={dbConfirmDisconnect ? "true" : "false"}
+                      onClick={handleDatabaseDisconnect}
+                      title={
+                        dbConfirmDisconnect
+                          ? "Cliquer pour confirmer"
+                          : "Vider les credentials enregistrés"
+                      }
+                    >
+                      <Icon
+                        icon={
+                          dbConfirmDisconnect
+                            ? "solar:trash-bin-trash-bold"
+                            : "solar:eraser-linear"
+                        }
+                        width={13}
+                        height={13}
+                      />
+                      <span>
+                        {dbConfirmDisconnect ? "Confirmer ?" : "Effacer"}
+                      </span>
+                    </button>
+                  )}
                   {dbTestResult && (
                     <span
                       className="settings-pane__status"
