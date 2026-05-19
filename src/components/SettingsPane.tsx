@@ -3,6 +3,8 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import { Icon } from "@iconify/react";
 import { Wrench } from "lucide-react";
 import { api } from "../lib/ipc";
+import { loadTheme } from "../lib/theme";
+import { defineSinewThemes, monacoThemeName } from "../lib/monacoTheme";
 import { Markdown } from "./chat/Markdown";
 import { SinewMark } from "./SinewMark";
 import {
@@ -951,49 +953,8 @@ export function SettingsPane({ workspacePath }: Props) {
   }, []);
 
   const handleEditorMount: OnMount = useCallback((editor, monaco) => {
-    monaco.editor.defineTheme("sinew-cool", {
-      base: "vs-dark",
-      inherit: true,
-      rules: [
-        { token: "comment", foreground: "52555c" },
-        { token: "keyword", foreground: "c4b5fd" },
-        { token: "string", foreground: "86efac" },
-        { token: "number", foreground: "f5a683" },
-        { token: "type", foreground: "e8bb6a" },
-        { token: "function", foreground: "9fc2ff" },
-        { token: "variable", foreground: "e8e9ec" },
-        { token: "constant", foreground: "f5a683" },
-        { token: "regexp", foreground: "86efac" },
-        { token: "tag", foreground: "f5a1ab" },
-        { token: "attribute.name", foreground: "c4b5fd" },
-      ],
-      colors: {
-        "editor.background": "#08090b",
-        "editor.foreground": "#e8e9ec",
-        "editor.lineHighlightBackground": "#0f1013",
-        "editorLineNumber.foreground": "#3a3d44",
-        "editorLineNumber.activeForeground": "#9aa0a8",
-        "editorCursor.foreground": "#3b82f6",
-        "editor.selectionBackground": "#1e2b4a",
-        "editor.inactiveSelectionBackground": "#141518",
-        "editorIndentGuide.background1": "#141518",
-        "editorIndentGuide.activeBackground1": "#23252b",
-        "editorGutter.background": "#08090b",
-        "editorWidget.background": "#0f1013",
-        "editorWidget.border": "#23252b",
-        "editorHoverWidget.background": "#0f1013",
-        "editorHoverWidget.border": "#23252b",
-        "editorSuggestWidget.background": "#0f1013",
-        "editorSuggestWidget.border": "#23252b",
-        "editorSuggestWidget.selectedBackground": "#1e2b4a",
-        "editorBracketMatch.background": "#1e2b4a",
-        "editorBracketMatch.border": "#3b82f6",
-        "scrollbarSlider.background": "#23252bcc",
-        "scrollbarSlider.hoverBackground": "#2b2e35cc",
-        "scrollbarSlider.activeBackground": "#3a3d44cc",
-      },
-    });
-    monaco.editor.setTheme("sinew-cool");
+    defineSinewThemes(monaco);
+    monaco.editor.setTheme(monacoThemeName(loadTheme()));
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       void saveAndDetectRef.current();
     });

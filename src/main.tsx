@@ -4,6 +4,12 @@ import App from "./App";
 import "./styles.css";
 import "./lib/customIcons";
 import { api } from "./lib/ipc";
+import { applyTheme, loadTheme } from "./lib/theme";
+
+// Apply the persisted theme *before* React mounts to avoid a flash of
+// the wrong palette (FOUC). The CSS keeps dark as the default on
+// `:root` so even if this somehow runs late nothing looks broken.
+applyTheme(loadTheme());
 
 // Suppress the native WebKit context menu everywhere except inside text
 // inputs (where the OS-level copy/paste menu is still useful). Components

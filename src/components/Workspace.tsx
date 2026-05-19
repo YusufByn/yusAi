@@ -22,6 +22,13 @@ import { ChatPane, type ExternalDropFeed } from "./chat/ChatPane";
 import { SinewMark } from "./SinewMark";
 import { UpdateBadge } from "./UpdateBadge";
 import { WindowControls, isWindowsPlatform } from "./WindowControls";
+import {
+  loadTheme,
+  setTheme as persistTheme,
+  subscribeTheme,
+  toggleTheme,
+  type Theme,
+} from "../lib/theme";
 import type {
   ActiveTurnSummary,
   ActiveTurnsChangedPayload,
@@ -98,6 +105,19 @@ export function Workspace({
   useEffect(() => {
     activeConvIdRef.current = activeConv.id;
   }, [activeConv.id]);
+
+  // Theme toggle (dark / light). The actual palette swap happens via
+  // the `data-theme` attribute on <html>, which `theme.ts` already
+  // pushed to the DOM before React mounted; we only mirror it in
+  // React state so the titlebar icon can react to changes coming from
+  // elsewhere (e.g. a future settings panel toggle).
+  const [theme, setThemeState] = useState<Theme>(() => loadTheme());
+  useEffect(() => subscribeTheme(setThemeState), []);
+  const handleToggleTheme = useCallback(() => {
+    const next = toggleTheme(theme);
+    persistTheme(next);
+    setThemeState(next);
+  }, [theme]);
 
   useEffect(() => {
     workspacePathRef.current = workspacePath;
@@ -1634,6 +1654,31 @@ export function Workspace({
           >
             <Icon icon="solar:settings-linear" width={12} height={12} />
             Settings
+          </button>
+          <button
+            className="titlebar__btn"
+            onClick={handleToggleTheme}
+            title={
+              theme === "dark"
+                ? "Switch to light theme"
+                : "Switch to dark theme"
+            }
+            aria-label={
+              theme === "dark"
+                ? "Switch to light theme"
+                : "Switch to dark theme"
+            }
+          >
+            <Icon
+              icon={
+                theme === "dark"
+                  ? "solar:sun-2-linear"
+                  : "solar:moon-stars-linear"
+              }
+              width={12}
+              height={12}
+            />
+            {theme === "dark" ? "Light" : "Dark"}
           </button>
           <button
             className="titlebar__btn"

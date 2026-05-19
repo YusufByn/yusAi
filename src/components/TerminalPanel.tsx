@@ -15,6 +15,7 @@ import {
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../lib/ipc";
 import type { TerminalDataPayload, TerminalExitPayload } from "../types";
+import { loadTheme, subscribeTheme, type Theme } from "../lib/theme";
 
 type TerminalStatus = "idle" | "starting" | "running" | "exited" | "error";
 
@@ -227,6 +228,16 @@ function TerminalSurface({
   const disposablesRef = useRef<Disposable[]>([]);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const disposedRef = useRef(false);
+  // Re-theme the live xterm instance when the global theme toggles.
+  // xterm exposes `terminal.options.theme` as a setter that triggers
+  // an immediate repaint of the canvas/webgl renderer.
+  useEffect(() => {
+    return subscribeTheme((next) => {
+      const term = terminalRef.current;
+      if (!term) return;
+      term.options.theme = terminalTheme(next);
+    });
+  }, []);
   // Latest path-click handler kept in a ref so the link provider sees
   // updates without having to re-register every time the parent re-renders.
   const onOpenTerminalPathRef = useRef(onOpenTerminalPath);
@@ -520,31 +531,60 @@ function createTerminalToken(sessionId: string): string {
   return `${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function terminalTheme() {
+function terminalTheme(theme: Theme = loadTheme()) {
   const root = getComputedStyle(document.documentElement);
   const css = (name: string, fallback: string) =>
     root.getPropertyValue(name).trim() || fallback;
+
+  // ANSI 16-color palette varies per theme: bright tints that read
+  // well on near-black would be invisible on white, so we keep two
+  // hand-picked palettes. The shared (--bg-0, --text-*, --accent, …)
+  // values come from CSS vars and therefore auto-adapt.
+  const ansi =
+    theme === "dark"
+      ? {
+          selectionBackground: "rgba(232, 233, 236, 0.18)",
+          black: "#111318",
+          yellow: "#f5d36b",
+          cyan: "#67e8f9",
+          brightRed: "#ff8a94",
+          brightGreen: "#86efac",
+          brightYellow: "#fde68a",
+          brightMagenta: "#ddd6fe",
+          brightCyan: "#a5f3fc",
+        }
+      : {
+          selectionBackground: "rgba(20, 22, 26, 0.14)",
+          black: "#1a1c1f",
+          yellow: "#a16207",
+          cyan: "#0e7490",
+          brightRed: "#dc2626",
+          brightGreen: "#16a34a",
+          brightYellow: "#ca8a04",
+          brightMagenta: "#8b5cf6",
+          brightCyan: "#06b6d4",
+        };
 
   return {
     background: css("--bg-0", "#0b0b0d"),
     foreground: css("--editor-fg", "#e8e9ec"),
     cursor: css("--text-0", "#e8e9ec"),
-    selectionBackground: "rgba(232, 233, 236, 0.18)",
-    black: "#111318",
+    selectionBackground: ansi.selectionBackground,
+    black: ansi.black,
     red: css("--danger", "#f5737f"),
     green: css("--ok", "#22c55e"),
-    yellow: "#f5d36b",
+    yellow: ansi.yellow,
     blue: css("--accent", "#3b82f6"),
     magenta: css("--accent-2", "#c4b5fd"),
-    cyan: "#67e8f9",
+    cyan: ansi.cyan,
     white: css("--text-1", "#d2d4d9"),
     brightBlack: css("--text-3", "#6b6f78"),
-    brightRed: "#ff8a94",
-    brightGreen: "#86efac",
-    brightYellow: "#fde68a",
+    brightRed: ansi.brightRed,
+    brightGreen: ansi.brightGreen,
+    brightYellow: ansi.brightYellow,
     brightBlue: css("--accent-hi", "#5b8cff"),
-    brightMagenta: "#ddd6fe",
-    brightCyan: "#a5f3fc",
+    brightMagenta: ansi.brightMagenta,
+    brightCyan: ansi.brightCyan,
     brightWhite: css("--text-0", "#e8e9ec"),
   };
 }
