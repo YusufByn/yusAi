@@ -624,6 +624,7 @@ fn default_tool_display_name(name: &str) -> String {
         "Grep" => "Grep".to_string(),
         "WebSearch" => "Web search".to_string(),
         "WebFetch" => "Web fetch".to_string(),
+        "HttpRequest" => "HTTP request".to_string(),
         "CreateImage" => "Create image".to_string(),
         "Question" => "Question".to_string(),
         "ToDoList" => "To-do list".to_string(),

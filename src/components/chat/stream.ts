@@ -1073,6 +1073,16 @@ function summaryFromInput(
     if (typeof record.url === "string" && record.url.trim()) return `Fetch ${record.url.trim()}`;
     return "Fetch URL";
   }
+  if (name === "HttpRequest" && input && typeof input === "object") {
+    const record = input as Record<string, unknown>;
+    const method =
+      typeof record.method === "string" && record.method.trim()
+        ? record.method.trim().toUpperCase()
+        : "GET";
+    const url = typeof record.url === "string" ? record.url.trim() : "";
+    if (url) return `${method} ${url}`;
+    return `${method} request`;
+  }
   try {
     const s = JSON.stringify(input);
     if (s.length <= 72) return s;
@@ -1139,6 +1149,7 @@ function pendingSummary(name: string): string | undefined {
   if (name === "skill") return "Loading skill";
   if (name === "WebSearch") return "Preparing web search";
   if (name === "WebFetch") return "Preparing web fetch";
+  if (name === "HttpRequest") return "Preparing HTTP request";
   if (name === "CreateImage") return "Creating image";
   if (name.startsWith("subagent_")) return "Starting sub-agent";
   if (name === "TeamRun") return "Starting Agent Swarm";

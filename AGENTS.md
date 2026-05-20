@@ -16,6 +16,10 @@ Code map:
 ├── tsconfig.json
 ├── tsconfig.node.json
 ├── vite.config.ts
+├── .agents
+│   └── skills
+│       └── upstream-sync
+│           └── SKILL.md
 ├── .github
 │   ├── assets
 │   │   ├── architecture.png
@@ -235,6 +239,7 @@ Code map:
     ├── styles.css
     ├── types.ts
     ├── vite-env.d.ts
+    ├── branding.ts
     ├── components
     │   ├── ConversationList.tsx
     │   ├── EditorPane.tsx

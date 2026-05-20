@@ -6,8 +6,9 @@ use sinew_core::{ChatMessage, Provider};
 
 use crate::{
     ApplyPatchTool, BashTool, CreateImageTool, DatabaseQueryTool, GlobTool, GoalWorkflowState,
-    GrepTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool, SupabaseQueryTool,
-    TeamTool, ToDoListTool, TodoListState, ToolSettings, WebFetchTool, WebSearchTool,
+    GrepTool, HttpRequestTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool,
+    SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolSettings, WebFetchTool,
+    WebSearchTool,
 };
 
 use super::{
@@ -45,6 +46,7 @@ pub struct TurnContext {
     pub question: Option<Arc<QuestionTool>>,
     pub web_search: Arc<WebSearchTool>,
     pub web_fetch: Arc<WebFetchTool>,
+    pub http: Arc<HttpRequestTool>,
     pub skill: Arc<SkillTool>,
     pub supabase: Arc<SupabaseQueryTool>,
     pub database: Arc<DatabaseQueryTool>,

@@ -359,6 +359,7 @@ pub(super) async fn wake_main_agent_for_swarm_notice(
             tool_settings.linkup_api_key(),
         )),
         web_fetch: Arc::new(WebFetchTool::new()),
+        http: Arc::new(HttpRequestTool::new()),
         skill: Arc::new(SkillTool::with_settings(
             workspace_root.clone(),
             skill_settings.clone(),

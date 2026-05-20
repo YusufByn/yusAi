@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 use crate::tool_run::FileChange;
 use crate::{
     run_turn, AgentEvent, AgentEventScope, AgentMode, ApplyPatchTool, BashTool, CreateImageTool,
-    DatabaseQueryTool, GlobTool, GoalWorkflowState, GrepTool, McpSettings, McpToolRegistry,
+    DatabaseQueryTool, GlobTool, GoalWorkflowState, GrepTool, HttpRequestTool, McpSettings,
+    McpToolRegistry,
     QuestionTool, ReadTool, SkillSettings, SkillTool, SupabaseQueryTool, ToDoListTool,
     TodoListState, ToolRunResult, ToolSettings, TurnCancel, TurnContext, WebFetchTool,
     WebSearchTool,
@@ -227,6 +228,7 @@ impl SubAgentTool {
                 self.tool_settings.linkup_api_key(),
             )),
             web_fetch: Arc::new(WebFetchTool::new()),
+            http: Arc::new(HttpRequestTool::new()),
             skill: Arc::new(SkillTool::with_settings(
                 self.workspace_root.clone(),
                 self.skill_settings.clone(),

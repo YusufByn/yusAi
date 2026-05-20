@@ -173,6 +173,7 @@ pub(super) async fn send_message(
             tool_settings.linkup_api_key(),
         )),
         web_fetch: Arc::new(WebFetchTool::new()),
+        http: Arc::new(HttpRequestTool::new()),
         skill: Arc::new(SkillTool::with_settings(
             workspace_root.clone(),
             skill_settings.clone(),
@@ -1398,6 +1399,7 @@ pub(super) fn tool_descriptors_for_workspace(
         QuestionTool::new().descriptor(),
         WebSearchTool::new().descriptor(),
         WebFetchTool::new().descriptor(),
+        HttpRequestTool::new().descriptor(),
         SupabaseQueryTool::new().descriptor(),
         DatabaseQueryTool::new().descriptor(),
     ];

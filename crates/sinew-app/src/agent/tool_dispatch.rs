@@ -5,8 +5,9 @@ use tokio::sync::mpsc;
 
 use crate::{
     ApplyPatchTool, BashTool, CreateImageTool, DatabaseQueryTool, GlobTool, GrepTool,
-    McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool, SupabaseQueryTool, TeamTool,
-    ToDoListTool, TodoListState, ToolRunResult, ToolSettings, WebFetchTool, WebSearchTool,
+    HttpRequestTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool,
+    SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolRunResult, ToolSettings,
+    WebFetchTool, WebSearchTool,
 };
 
 use super::{cancel::TurnCancel, context::AgentMode, events::AgentEvent};
@@ -36,6 +37,7 @@ pub(super) async fn run_tool(
     question: Option<&QuestionTool>,
     web_search: &WebSearchTool,
     web_fetch: &WebFetchTool,
+    http: &HttpRequestTool,
     skill: &SkillTool,
     supabase: &SupabaseQueryTool,
     database: &DatabaseQueryTool,
@@ -89,6 +91,8 @@ pub(super) async fn run_tool(
         web_search.run(input).await
     } else if name == "WebFetch" {
         web_fetch.run(input).await
+    } else if name == "HttpRequest" {
+        http.run(input).await
     } else if name == "SupabaseQuery" {
         supabase.run(input).await
     } else if name == "DatabaseQuery" {
