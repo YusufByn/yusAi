@@ -62,6 +62,7 @@ Code map:
 │   │       ├── database.rs
 │   │       ├── glob.rs
 │   │       ├── grep.rs
+│   │       ├── http.rs
 │   │       ├── image.rs
 │   │       ├── lib.rs
 │   │       ├── mcp.rs
