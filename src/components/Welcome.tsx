@@ -10,6 +10,7 @@ import type {
   RecentWorkspace,
 } from "../types";
 import { SinewMark } from "./SinewMark";
+import { APP_NAME } from "../branding";
 import { WindowControls, isWindowsPlatform } from "./WindowControls";
 
 type Props = {
@@ -114,7 +115,7 @@ export function Welcome({ onPick, error, deriveName }: Props) {
             </span>
           </span>
           <h1 className="welcome__title">
-            Sinew<span className="welcome__title-dot">.</span>
+            {APP_NAME}<span className="welcome__title-dot">.</span>
           </h1>
           <p className="welcome__tag">Your personal Agentic IDE</p>
         </header>

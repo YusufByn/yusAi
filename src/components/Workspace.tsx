@@ -20,6 +20,7 @@ import { TerminalPanel } from "./TerminalPanel";
 import { SearchPane } from "./SearchPane";
 import { ChatPane, type ExternalDropFeed } from "./chat/ChatPane";
 import { SinewMark } from "./SinewMark";
+import { APP_NAME } from "../branding";
 import { UpdateBadge } from "./UpdateBadge";
 import { WindowControls, isWindowsPlatform } from "./WindowControls";
 import {
@@ -1693,7 +1694,7 @@ export function Workspace({
           <span className="titlebar__brand-mark">
             <SinewMark size={11} />
           </span>
-          <span className="titlebar__brand-name">Sinew</span>
+          <span className="titlebar__brand-name">{APP_NAME}</span>
         </div>
         <UpdateBadge />
         <WindowControls />

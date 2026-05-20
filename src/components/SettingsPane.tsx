@@ -7,6 +7,7 @@ import { loadTheme } from "../lib/theme";
 import { defineSinewThemes, monacoThemeName } from "../lib/monacoTheme";
 import { Markdown } from "./chat/Markdown";
 import { SinewMark } from "./SinewMark";
+import { APP_NAME } from "../branding";
 import {
   MODELS,
   PROVIDERS,
@@ -1272,12 +1273,12 @@ function AboutSection() {
           <SinewMark size={26} />
         </span>
         <div className="settings-pane__about-title">
-          <h1>Sinew</h1>
+          <h1>{APP_NAME}</h1>
         </div>
       </div>
 
       <p className="settings-pane__about-line">
-        Sinew is a flexible AI coding harness. You shape it: tweak the description of
+        {APP_NAME} is a flexible AI coding harness. You shape it: tweak the description of
         every tool, turn the ones you don&apos;t need off, and the assistant only sees
         what you keep.
       </p>
@@ -1375,7 +1376,7 @@ function ProvidersSection({
         <div className="settings-pane__header-text">
           <h1 className="settings-pane__title">Providers</h1>
           <p className="settings-pane__subtitle">
-            Connect model providers for Sinew.
+            Connect model providers for {APP_NAME}.
           </p>
         </div>
         <div className="settings-pane__actions">

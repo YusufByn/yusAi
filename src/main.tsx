@@ -5,6 +5,19 @@ import "./styles.css";
 import "./lib/customIcons";
 import { api } from "./lib/ipc";
 import { applyTheme, loadTheme } from "./lib/theme";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { APP_NAME } from "./branding";
+
+// Override the native window title set by Tauri (productName = "Sinew" upstream)
+// so the OS chrome (taskbar entry, Alt-Tab, …) reflects our fork name.
+// This is purely cosmetic and runs once per window. Done via JS instead of
+// changing tauri.conf.json to avoid touching the back-end identifier — that
+// keeps merges from the upstream repo (Paseru/sinew) clean.
+void getCurrentWindow()
+  .setTitle(APP_NAME)
+  .catch(() => {
+    /* non-Tauri context (e.g. vite preview) — ignore */
+  });
 
 // Apply the persisted theme *before* React mounts to avoid a flash of
 // the wrong palette (FOUC). The CSS keeps dark as the default on
