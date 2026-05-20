@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use futures_util::StreamExt;
+use rand::Rng;
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -32,7 +33,7 @@ use super::{
 
 use crate::{system_prompt_with_todo, ToolRunResult};
 
-const SAFE_STREAM_MAX_RETRIES: usize = 2;
+const SAFE_STREAM_MAX_RETRIES: usize = 5;
 
 pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
     let TurnContext {
@@ -42,7 +43,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
         mut cache_stable_message_count,
         auto_compact,
         mode,
-        stop_questions,
+        mut stop_questions,
         system_prompt,
         mut history,
         mut todo_list,
@@ -67,7 +68,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
         event_scope,
         max_tool_rounds,
         event_tx,
-        cancel: _cancel,
+        cancel,
         mut cmd_rx,
     } = ctx;
 
@@ -78,6 +79,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
     mcp.refresh_catalog(&history).await;
 
     let mut cancelled = false;
+    let mut compacted = false;
     let mut loops = 0usize;
     let mut auto_compaction_attempts = 0usize;
     let mut current_turn_tool_result_ids = BTreeSet::new();
@@ -166,7 +168,10 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             )
             .await
             {
-                Ok(true) => continue,
+                Ok(true) => {
+                    compacted = true;
+                    continue;
+                }
                 Ok(false) => {}
                 Err(err) => {
                     send_event(
@@ -195,14 +200,14 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             let mut stream = match provider.stream(request.clone()).await {
                 Ok(stream) => stream,
                 Err(err) => {
-                    if should_retry_before_content(&err, stream_retry_attempts) {
+                    if should_retry_stream(&err, stream_retry_attempts) {
                         stream_retry_attempts += 1;
                         tracing::warn!(
                             provider = provider.name(),
                             attempt = stream_retry_attempts,
                             max_attempts = SAFE_STREAM_MAX_RETRIES,
                             error = %err,
-                            "retrying provider stream setup before content"
+                            "retrying provider stream setup"
                         );
                         tokio::time::sleep(stream_retry_delay(stream_retry_attempts)).await;
                         continue 'stream_attempt;
@@ -227,7 +232,10 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                         )
                         .await
                         {
-                            Ok(()) => continue 'conversation,
+                            Ok(()) => {
+                                compacted = true;
+                                continue 'conversation;
+                            }
                             Err(compaction_err) => {
                                 send_event(
                                     &event_tx,
@@ -386,17 +394,14 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             }
 
             if let Some(err) = stream_error {
-                if message_builder.is_empty()
-                    && response_usage.is_none()
-                    && should_retry_before_content(&err, stream_retry_attempts)
-                {
+                if should_retry_stream(&err, stream_retry_attempts) {
                     stream_retry_attempts += 1;
                     tracing::warn!(
                         provider = provider.name(),
                         attempt = stream_retry_attempts,
                         max_attempts = SAFE_STREAM_MAX_RETRIES,
                         error = %err,
-                        "retrying provider stream before content"
+                        "retrying provider stream"
                     );
                     tokio::time::sleep(stream_retry_delay(stream_retry_attempts)).await;
                     continue 'stream_attempt;
@@ -422,7 +427,10 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                     )
                     .await
                     {
-                        Ok(()) => continue 'conversation,
+                        Ok(()) => {
+                            compacted = true;
+                            continue 'conversation;
+                        }
                         Err(compaction_err) => {
                             send_event(
                                 &event_tx,
@@ -529,6 +537,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                         &mut todo_list,
                         mode,
                         &event_tx,
+                        &cancel,
                         id,
                         name,
                         input.clone(),
@@ -571,6 +580,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                             &mut todo_list,
                             mode,
                             &event_tx,
+                            &cancel,
                             id,
                             name,
                             input.clone(),
@@ -603,6 +613,12 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                         meta.insert(key, value);
                     }
                 }
+                let stop_after_question = name == "Question"
+                    && meta
+                        .get("question_stop_requested")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    && mode == AgentMode::Plan;
                 let result_meta = (!meta.is_empty()).then_some(Value::Object(meta));
                 send_event(
                     &event_tx,
@@ -640,6 +656,9 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                 if cancelled {
                     break;
                 }
+                if stop_after_question {
+                    break;
+                }
             }
         }
 
@@ -651,6 +670,13 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             break;
         }
 
+        let stop_after_question_result = tool_results.iter().any(|part| {
+            matches!(part, Part::ToolResult { meta: Some(Value::Object(meta)), .. }
+                if meta
+                    .get("question_stop_requested")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false))
+        }) && mode == AgentMode::Plan;
         history.push(ChatMessage {
             role: Role::User,
             parts: tool_results,
@@ -658,8 +684,16 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
         if cancelled {
             break 'conversation;
         }
-        if mode == AgentMode::Plan && !stop_questions && assistant_has_question_tool(&assistant) {
-            break;
+        if stop_after_question_result {
+            stop_questions = true;
+            history.push(ChatMessage {
+                role: Role::User,
+                parts: vec![Part::Text {
+                    text: "\n\n<plan_mode_control action=\"stop_questions\">\nThe user clicked Send and stop questions. Do not ask more questions in this turn. Produce the complete Markdown plan now and do not implement it.\n</plan_mode_control>".to_string(),
+                    meta: Some(json!({ "plan_control": "stop_questions" })),
+                }],
+            });
+            continue 'conversation;
         }
     }
 
@@ -673,6 +707,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
         todo_list,
         goal_workflow,
         interrupted: cancelled,
+        compacted,
     }
 }
 
@@ -683,20 +718,22 @@ pub(super) fn retain_cancelled_visible_parts(message: &mut ChatMessage) {
     });
 }
 
-fn should_retry_before_content(err: &AppError, attempts: usize) -> bool {
+fn should_retry_stream(err: &AppError, attempts: usize) -> bool {
     attempts < SAFE_STREAM_MAX_RETRIES
         && matches!(
             err,
-            AppError::Network(_) | AppError::Stream(_) | AppError::Decode(_)
+            AppError::Network(_)
+                | AppError::Stream(_)
+                | AppError::Decode(_)
+                | AppError::RetryableStream { .. }
         )
 }
 
 fn stream_retry_delay(attempt: usize) -> Duration {
-    Duration::from_millis(match attempt {
-        0 | 1 => 750,
-        2 => 1_500,
-        _ => 3_000,
-    })
+    let exponent = attempt.saturating_sub(1).min(8) as u32;
+    let base_ms = 200u64.saturating_mul(2u64.saturating_pow(exponent));
+    let jitter = rand::rng().random_range(0.9..1.1);
+    Duration::from_millis((base_ms as f64 * jitter) as u64)
 }
 
 fn append_plan_fallback_question(
