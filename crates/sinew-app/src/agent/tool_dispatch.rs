@@ -1,13 +1,19 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
+<<<<<<< HEAD
     ApplyPatchTool, BashTool, CreateImageTool, DatabaseQueryTool, GlobTool, GrepTool,
     HttpRequestTool, LogsTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool,
     SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolRunResult, ToolSettings,
     WebFetchTool, WebSearchTool, LOGS_LIST_TOOL, LOGS_START_TOOL, LOGS_STOP_TOOL, LOGS_TAIL_TOOL,
+=======
+    BashTool, CreateImageTool, EditFileTool, GlobTool, GrepTool, McpToolRegistry, QuestionTool,
+    ReadFingerprint, ReadTool, SkillTool, SubAgentTool, TeamTool, ToDoListTool,
+    TodoListState, ToolRunResult, ToolSettings, WebFetchTool, WebSearchTool, WriteFileTool,
+>>>>>>> upstream/main
 };
 
 use super::{cancel::TurnCancel, context::AgentMode, events::AgentEvent};
@@ -31,7 +37,8 @@ pub(super) async fn run_tool(
     glob: &GlobTool,
     grep: &GrepTool,
     read: &ReadTool,
-    apply_patch: &ApplyPatchTool,
+    edit_file: &EditFileTool,
+    write_file: &WriteFileTool,
     create_image: &CreateImageTool,
     todo_list_tool: Option<&ToDoListTool>,
     question: Option<&QuestionTool>,
@@ -46,7 +53,7 @@ pub(super) async fn run_tool(
     subagents: Option<&SubAgentTool>,
     teams: Option<&TeamTool>,
     tool_settings: &ToolSettings,
-    _read_paths: &BTreeSet<String>,
+    read_fingerprints: &HashMap<String, ReadFingerprint>,
     todo_list: &mut TodoListState,
     mode: AgentMode,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
@@ -68,11 +75,16 @@ pub(super) async fn run_tool(
         grep.run(input).await
     } else if name == "read" {
         read.run(input).await
-    } else if name == "apply_patch" {
+    } else if name == "edit_file" {
         if mode == AgentMode::Plan {
-            return ToolRunResult::err("apply_patch is unavailable in Plan mode", Vec::new());
+            return ToolRunResult::err("edit_file is unavailable in Plan mode", Vec::new());
         }
-        apply_patch.run_with_read_paths(input).await
+        edit_file.run(input, read_fingerprints).await
+    } else if name == "write_file" {
+        if mode == AgentMode::Plan {
+            return ToolRunResult::err("write_file is unavailable in Plan mode", Vec::new());
+        }
+        write_file.run(input, read_fingerprints).await
     } else if name == "CreateImage" {
         if mode == AgentMode::Plan {
             return ToolRunResult::err("CreateImage is unavailable in Plan mode", Vec::new());

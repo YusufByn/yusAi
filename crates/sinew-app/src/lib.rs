@@ -1,14 +1,17 @@
 pub mod agent;
 pub mod bash;
 pub mod compact;
+<<<<<<< HEAD
 pub mod database;
+=======
+pub mod edit;
+>>>>>>> upstream/main
 pub mod glob;
 pub mod grep;
 pub mod http;
 pub mod image;
 pub mod logs;
 pub mod mcp;
-pub mod patch;
 pub mod question;
 pub mod read;
 mod ripgrep;
@@ -21,6 +24,7 @@ mod text;
 pub mod todo;
 pub mod tool_run;
 pub mod web;
+pub mod write;
 pub mod workspace;
 
 pub use agent::{
@@ -30,6 +34,7 @@ pub use agent::{
 };
 pub use bash::{active_shell_display_name, shell_system_prompt, BashTool};
 pub use compact::{compact_conversation_history, CompactConversationOutput};
+pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::{HttpRequestTool, HTTP_REQUEST_TOOL_NAME};
@@ -39,11 +44,11 @@ pub use logs::{
     LOGS_STOP_TOOL, LOGS_TAIL_TOOL,
 };
 pub use mcp::{probe_mcp_servers, McpServerProbe, McpSettings, McpToolRegistry};
-pub use patch::ApplyPatchTool;
 pub use question::QuestionTool;
-pub use read::ReadTool;
+pub use read::{ReadFingerprint, ReadTool};
 pub use skill::{
-    list_installed_skills, InstalledSkill, SkillConfig, SkillSettings, SkillSource, SkillTool,
+    create_installed_skill, list_installed_skills, InstalledSkill, SkillConfig, SkillSettings,
+    SkillSource, SkillTool,
 };
 pub use store::{
     tool_settings_view, AppStore, ConversationSummary, GoalWorkflowState, ModeModelSettings,
@@ -72,6 +77,7 @@ pub use tool_run::{
     DiffLine, DiffLineKind, FileChange, FileChangeKind, ToolRunResult, TurnCheckpoint,
 };
 pub use web::{WebFetchTool, WebSearchTool};
+pub use write::WriteFileTool;
 pub use workspace::{
     copy_workspace_entries, create_workspace_directory, create_workspace_file,
     delete_workspace_entry, import_workspace_paths, list_workspace_entries, list_workspace_files,
