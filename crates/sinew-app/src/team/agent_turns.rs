@@ -93,6 +93,7 @@ impl TeamTool {
             )),
             web_fetch: Arc::new(WebFetchTool::new()),
             http: Arc::new(HttpRequestTool::new()),
+            logs: Arc::new(LogsTool::new(self.workspace_root.clone())),
             skill: Arc::new(SkillTool::with_settings(
                 self.workspace_root.clone(),
                 self.skill_settings.clone(),

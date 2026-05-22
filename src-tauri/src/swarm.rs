@@ -360,6 +360,7 @@ pub(super) async fn wake_main_agent_for_swarm_notice(
         )),
         web_fetch: Arc::new(WebFetchTool::new()),
         http: Arc::new(HttpRequestTool::new()),
+        logs: Arc::new(LogsTool::new(workspace_root.clone())),
         skill: Arc::new(SkillTool::with_settings(
             workspace_root.clone(),
             skill_settings.clone(),

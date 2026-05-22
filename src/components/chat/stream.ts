@@ -1083,6 +1083,24 @@ function summaryFromInput(
     if (url) return `${method} ${url}`;
     return `${method} request`;
   }
+  if (name === "logs_start" && input && typeof input === "object") {
+    const record = input as Record<string, unknown>;
+    const cmd = typeof record.command === "string" ? record.command.trim() : "";
+    if (cmd) return `Start logs: ${cmd}`;
+    return "Start logs";
+  }
+  if (name === "logs_tail" && input && typeof input === "object") {
+    const record = input as Record<string, unknown>;
+    const n = typeof record.name === "string" ? record.name.trim() : "";
+    if (n) return `Tail logs: ${n}`;
+    return "Tail logs";
+  }
+  if (name === "logs_stop" && input && typeof input === "object") {
+    const record = input as Record<string, unknown>;
+    const n = typeof record.name === "string" ? record.name.trim() : "";
+    if (n) return `Stop logs: ${n}`;
+    return "Stop logs";
+  }
   try {
     const s = JSON.stringify(input);
     if (s.length <= 72) return s;
@@ -1150,6 +1168,10 @@ function pendingSummary(name: string): string | undefined {
   if (name === "WebSearch") return "Preparing web search";
   if (name === "WebFetch") return "Preparing web fetch";
   if (name === "HttpRequest") return "Preparing HTTP request";
+  if (name === "logs_start") return "Starting background process";
+  if (name === "logs_tail") return "Reading process logs";
+  if (name === "logs_list") return "Listing background processes";
+  if (name === "logs_stop") return "Stopping background process";
   if (name === "CreateImage") return "Creating image";
   if (name.startsWith("subagent_")) return "Starting sub-agent";
   if (name === "TeamRun") return "Starting Agent Swarm";

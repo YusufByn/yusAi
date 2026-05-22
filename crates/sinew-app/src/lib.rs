@@ -6,6 +6,7 @@ pub mod glob;
 pub mod grep;
 pub mod http;
 pub mod image;
+pub mod logs;
 pub mod mcp;
 pub mod patch;
 pub mod question;
@@ -33,6 +34,10 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::{HttpRequestTool, HTTP_REQUEST_TOOL_NAME};
 pub use image::CreateImageTool;
+pub use logs::{
+    AttachedLogLine, LogRegistry, LogsTool, ProcessLogSnapshot, LOGS_LIST_TOOL, LOGS_START_TOOL,
+    LOGS_STOP_TOOL, LOGS_TAIL_TOOL,
+};
 pub use mcp::{probe_mcp_servers, McpServerProbe, McpSettings, McpToolRegistry};
 pub use patch::ApplyPatchTool;
 pub use question::QuestionTool;

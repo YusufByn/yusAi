@@ -65,6 +65,7 @@ Code map:
 │   │       ├── http.rs
 │   │       ├── image.rs
 │   │       ├── lib.rs
+│   │       ├── logs.rs
 │   │       ├── mcp.rs
 │   │       ├── patch.rs
 │   │       ├── question.rs

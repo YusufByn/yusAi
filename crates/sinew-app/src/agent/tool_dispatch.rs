@@ -5,9 +5,9 @@ use tokio::sync::mpsc;
 
 use crate::{
     ApplyPatchTool, BashTool, CreateImageTool, DatabaseQueryTool, GlobTool, GrepTool,
-    HttpRequestTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool,
+    HttpRequestTool, LogsTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool,
     SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolRunResult, ToolSettings,
-    WebFetchTool, WebSearchTool,
+    WebFetchTool, WebSearchTool, LOGS_LIST_TOOL, LOGS_START_TOOL, LOGS_STOP_TOOL, LOGS_TAIL_TOOL,
 };
 
 use super::{cancel::TurnCancel, context::AgentMode, events::AgentEvent};
@@ -38,6 +38,7 @@ pub(super) async fn run_tool(
     web_search: &WebSearchTool,
     web_fetch: &WebFetchTool,
     http: &HttpRequestTool,
+    logs: &LogsTool,
     skill: &SkillTool,
     supabase: &SupabaseQueryTool,
     database: &DatabaseQueryTool,
@@ -93,6 +94,14 @@ pub(super) async fn run_tool(
         web_fetch.run(input).await
     } else if name == "HttpRequest" {
         http.run(input).await
+    } else if name == LOGS_START_TOOL {
+        logs.run_start(input).await
+    } else if name == LOGS_TAIL_TOOL {
+        logs.run_tail(input).await
+    } else if name == LOGS_LIST_TOOL {
+        logs.run_list(input).await
+    } else if name == LOGS_STOP_TOOL {
+        logs.run_stop(input).await
     } else if name == "SupabaseQuery" {
         supabase.run(input).await
     } else if name == "DatabaseQuery" {

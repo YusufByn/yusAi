@@ -174,6 +174,7 @@ pub(super) async fn send_message(
         )),
         web_fetch: Arc::new(WebFetchTool::new()),
         http: Arc::new(HttpRequestTool::new()),
+        logs: Arc::new(LogsTool::new(workspace_root.clone())),
         skill: Arc::new(SkillTool::with_settings(
             workspace_root.clone(),
             skill_settings.clone(),
@@ -1400,6 +1401,10 @@ pub(super) fn tool_descriptors_for_workspace(
         WebSearchTool::new().descriptor(),
         WebFetchTool::new().descriptor(),
         HttpRequestTool::new().descriptor(),
+        LogsTool::new(workspace_root).start_descriptor(),
+        LogsTool::new(workspace_root).tail_descriptor(),
+        LogsTool::new(workspace_root).list_descriptor(),
+        LogsTool::new(workspace_root).stop_descriptor(),
         SupabaseQueryTool::new().descriptor(),
         DatabaseQueryTool::new().descriptor(),
     ];

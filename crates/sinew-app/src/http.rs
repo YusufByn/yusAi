@@ -4,13 +4,14 @@ use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE},
-    Method, Url,
+    Method, StatusCode, Url,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sinew_core::ToolDescriptor;
 
 use crate::tool_run::ToolRunResult;
+use crate::logs::{LogRegistry, ProcessLogSnapshot, HTTP_ATTACH_LINES_DEFAULT};
 
 pub const HTTP_REQUEST_TOOL_NAME: &str = "HttpRequest";
 
@@ -31,7 +32,7 @@ impl HttpRequestTool {
     pub fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: HTTP_REQUEST_TOOL_NAME.into(),
-            description: "Send an HTTP request and read the structured response. Use this to test an endpoint you just wrote (typically against a local dev server like http://localhost:3000), validate a third-party API, or reproduce a curl call without quoting hell. Returns status code, response headers, and body (auto pretty-printed when JSON). Non-2xx responses are returned as data so you can read the error payload and fix the code.".into(),
+            description: "Send an HTTP request and read the structured response. Use this to test an endpoint you just wrote (typically against a local dev server like http://localhost:3000), validate a third-party API, or reproduce a curl call without quoting hell. Returns status code, response headers, and body (auto pretty-printed when JSON). Non-2xx responses are returned as data so you can read the error payload and fix the code. When the URL is local (localhost/127.0.0.1/::1/0.0.0.0) and the call fails (non-2xx or connect error), the tool automatically appends recent stdout/stderr from every process tracked by `logs_start` — so you usually get the server stack trace in the same response, no extra `logs_tail` call needed. Set `attach_logs` to `false` to disable, to a process name (string or array) to pick specific ones, or to `true` to attach even on success.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -73,6 +74,20 @@ impl HttpRequestTool {
                     "follow_redirects": {
                         "type": "boolean",
                         "description": "Whether to follow 3xx redirects automatically. Defaults to true."
+                    },
+                    "attach_logs": {
+                        "description": "Controls auto-attachment of background process logs (from logs_start). `null`/absent → auto (attach on failure when URL is local). `false` → never. `true` → always attach for local URLs. A string or array of strings → attach those named processes (running or exited).",
+                        "oneOf": [
+                            { "type": "boolean" },
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" } },
+                            { "type": "null" }
+                        ]
+                    },
+                    "attach_logs_lines": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "How many recent lines to attach per process. Defaults to 20, capped at 200."
                     }
                 },
                 "required": ["url"],
@@ -117,8 +132,28 @@ impl HttpRequestTool {
             };
         }
 
+        let is_local = is_local_url(&request_plan.url);
+
         let started = std::time::Instant::now();
-        let response = builder.send().await.context("HTTP request failed")?;
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                // Connect/transport failure → attach local logs so the agent can read the
+                // server crash trace without a second tool call.
+                let mut message = format!("HTTP request failed: {err}");
+                if let Some(names) = should_attach_for_status(None, &request_plan, is_local) {
+                    let snapshots = LogRegistry::global()
+                        .snapshot_recent(names.as_deref(), request_plan.attach_logs_lines)
+                        .await;
+                    let attached = format_attached_logs(&snapshots);
+                    if !attached.is_empty() {
+                        message.push_str("\n\n");
+                        message.push_str(&attached);
+                    }
+                }
+                bail!(message);
+            }
+        };
         let elapsed = started.elapsed();
 
         let status = response.status();
@@ -166,6 +201,17 @@ impl HttpRequestTool {
             output.push_str("\n[Response body truncated]\n");
         }
 
+        if let Some(names) = should_attach_for_status(Some(status), &request_plan, is_local) {
+            let snapshots = LogRegistry::global()
+                .snapshot_recent(names.as_deref(), request_plan.attach_logs_lines)
+                .await;
+            let attached = format_attached_logs(&snapshots);
+            if !attached.is_empty() {
+                output.push('\n');
+                output.push_str(&attached);
+            }
+        }
+
         Ok(clip_with_notice(output, TOOL_OUTPUT_LIMIT))
     }
 }
@@ -189,6 +235,10 @@ struct HttpRequestInput {
     timeout_ms: Option<u64>,
     #[serde(default)]
     follow_redirects: Option<bool>,
+    #[serde(default)]
+    attach_logs: Option<Value>,
+    #[serde(default)]
+    attach_logs_lines: Option<usize>,
 }
 
 struct RequestPlan {
@@ -198,6 +248,20 @@ struct RequestPlan {
     body: Option<RequestBody>,
     timeout_ms: u64,
     follow_redirects: bool,
+    attach_logs: AttachLogsConfig,
+    attach_logs_lines: usize,
+}
+
+#[derive(Debug, Clone)]
+enum AttachLogsConfig {
+    /// Default: attach only for local URLs when the response indicates a failure.
+    Auto,
+    /// User explicitly disabled attachment.
+    Off,
+    /// User explicitly enabled attachment for local URLs (even on success).
+    Always,
+    /// User picked specific process names to attach (always).
+    Named(Vec<String>),
 }
 
 enum RequestBody {
@@ -282,6 +346,12 @@ impl HttpRequestInput {
             .unwrap_or(DEFAULT_TIMEOUT_MS);
         let follow_redirects = self.follow_redirects.unwrap_or(true);
 
+        let attach_logs = parse_attach_logs(self.attach_logs.as_ref())?;
+        let attach_logs_lines = self
+            .attach_logs_lines
+            .map(|n| n.clamp(1, 200))
+            .unwrap_or(HTTP_ATTACH_LINES_DEFAULT);
+
         Ok(RequestPlan {
             method,
             url,
@@ -289,8 +359,104 @@ impl HttpRequestInput {
             body,
             timeout_ms,
             follow_redirects,
+            attach_logs,
+            attach_logs_lines,
         })
     }
+}
+
+fn parse_attach_logs(value: Option<&Value>) -> Result<AttachLogsConfig> {
+    match value {
+        None | Some(Value::Null) => Ok(AttachLogsConfig::Auto),
+        Some(Value::Bool(true)) => Ok(AttachLogsConfig::Always),
+        Some(Value::Bool(false)) => Ok(AttachLogsConfig::Off),
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            match trimmed.to_ascii_lowercase().as_str() {
+                "auto" => Ok(AttachLogsConfig::Auto),
+                "off" | "false" | "none" => Ok(AttachLogsConfig::Off),
+                "always" | "true" => Ok(AttachLogsConfig::Always),
+                _ if !trimmed.is_empty() => Ok(AttachLogsConfig::Named(vec![trimmed.to_string()])),
+                _ => Ok(AttachLogsConfig::Auto),
+            }
+        }
+        Some(Value::Array(items)) => {
+            let names: Vec<String> = items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if names.is_empty() {
+                Ok(AttachLogsConfig::Off)
+            } else {
+                Ok(AttachLogsConfig::Named(names))
+            }
+        }
+        Some(other) => bail!(
+            "attach_logs must be a boolean, a process name string, or an array of names (got {})",
+            other
+        ),
+    }
+}
+
+fn is_local_url(url: &Url) -> bool {
+    match url.host_str() {
+        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("0.0.0.0") => true,
+        _ => false,
+    }
+}
+
+/// Decides whether to attach process logs to the HttpRequest output.
+///
+/// Returns:
+/// - `None` → do not attach
+/// - `Some(None)` → attach last lines from every running process (capped in registry)
+/// - `Some(Some(names))` → attach only the named processes
+fn should_attach_for_status(
+    status: Option<StatusCode>,
+    plan: &RequestPlan,
+    is_local: bool,
+) -> Option<Option<Vec<String>>> {
+    match &plan.attach_logs {
+        AttachLogsConfig::Off => None,
+        AttachLogsConfig::Always => Some(None),
+        AttachLogsConfig::Named(names) => Some(Some(names.clone())),
+        AttachLogsConfig::Auto => {
+            if !is_local {
+                return None;
+            }
+            match status {
+                // Connect/transport error (no response yet) → very useful to see server logs.
+                None => Some(None),
+                Some(code) if !code.is_success() => Some(None),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn format_attached_logs(snapshots: &[ProcessLogSnapshot]) -> String {
+    if snapshots.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("--- Attached server logs ---\n");
+    for snapshot in snapshots {
+        out.push_str(&format!(
+            "process: {} ({}) · showing {}/{} buffered lines\n",
+            snapshot.name, snapshot.status, snapshot.returned, snapshot.total_buffered
+        ));
+        if snapshot.lines.is_empty() {
+            out.push_str("(no lines buffered yet)\n");
+        } else {
+            for line in &snapshot.lines {
+                out.push_str(&format!("[{}] {}\n", line.stream, line.text));
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("Tip: call `logs_tail` with grep/since_ms for more focused output.");
+    out
 }
 
 fn value_to_string(value: &Value) -> String {
