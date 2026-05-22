@@ -7,19 +7,11 @@ use tokio::sync::mpsc;
 
 use crate::tool_run::FileChange;
 use crate::{
-<<<<<<< HEAD
-    run_turn, AgentEvent, AgentEventScope, AgentMode, ApplyPatchTool, BashTool, CreateImageTool,
-    DatabaseQueryTool, GlobTool, GoalWorkflowState, GrepTool, HttpRequestTool, LogsTool,
-    McpSettings, McpToolRegistry,
-    QuestionTool, ReadTool, SkillSettings, SkillTool, SupabaseQueryTool, ToDoListTool,
-    TodoListState, ToolRunResult, ToolSettings, TurnCancel, TurnContext, WebFetchTool,
-    WebSearchTool,
-=======
-    run_turn, AgentEvent, AgentEventScope, AgentMode, BashTool, CreateImageTool, EditFileTool,
-    GlobTool, GoalWorkflowState, GrepTool, McpSettings, McpToolRegistry,
-    QuestionTool, ReadTool, SkillSettings, SkillTool, ToDoListTool, TodoListState, ToolRunResult,
-    ToolSettings, TurnCancel, TurnContext, WebFetchTool, WebSearchTool, WriteFileTool,
->>>>>>> upstream/main
+    run_turn, AgentEvent, AgentEventScope, AgentMode, BashTool, CreateImageTool, DatabaseQueryTool,
+    EditFileTool, GlobTool, GoalWorkflowState, GrepTool, HttpRequestTool, LogsTool, McpSettings,
+    McpToolRegistry, QuestionTool, ReadTool, SkillSettings, SkillTool, SupabaseQueryTool,
+    ToDoListTool, TodoListState, ToolRunResult, ToolSettings, TurnCancel, TurnContext,
+    WebFetchTool, WebSearchTool, WriteFileTool,
 };
 
 const TOOL_PREFIX: &str = "subagent_";

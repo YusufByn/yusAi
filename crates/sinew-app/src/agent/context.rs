@@ -5,16 +5,10 @@ use tokio::sync::mpsc;
 use sinew_core::{ChatMessage, Provider};
 
 use crate::{
-<<<<<<< HEAD
-    ApplyPatchTool, BashTool, CreateImageTool, DatabaseQueryTool, GlobTool, GoalWorkflowState,
+    BashTool, CreateImageTool, DatabaseQueryTool, EditFileTool, GlobTool, GoalWorkflowState,
     GrepTool, HttpRequestTool, LogsTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool,
     SubAgentTool, SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolSettings,
-    WebFetchTool, WebSearchTool,
-=======
-    BashTool, CreateImageTool, EditFileTool, GlobTool, GoalWorkflowState, GrepTool,
-    McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool, TeamTool, ToDoListTool,
-    TodoListState, ToolSettings, WebFetchTool, WebSearchTool, WriteFileTool,
->>>>>>> upstream/main
+    WebFetchTool, WebSearchTool, WriteFileTool,
 };
 
 use super::{

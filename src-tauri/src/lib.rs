@@ -44,14 +44,9 @@ use sinew_app::{
     snapshot_workspace_for_checkpoint, subagent_system_prompt,
     system_prompt_for_mode_with_plan_prompt, system_prompt_with_todo, todo_list_from_history,
     tool_settings_view, trash_workspace_entry, write_workspace_file, AgentEvent, AgentMode,
-<<<<<<< HEAD
-    AppStore, ApplyPatchTool, BashTool, ConversationEvent, ConversationSummary, CreateImageTool,
+    AppStore, BashTool, ConversationEvent, ConversationSummary, CreateImageTool, EditFileTool,
     GlobTool, GoalWorkflowState, GrepTool, HttpRequestTool, ImportedEntry, InstalledSkill,
     LogsTool, McpSettings,
-=======
-    AppStore, BashTool, ConversationEvent, ConversationSummary, CreateImageTool, EditFileTool,
-    GlobTool, GoalWorkflowState, GrepTool, ImportedEntry, InstalledSkill, McpSettings,
->>>>>>> upstream/main
     McpToolRegistry, ModeModelSettings, OpenRouterModelRecord, PlanArtifactState,
     PlanWorkflowState, QuestionTool, ReadTool, SavedConversation, SkillSettings, SkillTool,
     SubAgentConfig, SubAgentSettings, SubAgentTool, TeamRuntime, TeamTool, TerminalPathResolution,

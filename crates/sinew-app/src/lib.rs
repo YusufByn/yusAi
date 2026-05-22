@@ -1,11 +1,8 @@
 pub mod agent;
 pub mod bash;
 pub mod compact;
-<<<<<<< HEAD
 pub mod database;
-=======
 pub mod edit;
->>>>>>> upstream/main
 pub mod glob;
 pub mod grep;
 pub mod http;

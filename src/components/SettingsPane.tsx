@@ -1058,12 +1058,9 @@ export function SettingsPane({ workspacePath }: Props) {
   }, []);
 
   const handleEditorMount: OnMount = useCallback((editor, monaco) => {
-<<<<<<< HEAD
     defineSinewThemes(monaco);
-    monaco.editor.setTheme(monacoThemeName(loadTheme()));
-=======
     defineSinewCoolTheme(monaco);
->>>>>>> upstream/main
+    monaco.editor.setTheme(monacoThemeName(loadTheme()));
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       void saveAndDetectRef.current();
     });

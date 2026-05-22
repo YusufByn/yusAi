@@ -14,19 +14,11 @@ use uuid::Uuid;
 
 use crate::tool_run::{DiffLineKind, FileChange, FileChangeKind, ToolRunImage};
 use crate::{
-<<<<<<< HEAD
-    run_turn, subagent_system_prompt, AgentEvent, AgentEventScope, AgentMode, ApplyPatchTool,
-    BashTool, CreateImageTool, GlobTool, GoalWorkflowState, GrepTool, HttpRequestTool, LogsTool,
-    McpSettings, McpToolRegistry, DatabaseQueryTool, ReadTool, SkillSettings, SkillTool,
-    SubAgentConfig, SubAgentSettings, SupabaseQueryTool, TodoListState, ToolRunResult, ToolSettings,
-    TurnCancel, TurnContext, WebFetchTool, WebSearchTool,
-=======
     run_turn, subagent_system_prompt, AgentEvent, AgentEventScope, AgentMode, BashTool,
-    CreateImageTool, EditFileTool, GlobTool, GoalWorkflowState, GrepTool, McpSettings,
-    McpToolRegistry, ReadTool, SkillSettings, SkillTool, SubAgentConfig, SubAgentSettings,
-    TodoListState, ToolRunResult, ToolSettings, TurnCancel, TurnContext, WebFetchTool,
-    WebSearchTool, WriteFileTool,
->>>>>>> upstream/main
+    CreateImageTool, DatabaseQueryTool, EditFileTool, GlobTool, GoalWorkflowState, GrepTool,
+    HttpRequestTool, LogsTool, McpSettings, McpToolRegistry, ReadTool, SkillSettings, SkillTool,
+    SubAgentConfig, SubAgentSettings, SupabaseQueryTool, TodoListState, ToolRunResult, ToolSettings,
+    TurnCancel, TurnContext, WebFetchTool, WebSearchTool, WriteFileTool,
 };
 
 const TEAM_RUN_TOOL: &str = "TeamRun";

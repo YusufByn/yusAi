@@ -61,11 +61,8 @@ Code map:
 │   │       │   └── turn.rs
 │   │       ├── bash.rs
 │   │       ├── compact.rs
-<<<<<<< HEAD
 │   │       ├── database.rs
-=======
 │   │       ├── edit.rs
->>>>>>> upstream/main
 │   │       ├── glob.rs
 │   │       ├── grep.rs
 │   │       ├── http.rs

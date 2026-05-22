@@ -4,16 +4,11 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
-<<<<<<< HEAD
-    ApplyPatchTool, BashTool, CreateImageTool, DatabaseQueryTool, GlobTool, GrepTool,
-    HttpRequestTool, LogsTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool, SubAgentTool,
-    SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolRunResult, ToolSettings,
-    WebFetchTool, WebSearchTool, LOGS_LIST_TOOL, LOGS_START_TOOL, LOGS_STOP_TOOL, LOGS_TAIL_TOOL,
-=======
-    BashTool, CreateImageTool, EditFileTool, GlobTool, GrepTool, McpToolRegistry, QuestionTool,
-    ReadFingerprint, ReadTool, SkillTool, SubAgentTool, TeamTool, ToDoListTool,
-    TodoListState, ToolRunResult, ToolSettings, WebFetchTool, WebSearchTool, WriteFileTool,
->>>>>>> upstream/main
+    BashTool, CreateImageTool, DatabaseQueryTool, EditFileTool, GlobTool, GrepTool,
+    HttpRequestTool, LogsTool, McpToolRegistry, QuestionTool, ReadFingerprint, ReadTool, SkillTool,
+    SubAgentTool, SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolRunResult,
+    ToolSettings, WebFetchTool, WebSearchTool, WriteFileTool, LOGS_LIST_TOOL, LOGS_START_TOOL,
+    LOGS_STOP_TOOL, LOGS_TAIL_TOOL,
 };
 
 use super::{cancel::TurnCancel, context::AgentMode, events::AgentEvent};
