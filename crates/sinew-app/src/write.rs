@@ -108,12 +108,14 @@ impl WriteFileTool {
             if !metadata.is_file() {
                 bail!("path is not a file: {}", target.relative_path);
             }
-            let expected = read_fingerprints.get(&target.relative_path).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "write_file requires a successful read of {} before overwriting it",
-                    target.relative_path
-                )
-            })?;
+            let expected = read_fingerprints
+                .get(&target.relative_path)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "write_file requires a successful read of {} before overwriting it",
+                        target.relative_path
+                    )
+                })?;
             let current = fingerprint_path(&self.workspace_root, &target.absolute_path)?;
             if !fingerprints_match(expected, &current) {
                 bail!(
@@ -133,7 +135,11 @@ impl WriteFileTool {
         let content = format!(
             "Wrote {} ({}).",
             target.relative_path,
-            if existed { "overwrote existing file" } else { "created new file" }
+            if existed {
+                "overwrote existing file"
+            } else {
+                "created new file"
+            }
         );
         Ok(ToolRunResult::ok_with_meta(
             content,
@@ -240,7 +246,9 @@ fn path_has_entry(path: &Path) -> bool {
 }
 
 fn ensure_existing_ancestor_in_workspace(root: &Path, path: &Path) -> Result<()> {
-    let mut ancestor = path.parent().ok_or_else(|| anyhow::anyhow!("invalid path"))?;
+    let mut ancestor = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid path"))?;
     loop {
         if path_has_entry(ancestor) {
             let canonical = ancestor
@@ -328,11 +336,24 @@ mod tests {
             .expect("write should create file");
 
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(root.join("src/app.rs")).unwrap(), "fn main() {}\n");
+        assert_eq!(
+            fs::read_to_string(root.join("src/app.rs")).unwrap(),
+            "fn main() {}\n"
+        );
         assert!(result.content.contains("created new file"));
         assert_eq!(result.file_changes.len(), 1);
-        assert!(result.meta.as_ref().unwrap().get("read_fingerprint").is_some());
-        assert!(result.meta.as_ref().unwrap().get("read_fingerprints").is_some());
+        assert!(result
+            .meta
+            .as_ref()
+            .unwrap()
+            .get("read_fingerprint")
+            .is_some());
+        assert!(result
+            .meta
+            .as_ref()
+            .unwrap()
+            .get("read_fingerprints")
+            .is_some());
         fs::remove_dir_all(root).ok();
     }
 
@@ -353,7 +374,10 @@ mod tests {
             .expect("write should overwrite file");
 
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "new\ncontent\n");
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "new\ncontent\n"
+        );
         assert!(result.content.contains("overwrote existing file"));
         assert_eq!(result.file_changes.len(), 1);
         fs::remove_dir_all(root).ok();
@@ -396,8 +420,13 @@ mod tests {
             .await
             .expect_err("stale fingerprint should fail");
 
-        assert!(error.to_string().contains("changed since the last successful read"));
-        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "changed\n");
+        assert!(error
+            .to_string()
+            .contains("changed since the last successful read"));
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "changed\n"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -474,7 +503,8 @@ mod tests {
         paths
             .iter()
             .map(|path| {
-                let fingerprint = fingerprint_path(root, &root.join(path)).expect("fingerprint file");
+                let fingerprint =
+                    fingerprint_path(root, &root.join(path)).expect("fingerprint file");
                 ((*path).to_string(), fingerprint)
             })
             .collect()

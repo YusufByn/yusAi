@@ -75,15 +75,36 @@ pub(super) fn summarize_tool(name: &str, input: &Value) -> String {
         return format!("Glob {pattern} in {scope}");
     }
     if name == "edit_file" {
-        if let Some(edits) = input.get("edits").and_then(Value::as_array) {
-            let count = edits.len();
-            if count == 1 {
-                if let Some(path) = edits[0].get("path").and_then(Value::as_str) {
+        if let Some(groups) = edit_file_groups(input) {
+            let file_count = groups.len();
+            let replacement_count = groups
+                .iter()
+                .map(|group| {
+                    group
+                        .get("edits")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or_default()
+                })
+                .sum::<usize>();
+            if file_count == 1 {
+                if let Some(path) = groups[0].get("path").and_then(Value::as_str) {
+                    if replacement_count > 1 {
+                        return format!("Edit {path} · {replacement_count} replacements");
+                    }
                     return format!("Edit {path}");
                 }
-                return "Edit file".to_string();
+                return if replacement_count > 1 {
+                    format!("Edit file · {replacement_count} replacements")
+                } else {
+                    "Edit file".to_string()
+                };
             }
-            return format!("Edit files · {count} edits");
+            return if replacement_count > 0 {
+                format!("Edit files · {file_count} files · {replacement_count} replacements")
+            } else {
+                format!("Edit files · {file_count} files")
+            };
         }
         return "Edit file".to_string();
     }
@@ -372,6 +393,13 @@ pub(super) fn summarize_tool(name: &str, input: &Value) -> String {
 
 pub(super) fn should_stream_tool_args(name: &str) -> bool {
     matches!(name, "edit_file" | "write_file" | "read")
+}
+
+fn edit_file_groups(input: &Value) -> Option<&Vec<Value>> {
+    input
+        .get("edits")
+        .and_then(Value::as_array)
+        .or_else(|| input.get("files").and_then(Value::as_array))
 }
 
 fn grep_path_scope(value: &Value) -> Option<String> {

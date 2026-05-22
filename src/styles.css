@@ -6003,6 +6003,13 @@ textarea {
   line-height: 1.35;
   white-space: nowrap;
 }
+.filechange[data-streaming="true"] .filechange__badge {
+  color: var(--diff-add-fg);
+  background: var(--diff-add-bg);
+}
+.filechange[data-streaming="true"] .filechange__body {
+  scroll-behavior: auto;
+}
 .filechange__path {
   color: var(--text-0);
   overflow: hidden;

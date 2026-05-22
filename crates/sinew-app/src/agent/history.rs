@@ -261,7 +261,8 @@ pub(super) fn successful_read_fingerprints(
                         continue;
                     };
                     if let Some(fingerprint) = read_fingerprint_from_meta(meta) {
-                        let path = pending_path.unwrap_or_else(|| fingerprint.relative_path.clone());
+                        let path =
+                            pending_path.unwrap_or_else(|| fingerprint.relative_path.clone());
                         successful.insert(path, fingerprint);
                     }
                     for fingerprint in read_fingerprints_from_meta(meta) {

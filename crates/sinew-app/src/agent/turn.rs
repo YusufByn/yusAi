@@ -1,9 +1,12 @@
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use rand::Rng;
 use serde_json::{json, Map, Value};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
 
 use sinew_core::{
@@ -86,6 +89,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
     let mut loops = 0usize;
     let mut auto_compaction_attempts = 0usize;
     let mut current_turn_tool_result_ids = BTreeSet::new();
+    let mut eager_tool_results = BTreeMap::<String, JoinHandle<ToolRunResult>>::new();
     let mut read_fingerprints = successful_read_fingerprints(&history, &read);
     todo_list.normalize();
 
@@ -275,6 +279,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             let mut response_usage = None;
             let mut stream_error = None;
             let mut saw_message_stop = false;
+            let mut finalized_tool_calls = 0usize;
 
             loop {
                 tokio::select! {
@@ -366,10 +371,26 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                                             message_builder.insert_meta_field(index, "mcp", json!(label));
                                         }
                                         send_event(&event_tx, event_scope.as_ref(), AgentEvent::ToolReady {
-                                            id,
+                                            id: id.clone(),
                                             summary,
                                             args_pretty: pretty_json(&args),
                                         });
+                                        if should_run_eager_write_file(&name, mode, &tool_settings)
+                                            && finalized_tool_calls == 0
+                                            && loops < max_tool_rounds
+                                            && eager_tool_results.is_empty()
+                                        {
+                                            let eager_write_file = write_file.clone();
+                                            let read_fingerprints = read_fingerprints.clone();
+                                            let input = args.clone();
+                                            eager_tool_results.insert(
+                                                id,
+                                                tokio::spawn(async move {
+                                                    eager_write_file.run(input, &read_fingerprints).await
+                                                }),
+                                            );
+                                        }
+                                        finalized_tool_calls += 1;
                                     }
                                     None => {}
                                 }
@@ -403,6 +424,16 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             }
 
             if let Some(err) = stream_error {
+                if !eager_tool_results.is_empty() {
+                    tracing::warn!(
+                        provider = provider.name(),
+                        error = %err,
+                        "stream ended after eager tool execution; continuing with completed tool call"
+                    );
+                    stop_reason = StopReason::ToolUse;
+                    break 'stream_attempt (message_builder, stop_reason, response_usage);
+                }
+
                 if should_retry_stream(&err, stream_retry_attempts) {
                     stream_retry_attempts += 1;
                     tracing::warn!(
@@ -470,11 +501,14 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
 
         let mut assistant = message_builder.finish();
         if cancelled {
-            retain_cancelled_visible_parts(&mut assistant);
-            if !assistant.parts.is_empty() {
-                history.push(assistant);
+            if eager_tool_results.is_empty() {
+                retain_cancelled_visible_parts(&mut assistant);
+                if !assistant.parts.is_empty() {
+                    history.push(assistant);
+                }
+                break 'conversation;
             }
-            break 'conversation;
+            retain_cancelled_eager_parts(&mut assistant, &eager_tool_results);
         }
         if mode == AgentMode::Plan && !stop_questions && question_enabled {
             if !assistant_has_question_tool(&assistant)
@@ -493,11 +527,15 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             history.push(assistant.clone());
         }
 
+        if !matches!(stop_reason, StopReason::ToolUse) && !eager_tool_results.is_empty() {
+            stop_reason = StopReason::ToolUse;
+        }
         if !matches!(stop_reason, StopReason::ToolUse) {
             break;
         }
 
         if loops >= max_tool_rounds {
+            abort_eager_tool_results(&mut eager_tool_results);
             send_event(
                 &event_tx,
                 event_scope.as_ref(),
@@ -519,6 +557,13 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                     run_clean_context(&mut history, input.clone(), &current_turn_tool_result_ids)
                 } else if name == "update_goal" {
                     run_update_goal(&mut goal_workflow, input.clone())
+                } else if let Some(handle) = eager_tool_results.remove(id) {
+                    match handle.await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            ToolRunResult::err(format!("write_file task failed: {err}"), Vec::new())
+                        }
+                    }
                 } else if should_wait_for_cooperative_cancel(
                     name,
                     subagents.as_ref(),
@@ -557,6 +602,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                     .await;
                     if matches!(cmd_rx.try_recv(), Ok(EngineCommand::Cancel)) {
                         cancelled = true;
+                        abort_eager_tool_results(&mut eager_tool_results);
                     }
                     result
                 } else {
@@ -565,6 +611,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                         command = cmd_rx.recv() => {
                             if matches!(command, Some(EngineCommand::Cancel)) {
                                 cancelled = true;
+                                abort_eager_tool_results(&mut eager_tool_results);
                                 ToolRunResult::err("tool call interrupted by user", Vec::new())
                             } else {
                                 continue;
@@ -602,7 +649,9 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                         ) => result,
                     }
                 };
-                if (name == "read" || name == "edit_file" || name == "write_file") && !result.is_error {
+                if (name == "read" || name == "edit_file" || name == "write_file")
+                    && !result.is_error
+                {
                     update_read_fingerprint_cache(&mut read_fingerprints, result.meta.as_ref());
                 }
                 let result_images = result.images.clone();
@@ -674,6 +723,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
         }
 
         if cancelled {
+            abort_eager_tool_results(&mut eager_tool_results);
             append_interrupted_tool_results(&assistant, &mut tool_results);
         }
 
@@ -722,11 +772,36 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
     }
 }
 
+pub(super) fn retain_cancelled_eager_parts(
+    message: &mut ChatMessage,
+    eager_tool_results: &BTreeMap<String, JoinHandle<ToolRunResult>>,
+) {
+    message.parts.retain(|part| match part {
+        Part::Text { text, .. } | Part::Thinking { text, .. } => !text.is_empty(),
+        Part::ToolCall { id, .. } => eager_tool_results.contains_key(id),
+        _ => false,
+    });
+}
+
 pub(super) fn retain_cancelled_visible_parts(message: &mut ChatMessage) {
     message.parts.retain(|part| match part {
         Part::Text { text, .. } | Part::Thinking { text, .. } => !text.is_empty(),
         _ => false,
     });
+}
+
+fn should_run_eager_write_file(
+    name: &str,
+    mode: AgentMode,
+    tool_settings: &crate::ToolSettings,
+) -> bool {
+    name == "write_file" && mode != AgentMode::Plan && tool_settings.is_enabled(name)
+}
+
+fn abort_eager_tool_results(handles: &mut BTreeMap<String, JoinHandle<ToolRunResult>>) {
+    for (_, handle) in std::mem::take(handles) {
+        handle.abort();
+    }
 }
 
 fn update_read_fingerprint_cache(

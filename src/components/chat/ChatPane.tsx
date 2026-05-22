@@ -5518,6 +5518,7 @@ function BlockView({
             isError={block.isError}
             cleaned={block.cleaned}
             fileChanges={block.fileChanges}
+            liveFileChange={block.liveFileChange}
             images={block.images}
             meta={block.meta}
             onOpenFile={onOpenFile}

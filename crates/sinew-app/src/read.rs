@@ -221,7 +221,8 @@ pub fn fingerprint_path(root: &Path, path: &Path) -> Result<ReadFingerprint> {
     if !metadata.is_file() {
         bail!("path is not a file");
     }
-    let bytes = fs::read(path).with_context(|| format!("unable to read file {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("unable to read file {}", path.display()))?;
     Ok(fingerprint_for_bytes(
         display_read_path(root, path),
         metadata.len(),

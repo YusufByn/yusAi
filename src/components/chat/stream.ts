@@ -15,6 +15,7 @@ const CLEANED_TOOL_OUTPUT =
   "[Tool result cleaned by you: irrelevant to future context.]";
 const COMPACTION_SUMMARY_PREFIX =
   "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
+const LIVE_WRITE_DIFF_LINE_LIMIT = 400;
 
 // -----------------------------------------------------------------
 // View model used to render the chat pane. It flattens the history
@@ -75,6 +76,7 @@ export type ChatBlock =
       answered?: boolean;
       answer?: string;
       fileChanges?: FileChange[];
+      liveFileChange?: FileChange;
       images?: ToolResultImage[];
       meta?: Record<string, unknown> | null;
       subAgent?: SubAgentBlock;
@@ -922,14 +924,129 @@ function cleanContextIdsFromArgs(argsPretty?: string): Set<string> {
   return new Set(values.filter((value): value is string => typeof value === "string"));
 }
 
-function readPathFromPartialJson(input: string): string | null {
-  const match = input.match(/"path"\s*:\s*"((?:\\.|[^"\\])*)/);
-  if (!match) return null;
-  try {
-    return JSON.parse(`"${match[1]}"`) as string;
-  } catch {
-    return match[1].replace(/\\"/g, '"');
+function readJsonStringToken(
+  input: string,
+  start: number,
+): { value: string; end: number; complete: boolean } | null {
+  if (input[start] !== '"') return null;
+  let value = "";
+  for (let index = start + 1; index < input.length; index += 1) {
+    const char = input[index];
+    if (char === '"') {
+      return { value, end: index + 1, complete: true };
+    }
+    if (char !== "\\") {
+      value += char;
+      continue;
+    }
+
+    index += 1;
+    if (index >= input.length) {
+      return { value, end: input.length, complete: false };
+    }
+    const escaped = input[index];
+    switch (escaped) {
+      case '"':
+      case "\\":
+      case "/":
+        value += escaped;
+        break;
+      case "b":
+        value += "\b";
+        break;
+      case "f":
+        value += "\f";
+        break;
+      case "n":
+        value += "\n";
+        break;
+      case "r":
+        value += "\r";
+        break;
+      case "t":
+        value += "\t";
+        break;
+      case "u": {
+        const hex = input.slice(index + 1, index + 5);
+        if (hex.length < 4 || !/^[0-9a-fA-F]{4}$/.test(hex)) {
+          return { value, end: input.length, complete: false };
+        }
+        value += String.fromCharCode(Number.parseInt(hex, 16));
+        index += 4;
+        break;
+      }
+      default:
+        value += escaped;
+        break;
+    }
   }
+  return { value, end: input.length, complete: false };
+}
+
+function skipJsonWhitespace(input: string, index: number): number {
+  while (index < input.length && /\s/.test(input[index])) index += 1;
+  return index;
+}
+
+function jsonStringProperty(
+  input: string,
+  property: string,
+): { value: string; complete: boolean } | null {
+  for (let index = 0; index < input.length; index += 1) {
+    if (input[index] !== '"') continue;
+    const key = readJsonStringToken(input, index);
+    if (!key) continue;
+    if (!key.complete) return null;
+    index = key.end;
+    let valueStart = skipJsonWhitespace(input, index);
+    if (input[valueStart] !== ":") continue;
+    valueStart = skipJsonWhitespace(input, valueStart + 1);
+    if (key.value !== property) continue;
+    const value = readJsonStringToken(input, valueStart);
+    return value ? { value: value.value, complete: value.complete } : null;
+  }
+  return null;
+}
+
+function readPathFromPartialJson(input: string): string | null {
+  const path = jsonStringProperty(input, "path")?.value?.trim();
+  return path || null;
+}
+
+function liveWriteDiffLines(content: string): FileChange["lines"] {
+  const lines = content.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  return lines.slice(0, LIVE_WRITE_DIFF_LINE_LIMIT).map((text) => ({
+    kind: "added" as const,
+    text,
+  }));
+}
+
+function liveWriteFileChangeFromInput(input: unknown): FileChange | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const record = input as Record<string, unknown>;
+  const path = typeof record.path === "string" ? record.path.trim() : "";
+  if (typeof record.content !== "string" || record.content.length === 0) return undefined;
+  const allLines = record.content.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  return {
+    relativePath: path || "Writing file",
+    kind: "added",
+    summary: path ? `Writing ${path}` : "Writing file",
+    binary: false,
+    addedLines: allLines.length,
+    removedLines: 0,
+    truncated: allLines.length > LIVE_WRITE_DIFF_LINE_LIMIT,
+    lines: liveWriteDiffLines(record.content),
+  };
+}
+
+function partialWriteFileArgs(input: string): Record<string, unknown> | null {
+  const path = jsonStringProperty(input, "path");
+  const content = jsonStringProperty(input, "content");
+  if (!path && !content) return null;
+  const output: Record<string, unknown> = {};
+  if (path) output.path = path.value;
+  if (content) output.content = content.value;
+  return Object.keys(output).length > 0 ? output : null;
 }
 
 function partialArgsFromToolJson(
@@ -944,25 +1061,46 @@ function partialArgsFromToolJson(
     return partialEditFileArgs(input);
   }
   if (name === "write_file") {
-    const path = readPathFromPartialJson(input);
-    return path ? { path } : null;
+    return partialWriteFileArgs(input);
   }
   return null;
 }
 
+function editFileGroups(input: Record<string, unknown>): unknown[] | null {
+  const edits = input.edits;
+  if (Array.isArray(edits)) return edits;
+  const files = input.files;
+  return Array.isArray(files) ? files : null;
+}
+
+function replacementCount(groups: unknown[]): number {
+  return groups.reduce<number>((total, group) => {
+    if (!group || typeof group !== "object") return total;
+    const edits = (group as Record<string, unknown>).edits;
+    return total + (Array.isArray(edits) ? edits.length : 0);
+  }, 0);
+}
+
 function editFileSummary(input: unknown): string {
   if (!input || typeof input !== "object") return "Edit file";
-  const edits = (input as Record<string, unknown>).edits;
-  if (!Array.isArray(edits) || edits.length === 0) return "Edit file";
-  if (edits.length === 1) {
-    const first = edits[0];
+  const groups = editFileGroups(input as Record<string, unknown>);
+  if (!groups || groups.length === 0) return "Edit file";
+  const replacements = replacementCount(groups);
+  if (groups.length === 1) {
+    const first = groups[0];
     if (first && typeof first === "object") {
       const path = (first as Record<string, unknown>).path;
-      if (typeof path === "string" && path.trim()) return `Edit ${path.trim()}`;
+      if (typeof path === "string" && path.trim()) {
+        return replacements > 1
+          ? `Edit ${path.trim()} · ${replacements} replacements`
+          : `Edit ${path.trim()}`;
+      }
     }
-    return "Edit file";
+    return replacements > 1 ? `Edit file · ${replacements} replacements` : "Edit file";
   }
-  return `Edit files · ${edits.length} edits`;
+  return replacements > 0
+    ? `Edit files · ${groups.length} files · ${replacements} replacements`
+    : `Edit files · ${groups.length} files`;
 }
 
 function partialEditFileArgs(input: string): Record<string, unknown> | null {
@@ -1151,6 +1289,10 @@ export function applyEvent(
             summary: event.summary,
             argsPretty: input ? prettyToolInput(block.name, input) : event.args_pretty,
             argsRaw: undefined,
+            liveFileChange:
+              block.name === "write_file"
+                ? liveWriteFileChangeFromInput(input) ?? block.liveFileChange
+                : block.liveFileChange,
             subAgent: isSubAgentLikeTool(block.name)
               ? {
                   ...(block.subAgent ?? { id: block.id, name: "Sub-agent" }),
@@ -1172,6 +1314,10 @@ export function applyEvent(
           parsedInput && typeof parsedInput === "object"
             ? (parsedInput as Record<string, unknown>)
             : partialArgsFromToolJson(block.name, argsRaw);
+        const liveFileChange =
+          block.name === "write_file"
+            ? liveWriteFileChangeFromInput(partialInput) ?? block.liveFileChange
+            : block.liveFileChange;
         return {
           ...block,
           hidden:
@@ -1182,6 +1328,7 @@ export function applyEvent(
           argsPretty: partialInput
             ? prettyToolInput(block.name, partialInput)
             : block.argsPretty,
+          liveFileChange,
           summary: partialInput
             ? summaryFromInput(block.name, partialInput) ?? block.summary
             : block.summary,
@@ -1341,6 +1488,7 @@ export function applyEvent(
                 ? questionAnswerFromMeta(event.meta)
                 : block.answer,
             fileChanges: hasFileChanges ? event.file_changes : block.fileChanges,
+            liveFileChange: undefined,
             images: images.length > 0 ? images : block.images,
             meta: event.meta ?? block.meta,
           };

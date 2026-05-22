@@ -20,20 +20,24 @@ use crate::{
 const MAX_EDIT_COUNT: usize = 128;
 const MAX_TOTAL_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
-const EDIT_FILE_DESCRIPTION: &str = r#"Edit existing workspace text files by line number. This tool only edits files; it does not create, delete, rename, or move files.
+const EDIT_FILE_DESCRIPTION: &str = r#"Edit existing workspace text files with exact search/replace blocks. This tool only edits files; it does not create, delete, rename, or move files.
 
-Input is an array of edits. Each edit has:
+Input has:
+- edits: array of file edit groups. Each file group has:
 - path: relative to the workspace root, or an absolute path inside the workspace.
-- lines: 1-based line numbers from the last successful read. "10-15" means lines 10 through 15 inclusive; "10" means line 10.
-- mode: required. One of "replace", "insert_before", or "insert_after".
-- content: the new text. For replace, content may be empty to remove the selected lines. For insert modes, content must be non-empty.
+- edits: one or more replacements to apply to that file.
+
+Each replacement has:
+- oldContent: exact text to replace. It must be non-empty and should match exactly once in the file, including whitespace and newlines. If exact matching fails, edit_file tries a conservative fuzzy fallback for line endings, trailing whitespace, smart quotes, unicode dashes, and special spaces.
+- newContent: replacement text. It may be empty to delete oldContent.
 
 Rules:
 - You must read a file successfully before editing it. edit_file refuses to write if the file changed since that read.
-- For multiple edits in the same file, line numbers always refer to the original file as last read; edits are applied from bottom to top automatically.
-- Prefer one edit_file call with multiple edits for multiple changes in the same file.
-- For appending, use mode "insert_after" with the last line number shown by read. For prepending, use mode "insert_before" with line "1".
-- Overlapping edits are rejected. If edits touch the same area, combine them into one replace edit.
+- Prefer one edit_file call with multiple file groups and multiple replacements per file when changes are related.
+- Replacements in the same file are matched against the original file content; overlapping replacements are rejected. Merge overlapping changes into one replacement.
+- If oldContent appears multiple times, add surrounding context until it is unique.
+- UTF-8 BOM and original line endings are preserved. Matching normalizes line endings to LF.
+- For insertion, include the anchor text in both oldContent and newContent, adding the inserted text before or after it.
 "#;
 
 #[derive(Debug, Clone)]
@@ -65,8 +69,7 @@ impl EditFileTool {
                     "edits": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": MAX_EDIT_COUNT,
-                        "description": "The file edits to apply in one operation.",
+                        "description": "The file edit groups to apply in one operation.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -74,21 +77,29 @@ impl EditFileTool {
                                     "type": "string",
                                     "description": "File path to edit. Relative paths are resolved from the workspace root; absolute paths must be inside the workspace."
                                 },
-                                "lines": {
-                                    "type": "string",
-                                    "description": "1-based inclusive line number or range, e.g. '7' or '4-34'."
-                                },
-                                "mode": {
-                                    "type": "string",
-                                    "enum": ["replace", "insert_before", "insert_after"],
-                                    "description": "Required edit mode."
-                                },
-                                "content": {
-                                    "type": "string",
-                                    "description": "Replacement or inserted content."
+                                "edits": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": MAX_EDIT_COUNT,
+                                    "description": "Exact replacements to apply to this file. Replacements in the same file must target disjoint regions in the original content.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "oldContent": {
+                                                "type": "string",
+                                                "description": "Exact text to replace. Must match exactly once, including all whitespace and newlines."
+                                            },
+                                            "newContent": {
+                                                "type": "string",
+                                                "description": "Replacement text. May be empty to delete oldContent."
+                                            }
+                                        },
+                                        "required": ["oldContent", "newContent"],
+                                        "additionalProperties": false
+                                    }
                                 }
                             },
-                            "required": ["path", "lines", "mode", "content"],
+                            "required": ["path", "edits"],
                             "additionalProperties": false
                         }
                     }
@@ -117,34 +128,18 @@ impl EditFileTool {
     ) -> Result<ToolRunResult> {
         let parsed: EditFileInput = serde_json::from_value(input)
             .map_err(|err| anyhow::anyhow!("invalid edit_file input: {err}"))?;
-        if parsed.edits.is_empty() {
-            bail!("edits must contain at least one edit");
-        }
-        if parsed.edits.len() > MAX_EDIT_COUNT {
-            bail!("too many edits in one call; maximum is {MAX_EDIT_COUNT}");
-        }
-        let total_content_bytes = parsed
-            .edits
-            .iter()
-            .map(|edit| edit.content.len())
-            .sum::<usize>();
-        if total_content_bytes > MAX_TOTAL_CONTENT_BYTES {
-            bail!("edit content is too large to apply safely");
-        }
+        validate_edit_input(&parsed)?;
 
         let resolved = parsed
             .edits
             .into_iter()
             .enumerate()
-            .map(|(index, edit)| self.resolve_edit(index, edit))
+            .map(|(index, file)| self.resolve_file_group(index, file))
             .collect::<Result<Vec<_>>>()?;
-        let affected_paths = resolved
-            .iter()
-            .map(|edit| edit.relative_path.clone())
-            .collect::<Vec<_>>();
+        let mut grouped = group_file_edits(resolved)?;
+        let affected_paths = grouped.keys().cloned().collect::<Vec<_>>();
 
         let _write_permit = self.acquire_write_permit().await?;
-        let mut grouped = group_edits(resolved);
         let mut summaries = Vec::new();
         let mut writes = Vec::new();
 
@@ -165,19 +160,23 @@ impl EditFileTool {
 
             let original = fs::read_to_string(&group.absolute_path)
                 .with_context(|| format!("unable to read file {}", group.relative_path))?;
-            let original_lines = split_logical_lines(&original);
-            let plan = plan_group_edits(&group.relative_path, &original_lines, &group.edits)?;
-            let updated_lines = apply_planned_edits(original_lines.clone(), &plan.operations);
-            summaries.push(format_group_summary(
+            let normalized_original = normalize_file_text(&original);
+            let plan = plan_file_edits(
                 &group.relative_path,
-                original_lines.len(),
-                updated_lines.len(),
+                &normalized_original.content,
+                &group.edits,
+            )?;
+            let updated_content = normalized_original.restore(&plan.updated_content);
+            summaries.push(format_file_summary(
+                &group.relative_path,
+                text_line_count(&normalized_original.content),
+                text_line_count(&plan.updated_content),
                 &plan.summaries,
             ));
             writes.push((
                 group.relative_path.clone(),
                 group.absolute_path.clone(),
-                join_lines(&updated_lines),
+                updated_content,
             ));
         }
 
@@ -193,18 +192,18 @@ impl EditFileTool {
             .map(|(_, absolute_path, _)| fingerprint_path(&self.workspace_root, absolute_path))
             .collect::<Result<Vec<_>>>()?;
 
-        let content = if summaries.is_empty() {
-            "No edits applied.".to_string()
-        } else {
-            format!(
-                "Edited {} file{}.
-
-{}",
-                summaries.len(),
-                if summaries.len() == 1 { "" } else { "s" },
-                summaries.join("\n")
-            )
-        };
+        let replacement_count = grouped
+            .values()
+            .map(|group| group.edits.len())
+            .sum::<usize>();
+        let content = format!(
+            "Edited {} file{} ({} replacement{}).\n\n{}",
+            summaries.len(),
+            if summaries.len() == 1 { "" } else { "s" },
+            replacement_count,
+            if replacement_count == 1 { "" } else { "s" },
+            summaries.join("\n")
+        );
 
         let meta = if updated_fingerprints.len() == 1 {
             json!({
@@ -217,34 +216,18 @@ impl EditFileTool {
         Ok(ToolRunResult::ok_with_meta(content, file_changes, meta))
     }
 
-    fn resolve_edit(&self, index: usize, edit: EditInput) -> Result<ResolvedEdit> {
-        if edit.path.trim().is_empty() {
-            bail!("edit {}: path is required", index + 1);
+    fn resolve_file_group(&self, _index: usize, file: FileEditInput) -> Result<ResolvedFileEdit> {
+        if file.path.trim().is_empty() {
+            bail!("Could not edit file: <empty>. Error code: path cannot be empty");
         }
-        let (relative_path, absolute_path) = resolve_existing_workspace_file(&self.workspace_root, &edit.path)
-            .with_context(|| format!("edit {}: invalid path {}", index + 1, edit.path))?;
-        let mode = edit.mode;
-        let lines = parse_line_spec(&edit.lines)
-            .with_context(|| format!("edit {}: invalid lines '{}'", index + 1, edit.lines))?;
-        if mode != EditMode::Replace && lines.start != lines.end {
-            bail!(
-                "edit {}: {} requires a single reference line, not a range",
-                index + 1,
-                mode.as_str()
-            );
-        }
-        let new_lines = split_logical_lines(&edit.content);
-        if mode != EditMode::Replace && new_lines.is_empty() {
-            bail!("edit {}: content cannot be empty for {}", index + 1, mode.as_str());
-        }
-        Ok(ResolvedEdit {
-            input_index: index,
+        let (relative_path, absolute_path) =
+            resolve_existing_workspace_file(&self.workspace_root, &file.path).map_err(|err| {
+                anyhow::anyhow!("Could not edit file: {}. Error code: {err}", file.path)
+            })?;
+        Ok(ResolvedFileEdit {
             relative_path,
             absolute_path,
-            original_lines: edit.lines,
-            mode,
-            lines,
-            new_lines,
+            edits: file.edits,
         })
     }
 
@@ -262,346 +245,585 @@ impl EditFileTool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EditFileInput {
-    edits: Vec<EditInput>,
+    #[serde(default, alias = "files")]
+    edits: Vec<FileEditInput>,
 }
 
 #[derive(Debug, Deserialize)]
-struct EditInput {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileEditInput {
     path: String,
-    lines: String,
-    mode: EditMode,
-    content: String,
+    #[serde(default)]
+    edits: Vec<ReplacementInput>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EditMode {
-    Replace,
-    InsertBefore,
-    InsertAfter,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReplacementInput {
+    #[serde(alias = "oldText")]
+    old_content: String,
+    #[serde(alias = "newText")]
+    new_content: String,
 }
 
-impl EditMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            EditMode::Replace => "replace",
-            EditMode::InsertBefore => "insert_before",
-            EditMode::InsertAfter => "insert_after",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LineSpec {
-    start: usize,
-    end: usize,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedEdit {
-    input_index: usize,
+#[derive(Debug)]
+struct ResolvedFileEdit {
     relative_path: String,
     absolute_path: PathBuf,
-    original_lines: String,
-    mode: EditMode,
-    lines: LineSpec,
-    new_lines: Vec<String>,
+    edits: Vec<ReplacementInput>,
 }
 
 #[derive(Debug)]
 struct EditGroup {
     relative_path: String,
     absolute_path: PathBuf,
-    edits: Vec<ResolvedEdit>,
+    edits: Vec<ReplacementInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineEnding {
+    Lf,
+    Crlf,
+}
+
+#[derive(Debug)]
+struct NormalizedFileText {
+    bom: bool,
+    line_ending: LineEnding,
+    content: String,
+}
+
+impl NormalizedFileText {
+    fn restore(&self, content: &str) -> String {
+        let mut restored = restore_line_endings(content, self.line_ending);
+        if self.bom {
+            restored.insert(0, '\u{FEFF}');
+        }
+        restored
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplacementMatch {
+    start: usize,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct FuzzyNormalizedText {
+    text: String,
+    start_boundaries: Vec<Option<usize>>,
+    end_boundaries: Vec<Option<usize>>,
+    next_trimmed_boundaries: Vec<Option<usize>>,
+}
+
+impl FuzzyNormalizedText {
+    fn original_range(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        if start >= end {
+            return None;
+        }
+        let original_start = *self.start_boundaries.get(start)?.as_ref()?;
+        let original_end = *self.end_boundaries.get(end)?.as_ref()?;
+        if original_start <= original_end {
+            Some((original_start, original_end))
+        } else {
+            None
+        }
+    }
+
+    fn original_range_with_trimmed_suffix(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<(usize, usize)> {
+        let (original_start, original_end) = self.original_range(start, end)?;
+        let extended_end = self
+            .next_trimmed_boundaries
+            .get(end)
+            .and_then(|value| *value)
+            .unwrap_or(original_end);
+        Some((original_start, extended_end))
+    }
 }
 
 #[derive(Debug, Clone)]
-struct PlannedEdit {
-    input_index: usize,
-    original_lines: String,
-    mode: EditMode,
-    start_index: usize,
+struct PlannedReplacement {
+    edit_index: usize,
+    start: usize,
     old_len: usize,
-    new_lines: Vec<String>,
+    new_content: String,
+    line_number: usize,
+    old_line_count: usize,
+    new_line_count: usize,
 }
 
-#[derive(Debug)]
-struct PlannedGroup {
-    operations: Vec<PlannedEdit>,
-    summaries: Vec<EditSummary>,
-}
-
-#[derive(Debug)]
-struct EditSummary {
-    input_index: usize,
-    mode: EditMode,
-    original_lines: String,
-    now_start: Option<usize>,
-    now_end: Option<usize>,
-}
-
-fn group_edits(edits: Vec<ResolvedEdit>) -> BTreeMap<String, EditGroup> {
-    let mut grouped = BTreeMap::new();
-    for edit in edits {
-        grouped
-            .entry(edit.relative_path.clone())
-            .or_insert_with(|| EditGroup {
-                relative_path: edit.relative_path.clone(),
-                absolute_path: edit.absolute_path.clone(),
-                edits: Vec::new(),
-            })
-            .edits
-            .push(edit);
+impl PlannedReplacement {
+    fn end(&self) -> usize {
+        self.start + self.old_len
     }
-    grouped
 }
 
-fn plan_group_edits(
+#[derive(Debug)]
+struct PlannedFileEdit {
+    updated_content: String,
+    summaries: Vec<ReplacementSummary>,
+}
+
+#[derive(Debug)]
+struct ReplacementSummary {
+    edit_index: usize,
+    line_number: usize,
+    old_line_count: usize,
+    new_line_count: usize,
+}
+
+fn validate_edit_input(input: &EditFileInput) -> Result<()> {
+    let replacement_count = input
+        .edits
+        .iter()
+        .map(|file| file.edits.len())
+        .sum::<usize>();
+    if replacement_count == 0 || input.edits.iter().any(|file| file.edits.is_empty()) {
+        bail!("Edit tool input is invalid. edits must contain at least one replacement.");
+    }
+    if replacement_count > MAX_EDIT_COUNT {
+        bail!("too many replacements in one call; maximum is {MAX_EDIT_COUNT}");
+    }
+    let total_content_bytes = input
+        .edits
+        .iter()
+        .flat_map(|file| &file.edits)
+        .map(|edit| edit.old_content.len() + edit.new_content.len())
+        .sum::<usize>();
+    if total_content_bytes > MAX_TOTAL_CONTENT_BYTES {
+        bail!("edit content is too large to apply safely");
+    }
+    Ok(())
+}
+
+fn group_file_edits(files: Vec<ResolvedFileEdit>) -> Result<BTreeMap<String, EditGroup>> {
+    let mut grouped = BTreeMap::new();
+    for file in files {
+        if grouped.contains_key(&file.relative_path) {
+            bail!(
+                "duplicate file entry for {}; merge replacements for each path into one edits array",
+                file.relative_path
+            );
+        }
+        grouped.insert(
+            file.relative_path.clone(),
+            EditGroup {
+                relative_path: file.relative_path,
+                absolute_path: file.absolute_path,
+                edits: file.edits,
+            },
+        );
+    }
+    Ok(grouped)
+}
+
+fn plan_file_edits(
     relative_path: &str,
-    original_lines: &[String],
-    edits: &[ResolvedEdit],
-) -> Result<PlannedGroup> {
-    let total_lines = original_lines.len();
-    let mut operations = edits
-        .iter()
-        .map(|edit| plan_edit(relative_path, total_lines, edit))
-        .collect::<Result<Vec<_>>>()?;
-    validate_no_overlaps(relative_path, &operations)?;
+    original: &str,
+    edits: &[ReplacementInput],
+) -> Result<PlannedFileEdit> {
+    let multiple = edits.len() > 1;
+    let mut replacements = Vec::with_capacity(edits.len());
 
-    let summaries = operations
-        .iter()
-        .map(|operation| summary_for_operation(operation, &operations))
-        .collect::<Vec<_>>();
+    for (index, edit) in edits.iter().enumerate() {
+        let old_content = normalize_line_endings(&edit.old_content);
+        let new_content = normalize_line_endings(&edit.new_content);
 
-    operations.sort_by(|left, right| {
-        right
-            .start_index
-            .cmp(&left.start_index)
-            .then_with(|| right.old_len.cmp(&left.old_len))
-            .then_with(|| left.input_index.cmp(&right.input_index))
-    });
-    Ok(PlannedGroup {
-        operations,
+        if old_content.is_empty() {
+            bail!(
+                "{} must not be empty in {relative_path}.",
+                old_content_label(index, multiple)
+            );
+        }
+
+        let matched =
+            find_unique_replacement_match(relative_path, original, &old_content, index, multiple)?;
+
+        if old_content == new_content {
+            bail!(
+                "No changes made to {relative_path}. The replacement produced identical content. The oldContent and newContent are the same."
+            );
+        }
+
+        replacements.push(PlannedReplacement {
+            edit_index: index,
+            start: matched.start,
+            old_len: matched.len,
+            new_content: new_content.clone(),
+            line_number: line_number_at(original, matched.start),
+            old_line_count: text_line_count(&old_content),
+            new_line_count: text_line_count(&new_content),
+        });
+    }
+
+    validate_no_overlaps(relative_path, &replacements)?;
+    let updated_content = apply_replacements(original, &replacements);
+    if updated_content == original {
+        bail!(
+            "No changes made to {relative_path}. The replacement produced identical content. The oldContent and newContent are the same."
+        );
+    }
+
+    let summaries = replacements
+        .iter()
+        .map(|replacement| ReplacementSummary {
+            edit_index: replacement.edit_index,
+            line_number: replacement.line_number,
+            old_line_count: replacement.old_line_count,
+            new_line_count: replacement.new_line_count,
+        })
+        .collect();
+
+    Ok(PlannedFileEdit {
+        updated_content,
         summaries,
     })
 }
 
-fn plan_edit(relative_path: &str, total_lines: usize, edit: &ResolvedEdit) -> Result<PlannedEdit> {
-    match edit.mode {
-        EditMode::Replace => {
-            if total_lines == 0 {
-                bail!("{} is empty; replace edits require existing lines", relative_path);
-            }
-            if edit.lines.end > total_lines {
-                bail!(
-                    "{} has {total_lines} line{}; replace range {} is out of bounds",
-                    relative_path,
-                    if total_lines == 1 { "" } else { "s" },
-                    edit.original_lines
-                );
-            }
-            Ok(PlannedEdit {
-                input_index: edit.input_index,
-                original_lines: edit.original_lines.clone(),
-                mode: edit.mode,
-                start_index: edit.lines.start - 1,
-                old_len: edit.lines.end - edit.lines.start + 1,
-                new_lines: edit.new_lines.clone(),
-            })
-        }
-        EditMode::InsertBefore => {
-            if total_lines == 0 {
-                if edit.lines.start != 1 {
-                    bail!("{} is empty; use lines '1' to insert into an empty file", relative_path);
-                }
-            } else if edit.lines.start > total_lines {
-                bail!(
-                    "{} has {total_lines} line{}; insert_before line {} is out of bounds",
-                    relative_path,
-                    if total_lines == 1 { "" } else { "s" },
-                    edit.lines.start
-                );
-            }
-            Ok(PlannedEdit {
-                input_index: edit.input_index,
-                original_lines: edit.original_lines.clone(),
-                mode: edit.mode,
-                start_index: edit.lines.start.saturating_sub(1),
-                old_len: 0,
-                new_lines: edit.new_lines.clone(),
-            })
-        }
-        EditMode::InsertAfter => {
-            if total_lines == 0 {
-                bail!("{} is empty; insert_after requires an existing line", relative_path);
-            }
-            if edit.lines.start > total_lines {
-                bail!(
-                    "{} has {total_lines} line{}; insert_after line {} is out of bounds",
-                    relative_path,
-                    if total_lines == 1 { "" } else { "s" },
-                    edit.lines.start
-                );
-            }
-            Ok(PlannedEdit {
-                input_index: edit.input_index,
-                original_lines: edit.original_lines.clone(),
-                mode: edit.mode,
-                start_index: edit.lines.start,
-                old_len: 0,
-                new_lines: edit.new_lines.clone(),
-            })
-        }
+fn old_content_label(index: usize, multiple: bool) -> String {
+    if multiple {
+        format!("edits[{index}].oldContent")
+    } else {
+        "oldContent".to_string()
     }
 }
 
-fn validate_no_overlaps(relative_path: &str, operations: &[PlannedEdit]) -> Result<()> {
-    for (left_index, left) in operations.iter().enumerate() {
-        for right in &operations[left_index + 1..] {
-            if operations_conflict(left, right) {
-                bail!(
-                    "overlapping edits in {relative_path}: edit {} ({}) conflicts with edit {} ({})",
-                    left.input_index + 1,
-                    left.original_lines,
-                    right.input_index + 1,
-                    right.original_lines
-                );
-            }
+fn find_unique_replacement_match(
+    relative_path: &str,
+    original: &str,
+    old_content: &str,
+    edit_index: usize,
+    multiple: bool,
+) -> Result<ReplacementMatch> {
+    let exact_occurrences = find_occurrences(original, old_content);
+    let fuzzy = fuzzy_normalize_with_map(original);
+    let fuzzy_old_content = normalize_for_fuzzy_match(old_content);
+    if fuzzy_old_content.is_empty() {
+        not_found_error(relative_path, edit_index, multiple)?;
+    }
+    let fuzzy_occurrences = find_occurrences(&fuzzy.text, &fuzzy_old_content);
+
+    if fuzzy_occurrences.len() > 1 {
+        return duplicate_match_error(relative_path, edit_index, multiple, fuzzy_occurrences.len());
+    }
+
+    match exact_occurrences.len() {
+        1 => {
+            return Ok(ReplacementMatch {
+                start: exact_occurrences[0],
+                len: old_content.len(),
+            });
+        }
+        count if count > 1 => {
+            return duplicate_match_error(relative_path, edit_index, multiple, count)
+        }
+        _ => {}
+    }
+
+    match fuzzy_occurrences.len() {
+        0 => not_found_error(relative_path, edit_index, multiple),
+        1 => {
+            let start = fuzzy_occurrences[0];
+            let end = start + fuzzy_old_content.len();
+            let (original_start, original_end) = fuzzy
+                .original_range_with_trimmed_suffix(start, end)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Could not find the exact text in {relative_path}. The old content must match exactly including all whitespace and newlines."
+                    )
+                })?;
+            Ok(ReplacementMatch {
+                start: original_start,
+                len: original_end - original_start,
+            })
+        }
+        count => duplicate_match_error(relative_path, edit_index, multiple, count),
+    }
+}
+
+fn not_found_error(
+    relative_path: &str,
+    edit_index: usize,
+    multiple: bool,
+) -> Result<ReplacementMatch> {
+    if multiple {
+        bail!(
+            "Could not find edits[{edit_index}] in {relative_path}. The oldContent must match exactly including all whitespace and newlines."
+        );
+    }
+    bail!(
+        "Could not find the exact text in {relative_path}. The old content must match exactly including all whitespace and newlines."
+    );
+}
+
+fn duplicate_match_error(
+    relative_path: &str,
+    edit_index: usize,
+    multiple: bool,
+    count: usize,
+) -> Result<ReplacementMatch> {
+    if multiple {
+        bail!(
+            "Found {count} occurrences of edits[{edit_index}] in {relative_path}. Each oldContent must be unique. Please provide more context to make it unique."
+        );
+    }
+    bail!(
+        "Found {count} occurrences of the text in {relative_path}. The text must be unique. Please provide more context to make it unique."
+    );
+}
+
+fn find_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+    let mut occurrences = Vec::new();
+    let mut search_start = 0;
+
+    while search_start <= haystack.len() {
+        let Some(relative_match) = haystack[search_start..].find(needle) else {
+            break;
+        };
+        let absolute_match = search_start + relative_match;
+        occurrences.push(absolute_match);
+        search_start = next_char_boundary(haystack, absolute_match);
+    }
+
+    occurrences
+}
+
+fn next_char_boundary(text: &str, offset: usize) -> usize {
+    if offset >= text.len() {
+        return text.len() + 1;
+    }
+    offset
+        + text[offset..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(1)
+}
+
+fn validate_no_overlaps(relative_path: &str, replacements: &[PlannedReplacement]) -> Result<()> {
+    let mut sorted = replacements.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|replacement| (replacement.start, replacement.end()));
+
+    for pair in sorted.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if left.end() > right.start {
+            bail!(
+                "edits[{}] and edits[{}] overlap in {relative_path}. Merge them into one edit or target disjoint regions.",
+                left.edit_index,
+                right.edit_index
+            );
         }
     }
     Ok(())
 }
 
-fn operations_conflict(left: &PlannedEdit, right: &PlannedEdit) -> bool {
-    let left_end = left.start_index + left.old_len;
-    let right_end = right.start_index + right.old_len;
-    match (left.old_len == 0, right.old_len == 0) {
-        (true, true) => left.start_index == right.start_index,
-        (false, false) => left.start_index < right_end && right.start_index < left_end,
-        (true, false) => left.start_index >= right.start_index && left.start_index <= right_end,
-        (false, true) => right.start_index >= left.start_index && right.start_index <= left_end,
-    }
-}
+fn apply_replacements(original: &str, replacements: &[PlannedReplacement]) -> String {
+    let mut updated = original.to_string();
+    let mut sorted = replacements.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| right.start.cmp(&left.start));
 
-fn summary_for_operation(operation: &PlannedEdit, operations: &[PlannedEdit]) -> EditSummary {
-    let shift = operations
-        .iter()
-        .filter(|other| other.input_index != operation.input_index)
-        .filter(|other| other.start_index < operation.start_index)
-        .map(|other| other.new_lines.len() as isize - other.old_len as isize)
-        .sum::<isize>();
-    let now_start_index = (operation.start_index as isize + shift).max(0) as usize;
-    let (now_start, now_end) = if operation.new_lines.is_empty() {
-        (None, None)
-    } else {
-        (
-            Some(now_start_index + 1),
-            Some(now_start_index + operation.new_lines.len()),
-        )
-    };
-    EditSummary {
-        input_index: operation.input_index,
-        mode: operation.mode,
-        original_lines: operation.original_lines.clone(),
-        now_start,
-        now_end,
-    }
-}
-
-fn apply_planned_edits(mut lines: Vec<String>, operations: &[PlannedEdit]) -> Vec<String> {
-    for operation in operations {
-        lines.splice(
-            operation.start_index..operation.start_index + operation.old_len,
-            operation.new_lines.clone(),
+    for replacement in sorted {
+        updated.replace_range(
+            replacement.start..replacement.start + replacement.old_len,
+            &replacement.new_content,
         );
     }
-    lines
+
+    updated
 }
 
-fn format_group_summary(
+fn format_file_summary(
     relative_path: &str,
     old_count: usize,
     new_count: usize,
-    summaries: &[EditSummary],
+    summaries: &[ReplacementSummary],
 ) -> String {
     let mut output = format!(
         "{relative_path}: {old_count} -> {new_count} line{}",
         if new_count == 1 { "" } else { "s" }
     );
     let mut summaries = summaries.iter().collect::<Vec<_>>();
-    summaries.sort_by_key(|summary| summary.input_index);
+    summaries.sort_by_key(|summary| summary.edit_index);
     for summary in summaries {
-        let now = match (summary.now_start, summary.now_end) {
-            (Some(start), Some(end)) if start == end => format!("now {start}"),
-            (Some(start), Some(end)) => format!("now {start}-{end}"),
-            _ => "now removed".to_string(),
-        };
         output.push_str(&format!(
-            "\n  [{}] {} {} -> {now}",
-            summary.input_index + 1,
-            summary.mode.as_str(),
-            summary.original_lines
+            "\n  [{}] replaced {} line{} with {} line{} at line {}",
+            summary.edit_index + 1,
+            summary.old_line_count,
+            if summary.old_line_count == 1 { "" } else { "s" },
+            summary.new_line_count,
+            if summary.new_line_count == 1 { "" } else { "s" },
+            summary.line_number
         ));
     }
     output
 }
-
-fn parse_line_spec(raw: &str) -> Result<LineSpec> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        bail!("lines is required");
+fn normalize_file_text(text: &str) -> NormalizedFileText {
+    let (bom, without_bom) = strip_utf8_bom(text);
+    let line_ending = detect_line_ending(without_bom);
+    NormalizedFileText {
+        bom,
+        line_ending,
+        content: normalize_line_endings(without_bom),
     }
-    let Some((start, end)) = trimmed.split_once('-') else {
-        let line = parse_positive_line(trimmed)?;
-        return Ok(LineSpec {
-            start: line,
-            end: line,
-        });
-    };
-    if end.contains('-') {
-        bail!("expected 'N' or 'N-M'");
-    }
-    let start = parse_positive_line(start.trim())?;
-    let end = parse_positive_line(end.trim())?;
-    if start > end {
-        bail!("range start must be less than or equal to range end");
-    }
-    Ok(LineSpec { start, end })
 }
 
-fn parse_positive_line(raw: &str) -> Result<usize> {
-    let value = raw
-        .parse::<usize>()
-        .with_context(|| format!("invalid line number '{raw}'"))?;
-    if value == 0 {
-        bail!("line numbers are 1-based and must be greater than 0");
-    }
-    Ok(value)
+fn strip_utf8_bom(text: &str) -> (bool, &str) {
+    text.strip_prefix('\u{FEFF}')
+        .map(|stripped| (true, stripped))
+        .unwrap_or((false, text))
 }
 
-fn split_logical_lines(text: &str) -> Vec<String> {
+fn detect_line_ending(text: &str) -> LineEnding {
+    let crlf_index = text.find("\r\n");
+    let lf_index = text.find('\n');
+    match (crlf_index, lf_index) {
+        (Some(crlf), Some(lf)) if crlf == lf.saturating_sub(1) => LineEnding::Crlf,
+        _ => LineEnding::Lf,
+    }
+}
+
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn restore_line_endings(text: &str, line_ending: LineEnding) -> String {
+    match line_ending {
+        LineEnding::Lf => text.to_string(),
+        LineEnding::Crlf => text.replace('\n', "\r\n"),
+    }
+}
+
+fn normalize_for_fuzzy_match(text: &str) -> String {
+    fuzzy_normalize_with_map(text).text
+}
+
+fn fuzzy_normalize_with_map(text: &str) -> FuzzyNormalizedText {
+    let mut normalized = String::new();
+    let mut start_boundaries = vec![Some(0)];
+    let mut end_boundaries = vec![Some(0)];
+    let mut next_trimmed_boundaries = vec![Some(0)];
+    let mut text_offset = 0;
+
+    for segment in text.split_inclusive('\n') {
+        let has_newline = segment.ends_with('\n');
+        let line = if has_newline {
+            &segment[..segment.len() - 1]
+        } else {
+            segment
+        };
+        let trimmed = line.trim_end_matches(char::is_whitespace);
+        let trimmed_end = text_offset + trimmed.len();
+        let line_end = text_offset + line.len();
+
+        for (local_offset, ch) in trimmed.char_indices() {
+            emit_fuzzy_char(
+                &mut normalized,
+                &mut start_boundaries,
+                &mut end_boundaries,
+                &mut next_trimmed_boundaries,
+                text_offset + local_offset,
+                text_offset + local_offset + ch.len_utf8(),
+                fuzzy_char(ch),
+            );
+        }
+
+        if line_end > trimmed_end {
+            let boundary = normalized.len();
+            if next_trimmed_boundaries.len() <= boundary {
+                next_trimmed_boundaries.resize(boundary + 1, None);
+            }
+            next_trimmed_boundaries[boundary] = Some(line_end);
+        }
+
+        if has_newline {
+            let newline_offset = text_offset + segment.len() - 1;
+            emit_fuzzy_char(
+                &mut normalized,
+                &mut start_boundaries,
+                &mut end_boundaries,
+                &mut next_trimmed_boundaries,
+                newline_offset,
+                newline_offset + 1,
+                '\n',
+            );
+        }
+
+        text_offset += segment.len();
+    }
+
     if text.is_empty() {
-        return Vec::new();
+        start_boundaries[0] = Some(0);
+        end_boundaries[0] = Some(0);
+        next_trimmed_boundaries[0] = Some(0);
     }
-    let mut lines = text
-        .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
-        .collect::<Vec<_>>();
-    if lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+
+    FuzzyNormalizedText {
+        text: normalized,
+        start_boundaries,
+        end_boundaries,
+        next_trimmed_boundaries,
     }
-    lines
 }
 
-fn join_lines(lines: &[String]) -> String {
-    if lines.is_empty() {
-        String::new()
-    } else {
-        let mut content = lines.join("\n");
-        content.push('\n');
-        content
+fn emit_fuzzy_char(
+    normalized: &mut String,
+    start_boundaries: &mut Vec<Option<usize>>,
+    end_boundaries: &mut Vec<Option<usize>>,
+    next_trimmed_boundaries: &mut Vec<Option<usize>>,
+    original_start: usize,
+    original_end: usize,
+    ch: char,
+) {
+    let normalized_start = normalized.len();
+    normalized.push(ch);
+    let normalized_end = normalized.len();
+    let required_len = normalized_end + 1;
+    if start_boundaries.len() < required_len {
+        start_boundaries.resize(required_len, None);
     }
+    if end_boundaries.len() < required_len {
+        end_boundaries.resize(required_len, None);
+    }
+    if next_trimmed_boundaries.len() < required_len {
+        next_trimmed_boundaries.resize(required_len, None);
+    }
+    start_boundaries[normalized_start] = Some(original_start);
+    end_boundaries[normalized_end] = Some(original_end);
+}
+
+fn fuzzy_char(ch: char) -> char {
+    match ch {
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+        | '\u{2212}' => '-',
+        '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
+        _ => ch,
+    }
+}
+
+fn text_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count().max(1)
+    }
+}
+
+fn line_number_at(text: &str, byte_offset: usize) -> usize {
+    text[..byte_offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
 }
 
 fn resolve_existing_workspace_file(root: &Path, raw: &str) -> Result<(String, PathBuf)> {
@@ -658,7 +880,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn replace_existing_lines() {
+    async fn replaces_exact_text_in_one_file() {
         let root = unique_temp_dir();
         fs::create_dir_all(&root).expect("create temp workspace");
         fs::write(root.join("app.rs"), "one\ntwo\nthree\nfour\n").expect("write file");
@@ -670,9 +892,10 @@ mod tests {
                 json!({
                     "edits": [{
                         "path": "app.rs",
-                        "lines": "2-3",
-                        "mode": "replace",
-                        "content": "deux\ntrois"
+                        "edits": [{
+                            "oldContent": "two\nthree",
+                            "newContent": "deux\ntrois"
+                        }]
                     }]
                 }),
                 &fingerprints,
@@ -681,42 +904,21 @@ mod tests {
             .expect("edit should apply");
 
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(root.join("app.rs")).unwrap(), "one\ndeux\ntrois\nfour\n");
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "one\ndeux\ntrois\nfour\n"
+        );
+        assert!(result.content.contains("Edited 1 file (1 replacement)."));
         assert!(result.content.contains("app.rs: 4 -> 4 lines"));
-        assert!(result.content.contains("[1] replace 2-3 -> now 2-3"));
+        assert!(result
+            .content
+            .contains("[1] replaced 2 lines with 2 lines at line 2"));
         assert_eq!(result.file_changes.len(), 1);
         fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]
-    async fn insert_before_and_after_lines() {
-        let root = unique_temp_dir();
-        fs::create_dir_all(&root).expect("create temp workspace");
-        fs::write(root.join("app.rs"), "one\ntwo\nthree\n").expect("write file");
-        let tool = EditFileTool::new(&root);
-        let fingerprints = fingerprints(&root, &["app.rs"]);
-
-        tool.edit(
-            json!({
-                "edits": [
-                    {"path": "app.rs", "lines": "1", "mode": "insert_before", "content": "zero"},
-                    {"path": "app.rs", "lines": "2", "mode": "insert_after", "content": "two point five"}
-                ]
-            }),
-            &fingerprints,
-        )
-        .await
-        .expect("edit should apply");
-
-        assert_eq!(
-            fs::read_to_string(root.join("app.rs")).unwrap(),
-            "zero\none\ntwo\ntwo point five\nthree\n"
-        );
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[tokio::test]
-    async fn multi_edits_use_original_line_numbers() {
+    async fn applies_multiple_disjoint_replacements_in_one_file() {
         let root = unique_temp_dir();
         fs::create_dir_all(&root).expect("create temp workspace");
         fs::write(root.join("app.rs"), "a\nb\nc\nd\ne\n").expect("write file");
@@ -725,17 +927,276 @@ mod tests {
 
         tool.edit(
             json!({
-                "edits": [
-                    {"path": "app.rs", "lines": "2", "mode": "replace", "content": "B1\nB2"},
-                    {"path": "app.rs", "lines": "5", "mode": "insert_after", "content": "f"}
-                ]
+                "edits": [{
+                    "path": "app.rs",
+                    "edits": [
+                        {"oldContent": "b", "newContent": "B1\nB2"},
+                        {"oldContent": "e", "newContent": "E"}
+                    ]
+                }]
             }),
             &fingerprints,
         )
         .await
         .expect("edit should apply");
 
-        assert_eq!(fs::read_to_string(root.join("app.rs")).unwrap(), "a\nB1\nB2\nc\nd\ne\nf\n");
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "a\nB1\nB2\nc\nd\nE\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn applies_replacements_across_multiple_files() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(root.join("src")).expect("create temp workspace");
+        fs::write(root.join("src/a.rs"), "fn old() {}\n").expect("write a");
+        fs::write(root.join("src/b.rs"), "old();\n").expect("write b");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["src/a.rs", "src/b.rs"]);
+
+        let result = tool
+            .edit(
+                json!({
+                    "edits": [
+                        {"path": "src/a.rs", "edits": [{"oldContent": "fn old", "newContent": "fn new"}]},
+                        {"path": "src/b.rs", "edits": [{"oldContent": "old();", "newContent": "new();"}]}
+                    ]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect("edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("src/a.rs")).unwrap(),
+            "fn new() {}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/b.rs")).unwrap(),
+            "new();\n"
+        );
+        assert!(result.content.contains("Edited 2 files (2 replacements)."));
+        assert_eq!(result.file_changes.len(), 2);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_replacement_list() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        let tool = EditFileTool::new(&root);
+
+        let error = tool
+            .edit(json!({ "edits": [] }), &HashMap::new())
+            .await
+            .expect_err("empty edits should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Edit tool input is invalid. edits must contain at least one replacement."
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_inaccessible_file() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        let tool = EditFileTool::new(&root);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "missing.rs",
+                        "edits": [{"oldContent": "a", "newContent": "b"}]
+                    }]
+                }),
+                &HashMap::new(),
+            )
+            .await
+            .expect_err("missing file should fail");
+
+        assert!(error
+            .to_string()
+            .starts_with("Could not edit file: missing.rs. Error code:"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_old_content_for_single_edit() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "a\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "", "newContent": "b"}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("empty old content should fail");
+
+        assert_eq!(error.to_string(), "oldContent must not be empty in app.rs.");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_old_content_for_multiple_edits() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "a\nb\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [
+                            {"oldContent": "a", "newContent": "A"},
+                            {"oldContent": "", "newContent": "B"}
+                        ]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("empty old content should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "edits[1].oldContent must not be empty in app.rs."
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_old_content_for_single_edit() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "a\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "missing", "newContent": "b"}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("missing old content should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Could not find the exact text in app.rs. The old content must match exactly including all whitespace and newlines."
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_old_content_for_multiple_edits_without_writing() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "a\nb\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [
+                            {"oldContent": "a", "newContent": "A"},
+                            {"oldContent": "missing", "newContent": "B"}
+                        ]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("missing old content should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Could not find edits[1] in app.rs. The oldContent must match exactly including all whitespace and newlines."
+        );
+        assert_eq!(fs::read_to_string(root.join("app.rs")).unwrap(), "a\nb\n");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_non_unique_old_content_for_single_edit() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "same\nsame\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "same", "newContent": "other"}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("non unique old content should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Found 2 occurrences of the text in app.rs. The text must be unique. Please provide more context to make it unique."
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_non_unique_old_content_for_multiple_edits() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "first\nsame\nsame\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [
+                            {"oldContent": "first", "newContent": "changed"},
+                            {"oldContent": "same", "newContent": "other"}
+                        ]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("non unique old content should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Found 2 occurrences of edits[1] in app.rs. Each oldContent must be unique. Please provide more context to make it unique."
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -750,18 +1211,55 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [
-                        {"path": "app.rs", "lines": "2-3", "mode": "replace", "content": "x"},
-                        {"path": "app.rs", "lines": "3", "mode": "insert_before", "content": "y"}
-                    ]
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [
+                            {"oldContent": "b\nc", "newContent": "x"},
+                            {"oldContent": "c\nd", "newContent": "y"}
+                        ]
+                    }]
                 }),
                 &fingerprints,
             )
             .await
             .expect_err("overlap should fail");
 
-        assert!(error.to_string().contains("overlapping edits"));
-        assert_eq!(fs::read_to_string(root.join("app.rs")).unwrap(), "a\nb\nc\nd\n");
+        assert_eq!(
+            error.to_string(),
+            "edits[0] and edits[1] overlap in app.rs. Merge them into one edit or target disjoint regions."
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "a\nb\nc\nd\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_identical_replacement() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "a\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "a", "newContent": "a"}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("identical replacement should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "No changes made to app.rs. The replacement produced identical content. The oldContent and newContent are the same."
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -777,35 +1275,129 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{"path": "app.rs", "lines": "2", "mode": "replace", "content": "B"}]
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "b", "newContent": "B"}]
+                    }]
                 }),
                 &fingerprints,
             )
             .await
             .expect_err("stale fingerprint should fail");
 
-        assert!(error.to_string().contains("changed since the last successful read"));
+        assert!(error
+            .to_string()
+            .contains("changed since the last successful read"));
         fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]
-    async fn inserts_into_empty_file_with_insert_before_one() {
+    async fn accepts_old_text_new_text_aliases() {
         let root = unique_temp_dir();
         fs::create_dir_all(&root).expect("create temp workspace");
-        fs::write(root.join("empty.txt"), "").expect("write file");
+        fs::write(root.join("app.rs"), "alpha\n").expect("write file");
         let tool = EditFileTool::new(&root);
-        let fingerprints = fingerprints(&root, &["empty.txt"]);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
 
         tool.edit(
             json!({
-                "edits": [{"path": "empty.txt", "lines": "1", "mode": "insert_before", "content": "hello"}]
+                "edits": [{
+                    "path": "app.rs",
+                    "edits": [{"oldText": "alpha", "newText": "beta"}]
+                }]
             }),
             &fingerprints,
         )
         .await
-        .expect("insert should apply");
+        .expect("alias edit should apply");
 
-        assert_eq!(fs::read_to_string(root.join("empty.txt")).unwrap(), "hello\n");
+        assert_eq!(fs::read_to_string(root.join("app.rs")).unwrap(), "beta\n");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn preserves_bom_and_crlf_line_endings() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "\u{FEFF}one\r\ntwo\r\nthree\r\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        tool.edit(
+            json!({
+                "edits": [{
+                    "path": "app.rs",
+                    "edits": [{"oldContent": "two\nthree", "newContent": "deux\ntrois"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "\u{FEFF}one\r\ndeux\r\ntrois\r\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn fuzzy_fallback_handles_smart_punctuation_and_trailing_whitespace() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(
+            root.join("copy.txt"),
+            "title: “Hello”—world   \nstatus: fine\n",
+        )
+        .expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["copy.txt"]);
+
+        tool.edit(
+            json!({
+                "edits": [{
+                    "path": "copy.txt",
+                    "edits": [{"oldContent": "title: \"Hello\"-world", "newContent": "title: \"Hello\" - world"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("fuzzy edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("copy.txt")).unwrap(),
+            "title: \"Hello\" - world\nstatus: fine\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn fuzzy_fallback_still_requires_unique_match() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("copy.txt"), "title: “Hello”\ntitle: \"Hello\"\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["copy.txt"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "copy.txt",
+                        "edits": [{"oldContent": "title: \"Hello\"", "newContent": "title: hi"}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("non unique fuzzy match should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Found 2 occurrences of the text in copy.txt. The text must be unique. Please provide more context to make it unique."
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -813,7 +1405,8 @@ mod tests {
         paths
             .iter()
             .map(|path| {
-                let fingerprint = fingerprint_path(root, &root.join(path)).expect("fingerprint file");
+                let fingerprint =
+                    fingerprint_path(root, &root.join(path)).expect("fingerprint file");
                 ((*path).to_string(), fingerprint)
             })
             .collect()

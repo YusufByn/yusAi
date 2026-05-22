@@ -124,7 +124,7 @@ The agent has access to a full set of tools:
 | `read` | Read files |
 | `Glob` | Find files by pattern |
 | `Grep` | Search text / regex in files |
-| `edit_file` | Edit existing files by line number |
+| `edit_file` | Edit existing files with exact search/replace blocks |
 | `write_file` | Write complete files with overwrite guardrails |
 | `WebSearch` | Web search |
 | `WebFetch` | Fetch the contents of a URL |
@@ -277,9 +277,27 @@ Three counters in the header: **`matches`** (total matches), **`files`** (number
 
 ### `edit_file`
 
-Edits existing workspace text files by line number. The agent sends an array of edits, each with `path`, `lines`, `mode` (`replace`, `insert_before`, `insert_after`) and `content`.
+Edits existing workspace text files with exact search/replace blocks. The agent sends top-level `edits` grouped by file:
 
-The tool requires a successful prior `read` and refuses to write if the file changed since that read. Multiple edits in the same file use the original line numbers from the last read and are applied bottom-to-top automatically.
+```json
+{
+  "edits": [
+    {
+      "path": "src/foo.ts",
+      "edits": [
+        {
+          "oldContent": "const oldName = value;",
+          "newContent": "const newName = value;"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`oldContent` must be non-empty and match exactly once in the file, including whitespace and newlines. If it appears multiple times, the agent adds surrounding context until it is unique. `newContent` may be empty to delete the matched block.
+
+The tool requires a successful prior `read` and refuses to write if the file changed since that read. Multiple replacements in the same file are matched against the original file content; overlapping replacements are rejected, so the agent must merge them into one edit or target disjoint regions.
 
 ### `write_file`
 
