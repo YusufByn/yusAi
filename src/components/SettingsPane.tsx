@@ -5,6 +5,7 @@ import { Wrench } from "lucide-react";
 import { api } from "../lib/ipc";
 import { loadTheme } from "../lib/theme";
 import { defineSinewThemes, monacoThemeName } from "../lib/monacoTheme";
+import { canonicalToolName } from "../lib/tools";
 import { Markdown } from "./chat/Markdown";
 import { SinewMark } from "./SinewMark";
 import { APP_NAME } from "../branding";
@@ -2000,8 +2001,8 @@ const TOOL_GROUPS = [
 type ToolGroupId = (typeof TOOL_GROUPS)[number]["id"];
 
 const SWARM_TOOL_NAMES = new Set([
-  "SendMessage",
-  "TaskList",
+  "send_message",
+  "task_list",
 ]);
 
 function ToolsSection({
@@ -2037,8 +2038,8 @@ function ToolsSection({
     imageProvider === "nanoBanana2" || !subscriptionActive;
   const activeImageKey =
     imageProvider === "nanoBanana2" ? nanoBananaApiKey : openaiImageApiKey;
-  const hasImageTool = tools.some((tool) => tool.name === "CreateImage");
-  const hasWebSearchTool = tools.some((tool) => tool.name === "WebSearch");
+  const hasImageTool = tools.some((tool) => canonicalToolName(tool.name) === "create_image");
+  const hasWebSearchTool = tools.some((tool) => canonicalToolName(tool.name) === "web_search");
   const enabledCount = tools.filter((tool) => tool.enabled).length;
   const groups = TOOL_GROUPS.map((group) => {
     const groupTools = tools.filter((tool) => toolGroupId(tool) === group.id);
@@ -2244,7 +2245,7 @@ function ToolsSection({
 }
 
 function toolGroupId(tool: ToolConfig): ToolGroupId {
-  return SWARM_TOOL_NAMES.has(tool.name) ? "swarm" : "main";
+  return SWARM_TOOL_NAMES.has(canonicalToolName(tool.name)) ? "swarm" : "main";
 }
 
 function PlanModePromptSettingsItem({
@@ -4413,7 +4414,7 @@ function normalizeToolSettings(settings: ToolSettings): ToolSettings {
     databasePassword: settings.databasePassword ?? "",
     databaseName: settings.databaseName ?? "",
     tools: (settings.tools ?? []).flatMap((tool) => {
-      const name = tool.name?.trim();
+      const name = canonicalToolName(tool.name?.trim() ?? "");
       if (!name || seen.has(name)) return [];
       seen.add(name);
       const defaultDescription = tool.defaultDescription ?? tool.description ?? "";
@@ -4801,25 +4802,26 @@ function BroomGlyph() {
 }
 
 function ToolGlyph({ name }: { name: string }) {
-  if (name === "bash" || name === "bash_input") {
+  const canonicalName = canonicalToolName(name);
+  if (canonicalName === "bash" || canonicalName === "bash_input") {
     return <TerminalGlyph />;
   }
-  if (name === "Glob" || name === "Grep") {
+  if (canonicalName === "glob" || canonicalName === "grep") {
     return <AsteriskGlyph />;
   }
-  if (name === "TeamRun" || name === "TeamStatus" || name === "TeamStop") {
+  if (canonicalName === "team_run" || canonicalName === "team_status" || canonicalName === "team_stop") {
     return <SwarmGlyph />;
   }
-  if (name === "LoadMcpTool") {
+  if (canonicalName === "load_mcp_tool") {
     return <McpGlyph />;
   }
-  if (name === "LoadSkill") {
+  if (canonicalName === "skill") {
     return <SkillGlyph />;
   }
-  if (name === "clean_context") {
+  if (canonicalName === "clean_context") {
     return <BroomGlyph />;
   }
-  const icon = TOOL_ICON[name] ?? "solar:tuning-2-linear";
+  const icon = TOOL_ICON[canonicalName] ?? "solar:tuning-2-linear";
   return <Icon icon={icon} width={13} height={13} />;
 }
 
@@ -4829,24 +4831,26 @@ const TOOL_LABEL: Record<string, string> = {
   read: "Read",
   edit_file: "Edit file",
   write_file: "Write file",
-  Glob: "Glob",
-  Grep: "Grep",
-  WebSearch: "Web search",
-  WebFetch: "Web fetch",
+  glob: "Glob",
+  grep: "Grep",
+  web_search: "Web search",
+  web_fetch: "Web fetch",
+  create_image: "Create image",
+  question: "Question",
+  todo_list: "To-do list",
+  load_mcp_tool: "Load MCP tool",
+  skill: "Load skill",
+  team_run: "Team run",
+  team_status: "Team status",
+  team_stop: "Team stop",
+  send_message: "Send message",
   HttpRequest: "HTTP request",
   logs_start: "Logs start",
   logs_tail: "Logs tail",
   logs_list: "Logs list",
   logs_stop: "Logs stop",
-  CreateImage: "Create image",
-  Question: "Question",
-  ToDoList: "To-do list",
-  LoadMcpTool: "Load MCP tool",
-  LoadSkill: "Load skill",
-  TeamRun: "Team run",
-  TeamStatus: "Team status",
-  TeamStop: "Team stop",
-  SendMessage: "Send message",
+  SupabaseQuery: "Supabase query",
+  DatabaseQuery: "Database query",
   clean_context: "Clean context",
   update_goal: "Update goal",
   context_compaction: "Compact context",
@@ -4856,17 +4860,17 @@ const TOOL_ICON: Record<string, string> = {
   read: "solar:document-text-linear",
   edit_file: "solar:pen-2-linear",
   write_file: "solar:file-text-linear",
-  WebSearch: "solar:magnifer-linear",
-  WebFetch: "solar:link-round-linear",
+  web_search: "solar:magnifer-linear",
+  web_fetch: "solar:link-round-linear",
+  create_image: "solar:gallery-wide-linear",
+  question: "solar:question-circle-linear",
+  todo_list: "solar:checklist-linear",
+  send_message: "solar:chat-round-dots-linear",
   HttpRequest: "solar:server-square-cloud-linear",
   logs_start: "solar:play-circle-linear",
   logs_tail: "solar:document-text-linear",
   logs_list: "solar:list-linear",
   logs_stop: "solar:stop-circle-linear",
-  CreateImage: "solar:gallery-wide-linear",
-  Question: "solar:question-circle-linear",
-  ToDoList: "solar:checklist-linear",
-  SendMessage: "solar:chat-round-dots-linear",
   update_goal: "solar:flag-2-linear",
   context_compaction: "solar:archive-linear",
 };
@@ -4875,10 +4879,10 @@ function labelForTool(tool: ToolConfig | string): string {
   if (typeof tool !== "string") {
     const displayName = tool.displayName?.trim();
     if (displayName) return displayName;
-    return TOOL_LABEL[tool.name] ?? humanizeToolName(tool.name);
+    return TOOL_LABEL[canonicalToolName(tool.name)] ?? humanizeToolName(tool.name);
   }
   const name = tool;
-  return TOOL_LABEL[name] ?? humanizeToolName(name);
+  return TOOL_LABEL[canonicalToolName(name)] ?? humanizeToolName(name);
 }
 
 function humanizeToolName(name: string): string {
