@@ -15,6 +15,7 @@ const CLEANED_TOOL_OUTPUT =
   "[Tool result cleaned by you: irrelevant to future context.]";
 const COMPACTION_SUMMARY_PREFIX =
   "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
+const LIVE_WRITE_DIFF_LINE_LIMIT = 400;
 
 // -----------------------------------------------------------------
 // View model used to render the chat pane. It flattens the history
@@ -75,6 +76,7 @@ export type ChatBlock =
       answered?: boolean;
       answer?: string;
       fileChanges?: FileChange[];
+      liveFileChange?: FileChange;
       images?: ToolResultImage[];
       meta?: Record<string, unknown> | null;
       subAgent?: SubAgentBlock;
@@ -823,6 +825,7 @@ function genericMcpLabel(value: string): string {
 function pendingSummary(name: string): string | undefined {
   if (name === "bash") return "Running command";
   if (name === "bash_input") return "Interacting with command";
+  if (name === "edit_file") return "Preparing edit";
   if (name === "write_file") return "Preparing write";
   if (name === "clean_context") return "Cleaning context";
   if (name === "context_compaction") return "Compacting context";
@@ -1011,6 +1014,33 @@ function readPathFromPartialJson(input: string): string | null {
   return path || null;
 }
 
+function liveWriteDiffLines(content: string): FileChange["lines"] {
+  const lines = content.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  return lines.slice(0, LIVE_WRITE_DIFF_LINE_LIMIT).map((text) => ({
+    kind: "added" as const,
+    text,
+  }));
+}
+
+function liveWriteFileChangeFromInput(input: unknown): FileChange | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const record = input as Record<string, unknown>;
+  const path = typeof record.path === "string" ? record.path.trim() : "";
+  if (!path) return undefined;
+  if (typeof record.content !== "string" || record.content.length === 0) return undefined;
+  const allLines = record.content.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  return {
+    relativePath: path,
+    kind: "added",
+    summary: `Writing ${path}`,
+    binary: false,
+    addedLines: allLines.length,
+    removedLines: 0,
+    truncated: allLines.length > LIVE_WRITE_DIFF_LINE_LIMIT,
+    lines: liveWriteDiffLines(record.content),
+  };
+}
+
 function partialWriteFileArgs(input: string): Record<string, unknown> | null {
   const path = jsonStringProperty(input, "path");
   const content = jsonStringProperty(input, "content");
@@ -1039,8 +1069,6 @@ function partialArgsFromToolJson(
 }
 
 function editFileGroups(input: Record<string, unknown>): unknown[] | null {
-  const edits = input.edits;
-  if (Array.isArray(edits)) return edits;
   const files = input.files;
   return Array.isArray(files) ? files : null;
 }
@@ -1086,7 +1114,7 @@ function partialEditFileArgs(input: string): Record<string, unknown> | null {
     })
     .filter((path) => path.trim());
   if (paths.length === 0) return null;
-  return { edits: paths.map((path) => ({ path })) };
+  return { files: paths.map((path) => ({ path })) };
 }
 
 // -----------------------------------------------------------------
@@ -1261,6 +1289,10 @@ export function applyEvent(
             summary: event.summary,
             argsPretty: input ? prettyToolInput(block.name, input) : event.args_pretty,
             argsRaw: undefined,
+            liveFileChange:
+              block.name === "write_file"
+                ? liveWriteFileChangeFromInput(input) ?? block.liveFileChange
+                : block.liveFileChange,
             subAgent: isSubAgentLikeTool(block.name)
               ? {
                   ...(block.subAgent ?? { id: block.id, name: "Sub-agent" }),
@@ -1282,6 +1314,10 @@ export function applyEvent(
           parsedInput && typeof parsedInput === "object"
             ? (parsedInput as Record<string, unknown>)
             : partialArgsFromToolJson(block.name, argsRaw);
+        const liveFileChange =
+          block.name === "write_file"
+            ? liveWriteFileChangeFromInput(partialInput) ?? block.liveFileChange
+            : block.liveFileChange;
         return {
           ...block,
           hidden:
@@ -1292,6 +1328,7 @@ export function applyEvent(
           argsPretty: partialInput
             ? prettyToolInput(block.name, partialInput)
             : block.argsPretty,
+          liveFileChange,
           summary: partialInput
             ? summaryFromInput(block.name, partialInput) ?? block.summary
             : block.summary,
@@ -1451,6 +1488,7 @@ export function applyEvent(
                 ? questionAnswerFromMeta(event.meta)
                 : block.answer,
             fileChanges: hasFileChanges ? event.file_changes : block.fileChanges,
+            liveFileChange: undefined,
             images: images.length > 0 ? images : block.images,
             meta: event.meta ?? block.meta,
           };
@@ -1462,10 +1500,28 @@ export function applyEvent(
     case "token_usage":
       return state;
 
-    case "interrupted":
+    case "interrupted": {
+      const blocks = state.blocks.map((block) => {
+        if (block.kind === "tool" && block.status === "running") {
+          const output =
+            block.output && block.output.length > 0
+              ? block.output
+              : "Tool call interrupted by user";
+          return {
+            ...block,
+            status: "error" as const,
+            isError: true,
+            output,
+            liveFileChange: undefined,
+          };
+        }
+        return block;
+      });
       return withStreamPhase(state, "idle", {
         status: "stopped",
+        blocks,
       });
+    }
 
     case "error":
       return withStreamPhase(state, "idle", {

@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sinew_core::{ChatMessage, ModelRef, Part, Provider, Role, ToolDescriptor};
+use sinew_core::{ChatMessage, ModelRef, Part, Provider, Role, ServiceTier, ToolDescriptor};
 use tokio::sync::mpsc;
 
 use crate::tool_run::FileChange;
@@ -67,6 +67,7 @@ pub struct SubAgentTool {
     tool_settings: ToolSettings,
     skill_settings: SkillSettings,
     max_tool_rounds: usize,
+    service_tier: Option<ServiceTier>,
     cancel: TurnCancel,
 }
 
@@ -80,6 +81,7 @@ impl SubAgentTool {
         tool_settings: ToolSettings,
         skill_settings: SkillSettings,
         max_tool_rounds: usize,
+        service_tier: Option<ServiceTier>,
         cancel: TurnCancel,
     ) -> Self {
         Self {
@@ -91,6 +93,7 @@ impl SubAgentTool {
             tool_settings,
             skill_settings,
             max_tool_rounds,
+            service_tier,
             cancel,
         }
     }
@@ -195,6 +198,7 @@ impl SubAgentTool {
             model: agent.model.clone(),
             cache_key: Some(format!("subagent:{}:{}", agent.id, tool_call_id)),
             cache_stable_message_count: 0,
+            service_tier: self.service_tier,
             auto_compact: true,
             mode: child_mode,
             stop_questions: false,

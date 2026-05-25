@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sinew_core::ToolDescriptor;
@@ -19,26 +20,10 @@ use crate::{
 
 const MAX_EDIT_COUNT: usize = 128;
 const MAX_TOTAL_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+const BLOCK_ANCHOR_MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD: f64 = 0.3;
+const CONTEXT_AWARE_MIN_MATCHING_LINE_RATIO: f64 = 0.5;
 
-const EDIT_FILE_DESCRIPTION: &str = r#"Edit existing workspace text files with exact search/replace blocks. This tool only edits files; it does not create, delete, rename, or move files.
-
-Input has:
-- edits: array of file edit groups. Each file group has:
-- path: relative to the workspace root, or an absolute path inside the workspace.
-- edits: one or more replacements to apply to that file.
-
-Each replacement has:
-- oldContent: exact text to replace. It must be non-empty and should match exactly once in the file, including whitespace and newlines. If exact matching fails, edit_file tries a conservative fuzzy fallback for line endings, trailing whitespace, smart quotes, unicode dashes, and special spaces.
-- newContent: replacement text. It may be empty to delete oldContent.
-
-Rules:
-- You must read a file successfully before editing it. edit_file refuses to write if the file changed since that read.
-- Prefer one edit_file call with multiple file groups and multiple replacements per file when changes are related.
-- Replacements in the same file are matched against the original file content; overlapping replacements are rejected. Merge overlapping changes into one replacement.
-- If oldContent appears multiple times, add surrounding context until it is unique.
-- UTF-8 BOM and original line endings are preserved. Matching normalizes line endings to LF.
-- For insertion, include the anchor text in both oldContent and newContent, adding the inserted text before or after it.
-"#;
+const EDIT_FILE_DESCRIPTION: &str = r#"Use this tool to edit files."#;
 
 #[derive(Debug, Clone)]
 pub struct EditFileTool {
@@ -66,16 +51,16 @@ impl EditFileTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "edits": {
+                    "files": {
                         "type": "array",
                         "minItems": 1,
-                        "description": "The file edit groups to apply in one operation.",
+                        "description": "The file edit groups to apply in one operation. ALWAYS consolidate edits to the same file under one entry. Do not create multiple entries sharing the same path.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "path": {
                                     "type": "string",
-                                    "description": "File path to edit. Relative paths are resolved from the workspace root; absolute paths must be inside the workspace."
+                                    "description": "File path to edit. Relative paths and absolute are tolerated. Prefere relative."
                                 },
                                 "edits": {
                                     "type": "array",
@@ -87,11 +72,15 @@ impl EditFileTool {
                                         "properties": {
                                             "oldContent": {
                                                 "type": "string",
-                                                "description": "Exact text to replace. Must match exactly once, including all whitespace and newlines."
+                                                "description": "Exact text to replace. ALWAYS use the shortest old_content that is still unique in the file. Do not include surrounding context beyond what is strictly needed for an unambiguous match."
                                             },
                                             "newContent": {
                                                 "type": "string",
                                                 "description": "Replacement text. May be empty to delete oldContent."
+                                            },
+                                            "replaceAll": {
+                                                "type": "boolean",
+                                                "description": "When true, replace every non-overlapping occurrence of oldContent. Defaults to false, which requires oldContent to match exactly once."
                                             }
                                         },
                                         "required": ["oldContent", "newContent"],
@@ -104,7 +93,7 @@ impl EditFileTool {
                         }
                     }
                 },
-                "required": ["edits"],
+                "required": ["files"],
                 "additionalProperties": false
             }),
         }
@@ -131,7 +120,7 @@ impl EditFileTool {
         validate_edit_input(&parsed)?;
 
         let resolved = parsed
-            .edits
+            .files
             .into_iter()
             .enumerate()
             .map(|(index, file)| self.resolve_file_group(index, file))
@@ -169,7 +158,7 @@ impl EditFileTool {
             let updated_content = normalized_original.restore(&plan.updated_content);
             summaries.push(FileEditSummary {
                 relative_path: group.relative_path.clone(),
-                replacement_count: group.edits.len(),
+                replacement_count: plan.replacement_count,
             });
             writes.push((
                 group.relative_path.clone(),
@@ -179,9 +168,16 @@ impl EditFileTool {
         }
 
         let before = snapshot_workspace_paths(&self.workspace_root, &affected_paths);
+        let mut written_paths = Vec::new();
         for (relative_path, absolute_path, content) in &writes {
-            fs::write(absolute_path, content)
-                .with_context(|| format!("unable to write file {relative_path}"))?;
+            if let Err(err) = fs::write(absolute_path, content) {
+                let after = snapshot_workspace_paths(&self.workspace_root, &affected_paths);
+                let file_changes = diff_snapshots(before, after);
+                let content =
+                    format_partial_write_error(relative_path, &written_paths, writes.len(), err);
+                return Ok(ToolRunResult::err(content, file_changes));
+            }
+            written_paths.push(relative_path.clone());
         }
         let after = snapshot_workspace_paths(&self.workspace_root, &affected_paths);
         let file_changes = diff_snapshots(before, after);
@@ -234,8 +230,8 @@ impl EditFileTool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EditFileInput {
-    #[serde(default, alias = "files")]
-    edits: Vec<FileEditInput>,
+    #[serde(default)]
+    files: Vec<FileEditInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +249,8 @@ struct ReplacementInput {
     old_content: String,
     #[serde(alias = "newText")]
     new_content: String,
+    #[serde(default)]
+    replace_all: bool,
 }
 
 #[derive(Debug)]
@@ -296,6 +294,12 @@ impl NormalizedFileText {
 struct ReplacementMatch {
     start: usize,
     len: usize,
+}
+
+impl ReplacementMatch {
+    fn end(&self) -> usize {
+        self.start + self.len
+    }
 }
 
 #[derive(Debug)]
@@ -352,6 +356,7 @@ impl PlannedReplacement {
 #[derive(Debug)]
 struct PlannedFileEdit {
     updated_content: String,
+    replacement_count: usize,
 }
 
 struct FileEditSummary {
@@ -361,18 +366,18 @@ struct FileEditSummary {
 
 fn validate_edit_input(input: &EditFileInput) -> Result<()> {
     let replacement_count = input
-        .edits
+        .files
         .iter()
         .map(|file| file.edits.len())
         .sum::<usize>();
-    if replacement_count == 0 || input.edits.iter().any(|file| file.edits.is_empty()) {
-        bail!("Edit tool input is invalid. edits must contain at least one replacement.");
+    if replacement_count == 0 || input.files.iter().any(|file| file.edits.is_empty()) {
+        bail!("Edit tool input is invalid. files must contain at least one file group, and each file group must contain at least one edit.");
     }
     if replacement_count > MAX_EDIT_COUNT {
         bail!("too many replacements in one call; maximum is {MAX_EDIT_COUNT}");
     }
     let total_content_bytes = input
-        .edits
+        .files
         .iter()
         .flat_map(|file| &file.edits)
         .map(|edit| edit.old_content.len() + edit.new_content.len())
@@ -423,8 +428,17 @@ fn plan_file_edits(
             );
         }
 
-        let matched =
-            find_unique_replacement_match(relative_path, original, &old_content, index, multiple)?;
+        let matched = if edit.replace_all {
+            find_all_replacement_matches(relative_path, original, &old_content, index, multiple)?
+        } else {
+            vec![find_unique_replacement_match(
+                relative_path,
+                original,
+                &old_content,
+                index,
+                multiple,
+            )?]
+        };
 
         if old_content == new_content {
             bail!(
@@ -432,15 +446,18 @@ fn plan_file_edits(
             );
         }
 
-        replacements.push(PlannedReplacement {
-            edit_index: index,
-            start: matched.start,
-            old_len: matched.len,
-            new_content: new_content.clone(),
-        });
+        for matched in matched {
+            replacements.push(PlannedReplacement {
+                edit_index: index,
+                start: matched.start,
+                old_len: matched.len,
+                new_content: new_content.clone(),
+            });
+        }
     }
 
     validate_no_overlaps(relative_path, &replacements)?;
+    let replacement_count = replacements.len();
     let updated_content = apply_replacements(original, &replacements);
     if updated_content == original {
         bail!(
@@ -448,7 +465,10 @@ fn plan_file_edits(
         );
     }
 
-    Ok(PlannedFileEdit { updated_content })
+    Ok(PlannedFileEdit {
+        updated_content,
+        replacement_count,
+    })
 }
 
 fn old_content_label(index: usize, multiple: bool) -> String {
@@ -466,50 +486,64 @@ fn find_unique_replacement_match(
     edit_index: usize,
     multiple: bool,
 ) -> Result<ReplacementMatch> {
-    let exact_occurrences = find_occurrences(original, old_content);
-    let fuzzy = fuzzy_normalize_with_map(original);
-    let fuzzy_old_content = normalize_for_fuzzy_match(old_content);
-    if fuzzy_old_content.is_empty() {
-        not_found_error(relative_path, edit_index, multiple)?;
-    }
-    let fuzzy_occurrences = find_occurrences(&fuzzy.text, &fuzzy_old_content);
+    let exact_matches = exact_replacement_matches(original, old_content, false);
+    let fuzzy_matches = fuzzy_replacement_matches(original, old_content, false)?;
 
-    if fuzzy_occurrences.len() > 1 {
-        return duplicate_match_error(relative_path, edit_index, multiple, fuzzy_occurrences.len());
+    if fuzzy_matches.len() > 1 {
+        return duplicate_match_error(relative_path, edit_index, multiple, fuzzy_matches.len());
     }
-
-    match exact_occurrences.len() {
-        1 => {
-            return Ok(ReplacementMatch {
-                start: exact_occurrences[0],
-                len: old_content.len(),
-            });
-        }
+    match exact_matches.len() {
+        1 => return Ok(exact_matches[0]),
         count if count > 1 => {
             return duplicate_match_error(relative_path, edit_index, multiple, count)
         }
         _ => {}
     }
-
-    match fuzzy_occurrences.len() {
-        0 => not_found_error(relative_path, edit_index, multiple),
-        1 => {
-            let start = fuzzy_occurrences[0];
-            let end = start + fuzzy_old_content.len();
-            let (original_start, original_end) = fuzzy
-                .original_range_with_trimmed_suffix(start, end)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Could not find the exact text in {relative_path}. The old content must match exactly including all whitespace and newlines."
-                    )
-                })?;
-            Ok(ReplacementMatch {
-                start: original_start,
-                len: original_end - original_start,
-            })
-        }
-        count => duplicate_match_error(relative_path, edit_index, multiple, count),
+    if fuzzy_matches.len() == 1 {
+        return Ok(fuzzy_matches[0]);
     }
+
+    let mut duplicate_count = None;
+    for matches in permissive_replacement_match_sets(original, old_content)? {
+        if matches.is_empty() {
+            continue;
+        }
+        if matches.len() == 1 {
+            return Ok(matches[0]);
+        }
+        duplicate_count.get_or_insert(matches.len());
+    }
+
+    if let Some(count) = duplicate_count {
+        return duplicate_match_error(relative_path, edit_index, multiple, count);
+    }
+    not_found_error(relative_path, edit_index, multiple)
+}
+
+fn find_all_replacement_matches(
+    relative_path: &str,
+    original: &str,
+    old_content: &str,
+    edit_index: usize,
+    multiple: bool,
+) -> Result<Vec<ReplacementMatch>> {
+    let exact_matches = exact_replacement_matches(original, old_content, true);
+    if !exact_matches.is_empty() {
+        return Ok(exact_matches);
+    }
+
+    let fuzzy_matches = fuzzy_replacement_matches(original, old_content, true)?;
+    if !fuzzy_matches.is_empty() {
+        return Ok(fuzzy_matches);
+    }
+
+    for matches in permissive_replacement_match_sets(original, old_content)? {
+        let matches = non_overlapping_matches(matches);
+        if !matches.is_empty() {
+            return Ok(matches);
+        }
+    }
+    not_found_error(relative_path, edit_index, multiple).map(|_| Vec::new())
 }
 
 fn not_found_error(
@@ -543,6 +577,502 @@ fn duplicate_match_error(
     );
 }
 
+fn exact_replacement_matches(
+    original: &str,
+    old_content: &str,
+    non_overlapping: bool,
+) -> Vec<ReplacementMatch> {
+    let occurrences = if non_overlapping {
+        find_non_overlapping_occurrences(original, old_content)
+    } else {
+        find_occurrences(original, old_content)
+    };
+    occurrences
+        .into_iter()
+        .map(|start| ReplacementMatch {
+            start,
+            len: old_content.len(),
+        })
+        .collect()
+}
+
+fn fuzzy_replacement_matches(
+    original: &str,
+    old_content: &str,
+    non_overlapping: bool,
+) -> Result<Vec<ReplacementMatch>> {
+    let fuzzy = fuzzy_normalize_with_map(original);
+    let fuzzy_old_content = normalize_for_fuzzy_match(old_content);
+    if fuzzy_old_content.is_empty() {
+        return Ok(Vec::new());
+    }
+    let occurrences = if non_overlapping {
+        find_non_overlapping_occurrences(&fuzzy.text, &fuzzy_old_content)
+    } else {
+        find_occurrences(&fuzzy.text, &fuzzy_old_content)
+    };
+
+    occurrences
+        .into_iter()
+        .map(|start| {
+            let end = start + fuzzy_old_content.len();
+            let (original_start, original_end) = fuzzy
+                .original_range_with_trimmed_suffix(start, end)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Could not find the exact text. The old content must match exactly including all whitespace and newlines."
+                    )
+                })?;
+            Ok(ReplacementMatch {
+                start: original_start,
+                len: original_end - original_start,
+            })
+        })
+        .collect()
+}
+
+fn permissive_replacement_match_sets(
+    original: &str,
+    old_content: &str,
+) -> Result<Vec<Vec<ReplacementMatch>>> {
+    Ok(vec![
+        line_trimmed_matches(original, old_content),
+        block_anchor_matches(original, old_content),
+        whitespace_normalized_matches(original, old_content)?,
+        indentation_flexible_matches(original, old_content),
+        escape_normalized_matches(original, old_content),
+        trimmed_boundary_matches(original, old_content),
+        context_aware_matches(original, old_content),
+    ])
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineSpan {
+    start: usize,
+    end: usize,
+}
+
+fn line_spans(text: &str) -> Vec<LineSpan> {
+    if text.is_empty() {
+        return vec![LineSpan { start: 0, end: 0 }];
+    }
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    for segment in text.split_inclusive('\n') {
+        let end = if segment.ends_with('\n') {
+            offset + segment.len() - 1
+        } else {
+            offset + segment.len()
+        };
+        spans.push(LineSpan { start: offset, end });
+        offset += segment.len();
+    }
+    spans
+}
+
+fn line_text<'a>(text: &'a str, span: LineSpan) -> &'a str {
+    &text[span.start..span.end]
+}
+
+fn search_lines(find: &str) -> Vec<&str> {
+    let mut lines = find.split('\n').collect::<Vec<_>>();
+    if lines.last().copied() == Some("") {
+        lines.pop();
+    }
+    lines
+}
+
+fn range_from_line_window(
+    spans: &[LineSpan],
+    start_line: usize,
+    len: usize,
+) -> Option<ReplacementMatch> {
+    if len == 0 || start_line + len > spans.len() {
+        return None;
+    }
+    let start = spans[start_line].start;
+    let end = spans[start_line + len - 1].end;
+    Some(ReplacementMatch {
+        start,
+        len: end - start,
+    })
+}
+
+fn line_trimmed_matches(content: &str, find: &str) -> Vec<ReplacementMatch> {
+    let spans = line_spans(content);
+    let search = search_lines(find);
+    if search.is_empty() || search.len() > spans.len() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for start in 0..=spans.len() - search.len() {
+        let matched = search.iter().enumerate().all(|(offset, wanted)| {
+            line_text(content, spans[start + offset]).trim() == wanted.trim()
+        });
+        if matched {
+            if let Some(range) = range_from_line_window(&spans, start, search.len()) {
+                matches.push(range);
+            }
+        }
+    }
+    dedupe_matches(matches)
+}
+
+fn block_anchor_matches(content: &str, find: &str) -> Vec<ReplacementMatch> {
+    let spans = line_spans(content);
+    let search = search_lines(find);
+    if search.len() < 3 || spans.len() < 3 {
+        return Vec::new();
+    }
+    let first = search[0].trim();
+    let last = search[search.len() - 1].trim();
+    let mut candidates = Vec::new();
+    for start in 0..spans.len() {
+        if line_text(content, spans[start]).trim() != first {
+            continue;
+        }
+        for end in start + 2..spans.len() {
+            if line_text(content, spans[end]).trim() == last {
+                candidates.push((start, end));
+                break;
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    if candidates.len() == 1 {
+        let (start, end) = candidates[0];
+        return range_from_line_window(&spans, start, end - start + 1)
+            .into_iter()
+            .collect();
+    }
+
+    let mut best = None;
+    let mut best_similarity = -1.0f64;
+    for (start, end) in candidates {
+        let similarity = middle_line_similarity(content, &spans, start, end, &search);
+        if similarity > best_similarity {
+            best_similarity = similarity;
+            best = Some((start, end));
+        }
+    }
+    if best_similarity >= BLOCK_ANCHOR_MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD {
+        if let Some((start, end)) = best {
+            return range_from_line_window(&spans, start, end - start + 1)
+                .into_iter()
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn middle_line_similarity(
+    content: &str,
+    spans: &[LineSpan],
+    start: usize,
+    end: usize,
+    search: &[&str],
+) -> f64 {
+    let actual_len = end - start + 1;
+    let lines_to_check = (search.len().saturating_sub(2)).min(actual_len.saturating_sub(2));
+    if lines_to_check == 0 {
+        return 1.0;
+    }
+    let mut similarity = 0.0;
+    for offset in 1..=lines_to_check {
+        let original_line = line_text(content, spans[start + offset]).trim();
+        let search_line = search[offset].trim();
+        let max_len = original_line
+            .chars()
+            .count()
+            .max(search_line.chars().count());
+        if max_len == 0 {
+            continue;
+        }
+        let distance = levenshtein(original_line, search_line);
+        similarity += 1.0 - distance as f64 / max_len as f64;
+    }
+    similarity / lines_to_check as f64
+}
+
+fn whitespace_normalized_matches(content: &str, find: &str) -> Result<Vec<ReplacementMatch>> {
+    let normalized_find = normalize_whitespace(find);
+    if normalized_find.is_empty() {
+        return Ok(Vec::new());
+    }
+    let spans = line_spans(content);
+    let mut matches = Vec::new();
+
+    for span in &spans {
+        let line = line_text(content, *span);
+        let normalized_line = normalize_whitespace(line);
+        if normalized_line == normalized_find {
+            matches.push(ReplacementMatch {
+                start: span.start,
+                len: span.end - span.start,
+            });
+        } else if normalized_line.contains(&normalized_find) {
+            let words = find.split_whitespace().collect::<Vec<_>>();
+            if !words.is_empty() {
+                let pattern = words
+                    .iter()
+                    .map(|word| regex::escape(word))
+                    .collect::<Vec<_>>()
+                    .join(r"\s+");
+                let regex = Regex::new(&pattern)?;
+                if let Some(found) = regex.find(line) {
+                    matches.push(ReplacementMatch {
+                        start: span.start + found.start(),
+                        len: found.end() - found.start(),
+                    });
+                }
+            }
+        }
+    }
+
+    let search = search_lines(find);
+    if search.len() > 1 && search.len() <= spans.len() {
+        for start in 0..=spans.len() - search.len() {
+            let block = (0..search.len())
+                .map(|offset| line_text(content, spans[start + offset]))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if normalize_whitespace(&block) == normalized_find {
+                if let Some(range) = range_from_line_window(&spans, start, search.len()) {
+                    matches.push(range);
+                }
+            }
+        }
+    }
+
+    Ok(dedupe_matches(matches))
+}
+
+fn indentation_flexible_matches(content: &str, find: &str) -> Vec<ReplacementMatch> {
+    let normalized_find = remove_common_indentation(find);
+    let spans = line_spans(content);
+    let search = search_lines(find);
+    if search.is_empty() || search.len() > spans.len() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for start in 0..=spans.len() - search.len() {
+        let block = (0..search.len())
+            .map(|offset| line_text(content, spans[start + offset]))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if remove_common_indentation(&block) == normalized_find {
+            if let Some(range) = range_from_line_window(&spans, start, search.len()) {
+                matches.push(range);
+            }
+        }
+    }
+    dedupe_matches(matches)
+}
+
+fn escape_normalized_matches(content: &str, find: &str) -> Vec<ReplacementMatch> {
+    let unescaped_find = unescape_edit_string(find);
+    let mut matches = exact_replacement_matches(content, &unescaped_find, false);
+    let spans = line_spans(content);
+    let search = search_lines(&unescaped_find);
+    if !search.is_empty() && search.len() <= spans.len() {
+        for start in 0..=spans.len() - search.len() {
+            let block = (0..search.len())
+                .map(|offset| line_text(content, spans[start + offset]))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if unescape_edit_string(&block) == unescaped_find {
+                if let Some(range) = range_from_line_window(&spans, start, search.len()) {
+                    matches.push(range);
+                }
+            }
+        }
+    }
+    dedupe_matches(matches)
+}
+
+fn trimmed_boundary_matches(content: &str, find: &str) -> Vec<ReplacementMatch> {
+    let trimmed = find.trim();
+    if trimmed == find || trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut matches = exact_replacement_matches(content, trimmed, false);
+    let spans = line_spans(content);
+    let search = search_lines(find);
+    if !search.is_empty() && search.len() <= spans.len() {
+        for start in 0..=spans.len() - search.len() {
+            let block = (0..search.len())
+                .map(|offset| line_text(content, spans[start + offset]))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if block.trim() == trimmed {
+                if let Some(range) = range_from_line_window(&spans, start, search.len()) {
+                    matches.push(range);
+                }
+            }
+        }
+    }
+    dedupe_matches(matches)
+}
+
+fn context_aware_matches(content: &str, find: &str) -> Vec<ReplacementMatch> {
+    let search = search_lines(find);
+    if search.len() < 3 {
+        return Vec::new();
+    }
+    let spans = line_spans(content);
+    if spans.len() < 3 {
+        return Vec::new();
+    }
+    let first = search[0].trim();
+    let last = search[search.len() - 1].trim();
+    let mut matches = Vec::new();
+    for start in 0..spans.len() {
+        if line_text(content, spans[start]).trim() != first {
+            continue;
+        }
+        for end in start + 2..spans.len() {
+            if line_text(content, spans[end]).trim() != last {
+                continue;
+            }
+            let actual_len = end - start + 1;
+            if actual_len == search.len()
+                && context_middle_line_ratio(content, &spans, start, end, &search)
+                    >= CONTEXT_AWARE_MIN_MATCHING_LINE_RATIO
+            {
+                if let Some(range) = range_from_line_window(&spans, start, actual_len) {
+                    matches.push(range);
+                }
+                break;
+            }
+            break;
+        }
+    }
+    dedupe_matches(matches)
+}
+
+fn context_middle_line_ratio(
+    content: &str,
+    spans: &[LineSpan],
+    start: usize,
+    end: usize,
+    search: &[&str],
+) -> f64 {
+    let mut matching_lines = 0usize;
+    let mut total_non_empty = 0usize;
+    for offset in 1..end - start {
+        let block_line = line_text(content, spans[start + offset]).trim();
+        let find_line = search[offset].trim();
+        if !block_line.is_empty() || !find_line.is_empty() {
+            total_non_empty += 1;
+            if block_line == find_line {
+                matching_lines += 1;
+            }
+        }
+    }
+    if total_non_empty == 0 {
+        1.0
+    } else {
+        matching_lines as f64 / total_non_empty as f64
+    }
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn remove_common_indentation(text: &str) -> String {
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let min_indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(char::is_whitespace).len())
+        .min();
+    let Some(min_indent) = min_indent else {
+        return text.to_string();
+    };
+    lines
+        .into_iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                line.to_string()
+            } else {
+                line.get(min_indent..).unwrap_or("").to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn unescape_edit_string(text: &str) -> String {
+    let mut output = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('r') => output.push('\r'),
+            Some('\'') => output.push('\''),
+            Some('"') => output.push('"'),
+            Some('`') => output.push('`'),
+            Some('\\') => output.push('\\'),
+            Some('\n') => output.push('\n'),
+            Some('$') => output.push('$'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    if left.is_empty() || right.is_empty() {
+        return left.len().max(right.len());
+    }
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_ch) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_ch) in right.iter().enumerate() {
+            let cost = usize::from(left_ch != right_ch);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
+fn dedupe_matches(mut matches: Vec<ReplacementMatch>) -> Vec<ReplacementMatch> {
+    matches.sort_by_key(|replacement| (replacement.start, replacement.len));
+    matches.dedup_by_key(|replacement| (replacement.start, replacement.len));
+    matches
+}
+
+fn non_overlapping_matches(matches: Vec<ReplacementMatch>) -> Vec<ReplacementMatch> {
+    let mut sorted = dedupe_matches(matches);
+    let mut output = Vec::new();
+    let mut last_end = 0;
+    for replacement in sorted.drain(..) {
+        if output.is_empty() || replacement.start >= last_end {
+            last_end = replacement.end();
+            output.push(replacement);
+        }
+    }
+    output
+}
+
 fn find_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
     let mut occurrences = Vec::new();
     let mut search_start = 0;
@@ -554,6 +1084,22 @@ fn find_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
         let absolute_match = search_start + relative_match;
         occurrences.push(absolute_match);
         search_start = next_char_boundary(haystack, absolute_match);
+    }
+
+    occurrences
+}
+
+fn find_non_overlapping_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+    let mut occurrences = Vec::new();
+    let mut search_start = 0;
+
+    while search_start <= haystack.len() {
+        let Some(relative_match) = haystack[search_start..].find(needle) else {
+            break;
+        };
+        let absolute_match = search_start + relative_match;
+        occurrences.push(absolute_match);
+        search_start = absolute_match + needle.len();
     }
 
     occurrences
@@ -602,6 +1148,29 @@ fn apply_replacements(original: &str, replacements: &[PlannedReplacement]) -> St
     }
 
     updated
+}
+
+fn format_partial_write_error(
+    failed_path: &str,
+    written_paths: &[String],
+    total_writes: usize,
+    err: std::io::Error,
+) -> String {
+    let failed_index = written_paths.len() + 1;
+    let mut output = format!(
+        "edit_file partially applied: wrote {} of {total_writes} files, then failed on {failed_path} (write {failed_index}/{total_writes}). Error: {err}",
+        written_paths.len()
+    );
+    if written_paths.is_empty() {
+        output.push_str("\nNo files were written before the failure.");
+    } else {
+        output.push_str("\nFiles written before failure:");
+        for (index, path) in written_paths.iter().enumerate() {
+            output.push_str(&format!("\n- {}. {path}", index + 1));
+        }
+    }
+    output.push_str(&format!("\nFailed file:\n- {failed_index}. {failed_path}"));
+    output
 }
 
 fn format_edit_output(summaries: &[FileEditSummary]) -> String {
@@ -843,7 +1412,7 @@ mod tests {
         let result = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [{
                             "oldContent": "two\nthree",
@@ -876,7 +1445,7 @@ mod tests {
 
         tool.edit(
             json!({
-                "edits": [{
+                "files": [{
                     "path": "app.rs",
                     "edits": [
                         {"oldContent": "b", "newContent": "B1\nB2"},
@@ -908,7 +1477,7 @@ mod tests {
         let result = tool
             .edit(
                 json!({
-                    "edits": [
+                    "files": [
                         {"path": "src/a.rs", "edits": [{"oldContent": "fn old", "newContent": "fn new"}]},
                         {"path": "src/b.rs", "edits": [{"oldContent": "old();", "newContent": "new();"}]}
                     ]
@@ -941,13 +1510,13 @@ mod tests {
         let tool = EditFileTool::new(&root);
 
         let error = tool
-            .edit(json!({ "edits": [] }), &HashMap::new())
+            .edit(json!({ "files": [] }), &HashMap::new())
             .await
             .expect_err("empty edits should fail");
 
         assert_eq!(
             error.to_string(),
-            "Edit tool input is invalid. edits must contain at least one replacement."
+            "Edit tool input is invalid. files must contain at least one file group, and each file group must contain at least one edit."
         );
         fs::remove_dir_all(root).ok();
     }
@@ -961,7 +1530,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "missing.rs",
                         "edits": [{"oldContent": "a", "newContent": "b"}]
                     }]
@@ -988,7 +1557,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [{"oldContent": "", "newContent": "b"}]
                     }]
@@ -1013,7 +1582,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [
                             {"oldContent": "a", "newContent": "A"},
@@ -1044,7 +1613,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [{"oldContent": "missing", "newContent": "b"}]
                     }]
@@ -1072,7 +1641,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [
                             {"oldContent": "a", "newContent": "A"},
@@ -1104,7 +1673,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [{"oldContent": "same", "newContent": "other"}]
                     }]
@@ -1132,7 +1701,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [
                             {"oldContent": "first", "newContent": "changed"},
@@ -1163,7 +1732,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [
                             {"oldContent": "b\nc", "newContent": "x"},
@@ -1198,7 +1767,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [{"oldContent": "a", "newContent": "a"}]
                     }]
@@ -1216,6 +1785,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replace_all_replaces_every_exact_occurrence() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "foo bar foo\nfoo\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let result = tool
+            .edit(
+                json!({
+                    "files": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "foo", "newContent": "baz", "replaceAll": true}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect("replaceAll edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "baz bar baz\nbaz\n"
+        );
+        assert_eq!(result.content, "Edited app.rs (3 replacements).");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn replace_all_false_still_requires_unique_old_content() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "foo\nfoo\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "files": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "foo", "newContent": "bar", "replaceAll": false}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("non replaceAll duplicate should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Found 2 occurrences of the text in app.rs. The text must be unique. Please provide more context to make it unique."
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "foo\nfoo\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn replace_all_uses_non_overlapping_occurrences() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "aaaa\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let result = tool
+            .edit(
+                json!({
+                    "files": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "aa", "newContent": "b", "replaceAll": true}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect("replaceAll edit should apply");
+
+        assert_eq!(fs::read_to_string(root.join("app.rs")).unwrap(), "bb\n");
+        assert_eq!(result.content, "Edited app.rs (2 replacements).");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn replace_all_rejects_overlap_with_other_edits() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "foo\nfoo\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "files": [{
+                        "path": "app.rs",
+                        "edits": [
+                            {"oldContent": "foo", "newContent": "bar", "replaceAll": true},
+                            {"oldContent": "foo\nfoo", "newContent": "baz"}
+                        ]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("overlap should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "edits[0] and edits[1] overlap in app.rs. Merge them into one edit or target disjoint regions."
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "foo\nfoo\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn replace_all_supports_fuzzy_matches() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("copy.txt"), "title: “Hello”   \ntitle: “Hello”\n")
+            .expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["copy.txt"]);
+
+        let result = tool
+            .edit(
+                json!({
+                    "files": [{
+                        "path": "copy.txt",
+                        "edits": [{"oldContent": "title: \"Hello\"", "newContent": "title: hi", "replaceAll": true}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect("fuzzy replaceAll edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("copy.txt")).unwrap(),
+            "title: hi\ntitle: hi\n"
+        );
+        assert_eq!(result.content, "Edited copy.txt (2 replacements).");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn rejects_stale_read_fingerprint() {
         let root = unique_temp_dir();
         fs::create_dir_all(&root).expect("create temp workspace");
@@ -1227,7 +1948,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "app.rs",
                         "edits": [{"oldContent": "b", "newContent": "B"}]
                     }]
@@ -1244,6 +1965,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn descriptor_uses_files_as_top_level_field() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        let tool = EditFileTool::new(&root);
+        let schema = tool.descriptor().input_schema;
+
+        assert!(schema["properties"].get("files").is_some());
+        assert!(schema["properties"].get("edits").is_none());
+        assert_eq!(schema["required"], json!(["files"]));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_legacy_top_level_edits_field() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "alpha\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "edits": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "alpha", "newContent": "beta"}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("top-level edits should be rejected");
+
+        assert!(error.to_string().contains("unknown field `edits`"));
+        assert_eq!(fs::read_to_string(root.join("app.rs")).unwrap(), "alpha\n");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn accepts_old_text_new_text_aliases() {
         let root = unique_temp_dir();
         fs::create_dir_all(&root).expect("create temp workspace");
@@ -1253,7 +2013,7 @@ mod tests {
 
         tool.edit(
             json!({
-                "edits": [{
+                "files": [{
                     "path": "app.rs",
                     "edits": [{"oldText": "alpha", "newText": "beta"}]
                 }]
@@ -1277,7 +2037,7 @@ mod tests {
 
         tool.edit(
             json!({
-                "edits": [{
+                "files": [{
                     "path": "app.rs",
                     "edits": [{"oldContent": "two\nthree", "newContent": "deux\ntrois"}]
                 }]
@@ -1308,7 +2068,7 @@ mod tests {
 
         tool.edit(
             json!({
-                "edits": [{
+                "files": [{
                     "path": "copy.txt",
                     "edits": [{"oldContent": "title: \"Hello\"-world", "newContent": "title: \"Hello\" - world"}]
                 }]
@@ -1336,7 +2096,7 @@ mod tests {
         let error = tool
             .edit(
                 json!({
-                    "edits": [{
+                    "files": [{
                         "path": "copy.txt",
                         "edits": [{"oldContent": "title: \"Hello\"", "newContent": "title: hi"}]
                     }]
@@ -1350,6 +2110,238 @@ mod tests {
             error.to_string(),
             "Found 2 occurrences of the text in copy.txt. The text must be unique. Please provide more context to make it unique."
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn permissive_matching_handles_line_trimmed_blocks() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "fn main() {\n    let x = 1;\n}\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        tool.edit(
+            json!({
+                "files": [{
+                    "path": "app.rs",
+                    "edits": [{"oldContent": "fn main() {\nlet x = 1;\n}", "newContent": "fn main() {\n    let x = 2;\n}"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("line-trimmed edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "fn main() {\n    let x = 2;\n}\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn permissive_matching_handles_whitespace_normalized_single_line() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "let total = left    +   right;\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        tool.edit(
+            json!({
+                "files": [{
+                    "path": "app.rs",
+                    "edits": [{"oldContent": "left + right", "newContent": "left - right"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("whitespace-normalized edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "let total = left - right;\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn permissive_matching_handles_indentation_flexible_blocks() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "    if ok {\n        run();\n    }\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        tool.edit(
+            json!({
+                "files": [{
+                    "path": "app.rs",
+                    "edits": [{"oldContent": "if ok {\n    run();\n}", "newContent": "    if ok {\n        done();\n    }"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("indentation-flexible edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "    if ok {\n        done();\n    }\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn permissive_matching_handles_escaped_newlines() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "alpha\nbeta\ngamma\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        tool.edit(
+            json!({
+                "files": [{
+                    "path": "app.rs",
+                    "edits": [{"oldContent": "alpha\\nbeta", "newContent": "alpha\nBETA"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("escape-normalized edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "alpha\nBETA\ngamma\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn permissive_matching_handles_trimmed_boundaries() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "prefix target suffix\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        tool.edit(
+            json!({
+                "files": [{
+                    "path": "app.rs",
+                    "edits": [{"oldContent": "  target  ", "newContent": "value"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("trimmed-boundary edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "prefix value suffix\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn permissive_matching_handles_context_anchors() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "start\nactual middle\nend\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        tool.edit(
+            json!({
+                "files": [{
+                    "path": "app.rs",
+                    "edits": [{"oldContent": "start\nwrong middle\nend", "newContent": "start\nnew middle\nend"}]
+                }]
+            }),
+            &fingerprints,
+        )
+        .await
+        .expect("context-anchor edit should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "start\nnew middle\nend\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn permissive_matching_still_rejects_ambiguous_matches() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("app.rs"), "    value\n  value\n").expect("write file");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["app.rs"]);
+
+        let error = tool
+            .edit(
+                json!({
+                    "files": [{
+                        "path": "app.rs",
+                        "edits": [{"oldContent": "value", "newContent": "other"}]
+                    }]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect_err("ambiguous permissive match should fail");
+
+        assert!(error.to_string().contains("Found 2 occurrences"));
+        assert_eq!(
+            fs::read_to_string(root.join("app.rs")).unwrap(),
+            "    value\n  value\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reports_partial_write_failure_with_file_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).expect("create temp workspace");
+        fs::write(root.join("a.rs"), "old a\n").expect("write a");
+        fs::write(root.join("b.rs"), "old b\n").expect("write b");
+        let tool = EditFileTool::new(&root);
+        let fingerprints = fingerprints(&root, &["a.rs", "b.rs"]);
+        fs::set_permissions(root.join("b.rs"), fs::Permissions::from_mode(0o444))
+            .expect("make b read-only");
+
+        let result = tool
+            .edit(
+                json!({
+                    "files": [
+                        {"path": "a.rs", "edits": [{"oldContent": "old a", "newContent": "new a"}]},
+                        {"path": "b.rs", "edits": [{"oldContent": "old b", "newContent": "new b"}]}
+                    ]
+                }),
+                &fingerprints,
+            )
+            .await
+            .expect("partial write failure should be reported as tool result");
+
+        fs::set_permissions(root.join("b.rs"), fs::Permissions::from_mode(0o644))
+            .expect("restore b permissions");
+        assert!(result.is_error);
+        assert!(result.content.contains("edit_file partially applied"));
+        assert!(result.content.contains("wrote 1 of 2 files"));
+        assert!(result.content.contains("a.rs"));
+        assert!(result.content.contains("Failed file:\n- 2. b.rs"));
+        assert_eq!(fs::read_to_string(root.join("a.rs")).unwrap(), "new a\n");
+        assert_eq!(fs::read_to_string(root.join("b.rs")).unwrap(), "old b\n");
+        assert_eq!(result.file_changes.len(), 1);
+        assert_eq!(result.file_changes[0].relative_path, "a.rs");
         fs::remove_dir_all(root).ok();
     }
 

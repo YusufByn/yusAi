@@ -10,6 +10,10 @@ import type {
   ContextEstimate,
   ConversationSummary,
   FileDocument,
+  GitCreateWorktreeOutput,
+  GitOperationResult,
+  GitPullRequestOutput,
+  GitRepositorySnapshot,
   GoogleProviderStatus,
   InstalledSkill,
   KimiProviderStatus,
@@ -25,6 +29,7 @@ import type {
   PlanControl,
   QuestionAnswer,
   SavedConversation,
+  ServiceTier,
   SkillSettings,
   StartAnthropicLoginOutput,
   StartGoogleLoginOutput,
@@ -47,6 +52,65 @@ export const api = {
   openWorkspace(workspacePath: string) {
     return invoke<WorkspaceBootstrap>("open_workspace", {
       input: { workspacePath },
+    });
+  },
+  gitSnapshot(workspacePath: string) {
+    return invoke<GitRepositorySnapshot>("git_repository_snapshot_command", {
+      input: { workspacePath },
+    });
+  },
+  gitInit(workspacePath: string) {
+    return invoke<GitRepositorySnapshot>("git_init_command", {
+      input: { workspacePath },
+    });
+  },
+  gitCreateWorktree(
+    workspacePath: string,
+    branchName: string,
+    baseBranch: string | null,
+    pushImmediately: boolean,
+  ) {
+    return invoke<GitCreateWorktreeOutput>("git_create_worktree_command", {
+      input: { workspacePath, branchName, baseBranch, pushImmediately },
+    });
+  },
+  gitRemoveWorktree(workspacePath: string, targetPath: string, force: boolean) {
+    return invoke<GitOperationResult>("git_remove_worktree_command", {
+      input: { workspacePath, targetPath, force },
+    });
+  },
+  gitCreateBranch(
+    workspacePath: string,
+    branchName: string,
+    baseBranch: string | null,
+  ) {
+    return invoke<GitOperationResult>("git_create_branch_command", {
+      input: { workspacePath, branchName, baseBranch },
+    });
+  },
+  gitCommit(workspacePath: string, message: string, paths: string[]) {
+    return invoke<GitOperationResult>("git_commit_command", {
+      input: { workspacePath, message, paths },
+    });
+  },
+  gitPush(workspacePath: string) {
+    return invoke<GitOperationResult>("git_push_command", {
+      input: { workspacePath },
+    });
+  },
+  gitPull(workspacePath: string) {
+    return invoke<GitOperationResult>("git_pull_command", {
+      input: { workspacePath },
+    });
+  },
+  gitCreatePullRequest(
+    workspacePath: string,
+    title: string,
+    body: string,
+    targetBranch: string,
+  ) {
+    return invoke<GitPullRequestOutput>("git_create_pull_request_command", {
+      input: { workspacePath, title, body, targetBranch },
     });
   },
   openNewWindow() {
@@ -406,6 +470,7 @@ export const api = {
     model: ModelRef,
     thinking: ThinkingLevel,
     mode: AgentMode,
+    serviceTier?: ServiceTier | null,
     rewriteFromHistoryIndex?: number,
     planControl?: PlanControl,
     messageVisibility?: MessageVisibility,
@@ -420,6 +485,7 @@ export const api = {
         model,
         thinking,
         mode,
+        serviceTier,
         rewriteFromHistoryIndex,
         planControl,
         messageVisibility,
@@ -432,10 +498,11 @@ export const api = {
     conversationId: string,
     model: ModelRef,
     thinking: ThinkingLevel,
+    serviceTier?: ServiceTier | null,
     instruction?: string,
   ) {
     return invoke<void>("compact_conversation", {
-      input: { workspacePath, conversationId, model, thinking, instruction },
+      input: { workspacePath, conversationId, model, thinking, serviceTier, instruction },
     });
   },
   listActiveTurns() {

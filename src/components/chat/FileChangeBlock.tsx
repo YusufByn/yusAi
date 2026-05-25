@@ -19,7 +19,13 @@ function normalizeDiffLineKind(kind: string): RenderedDiffLineKind {
   return "context";
 }
 
-export function FileChangeBlock({ change }: { change: FileChange }) {
+export function FileChangeBlock({
+  change,
+  live = false,
+}: {
+  change: FileChange;
+  live?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const name = basename(change.relativePath);
@@ -50,7 +56,7 @@ export function FileChangeBlock({ change }: { change: FileChange }) {
     : null;
 
   useEffect(() => {
-    if (!open || firstChangedLineIndex < 0) return undefined;
+    if (!open || firstChangedLineIndex < 0 || live) return undefined;
     const body = bodyRef.current;
     if (!body) return undefined;
     const frame = window.requestAnimationFrame(() => {
@@ -61,7 +67,17 @@ export function FileChangeBlock({ change }: { change: FileChange }) {
       body.scrollTop = Math.max(0, firstChange.offsetTop - body.offsetTop);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [firstChangedLineIndex, open]);
+  }, [firstChangedLineIndex, open, live]);
+
+  useEffect(() => {
+    if (!live || !open) return undefined;
+    const body = bodyRef.current;
+    if (!body) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      body.scrollTop = body.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [change.lines.length, open, live]);
 
   return (
     <div className="filechange">
