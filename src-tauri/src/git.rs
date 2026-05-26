@@ -2,6 +2,8 @@ use crate::*;
 use std::ffi::OsStr;
 use std::path::Component;
 use std::process::Stdio;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,6 +106,24 @@ pub(super) struct GitCreateBranchInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct GitDeleteBranchInput {
+    pub(super) workspace_path: String,
+    pub(super) branch_name: String,
+    pub(super) force: bool,
+    pub(super) delete_remote: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GitRenameBranchInput {
+    pub(super) workspace_path: String,
+    pub(super) old_name: String,
+    pub(super) new_name: String,
+    pub(super) sync_remote: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct GitCommitInput {
     pub(super) workspace_path: String,
     pub(super) message: String,
@@ -129,6 +149,12 @@ struct ParsedWorktree {
     path: PathBuf,
     branch: Option<String>,
     head: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BranchUpstream {
+    remote: String,
+    branch: String,
 }
 
 #[tauri::command]
@@ -294,6 +320,132 @@ pub(super) async fn git_create_branch_command(
     Ok(operation_result(
         format!("Created branch {branch}."),
         output,
+    ))
+}
+
+#[tauri::command]
+pub(super) async fn git_delete_branch_command(
+    input: GitDeleteBranchInput,
+) -> std::result::Result<GitOperationResult, String> {
+    let workspace_root =
+        normalize_workspace_root(&input.workspace_path).map_err(error_to_string)?;
+    let repo_root = require_repo_root(&workspace_root).map_err(error_to_string)?;
+    let branch =
+        validate_branch_name_input(&repo_root, &input.branch_name).map_err(error_to_string)?;
+    if !local_branch_exists(&repo_root, &branch).map_err(error_to_string)? {
+        return Err(format!("branch '{branch}' was not found"));
+    }
+    ensure_branch_not_checked_out(&repo_root, &branch).map_err(error_to_string)?;
+
+    let upstream = branch_upstream(&repo_root, &branch).map_err(error_to_string)?;
+    if input.delete_remote && upstream.is_none() {
+        return Err(format!(
+            "branch '{branch}' has no upstream remote branch to delete"
+        ));
+    }
+    let output = delete_local_branch(&repo_root, &branch, input.force).map_err(error_to_string)?;
+    let mut message = format!("Deleted local branch {branch}.");
+    let mut stdout_parts = Vec::new();
+    let mut stderr_parts = Vec::new();
+    collect_command_output(output, &mut stdout_parts, &mut stderr_parts);
+
+    if input.delete_remote {
+        let upstream = upstream.expect("upstream is checked before deleting local branch");
+        match delete_remote_branch(&repo_root, &upstream) {
+            Ok(remote_output) => {
+                message = format!(
+                    "Deleted local branch {branch} and remote {}/{}.",
+                    upstream.remote, upstream.branch
+                );
+                collect_command_output(remote_output, &mut stdout_parts, &mut stderr_parts);
+            }
+            Err(err) => {
+                return Err(format!(
+                    "Local branch {branch} was deleted, but remote {}/{} could not be deleted: {}",
+                    upstream.remote, upstream.branch, err
+                ));
+            }
+        }
+    }
+
+    Ok(operation_result_from_parts(
+        message,
+        stdout_parts,
+        stderr_parts,
+    ))
+}
+
+#[tauri::command]
+pub(super) async fn git_rename_branch_command(
+    input: GitRenameBranchInput,
+) -> std::result::Result<GitOperationResult, String> {
+    let workspace_root =
+        normalize_workspace_root(&input.workspace_path).map_err(error_to_string)?;
+    let repo_root = require_repo_root(&workspace_root).map_err(error_to_string)?;
+    let old_name =
+        validate_branch_name_input(&repo_root, &input.old_name).map_err(error_to_string)?;
+    let new_name =
+        validate_branch_name_input(&repo_root, &input.new_name).map_err(error_to_string)?;
+    if old_name == new_name {
+        return Err("new branch name must be different".into());
+    }
+    if !local_branch_exists(&repo_root, &old_name).map_err(error_to_string)? {
+        return Err(format!("branch '{old_name}' was not found"));
+    }
+    if local_branch_exists(&repo_root, &new_name).map_err(error_to_string)? {
+        return Err(format!("branch '{new_name}' already exists"));
+    }
+    ensure_branch_rename_allowed(&repo_root, &old_name).map_err(error_to_string)?;
+    let upstream = branch_upstream(&repo_root, &old_name).map_err(error_to_string)?;
+
+    let rename_output =
+        rename_local_branch(&repo_root, &old_name, &new_name).map_err(error_to_string)?;
+    let mut message = format!("Renamed branch {old_name} to {new_name}.");
+    let mut stdout_parts = Vec::new();
+    let mut stderr_parts = Vec::new();
+    collect_command_output(rename_output, &mut stdout_parts, &mut stderr_parts);
+
+    if input.sync_remote {
+        let remote = upstream
+            .as_ref()
+            .map(|upstream| upstream.remote.clone())
+            .unwrap_or_else(|| "origin".to_string());
+        match push_branch_to_remote(&repo_root, &remote, &new_name) {
+            Ok(push_output) => {
+                collect_command_output(push_output, &mut stdout_parts, &mut stderr_parts)
+            }
+            Err(err) => {
+                return Err(format!(
+                    "Local branch was renamed to {new_name}, but pushing {new_name} to {remote} failed: {err}"
+                ));
+            }
+        }
+        if let Some(upstream) = upstream {
+            match delete_remote_branch(&repo_root, &upstream) {
+                Ok(delete_output) => {
+                    message = format!(
+                        "Renamed branch {old_name} to {new_name}, pushed {remote}/{new_name}, and deleted {}/{}.",
+                        upstream.remote, upstream.branch
+                    );
+                    collect_command_output(delete_output, &mut stdout_parts, &mut stderr_parts);
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "Local branch was renamed to {new_name} and pushed to {remote}, but old remote {}/{} could not be deleted: {}",
+                        upstream.remote, upstream.branch, err
+                    ));
+                }
+            }
+        } else {
+            message =
+                format!("Renamed branch {old_name} to {new_name} and pushed {remote}/{new_name}.");
+        }
+    }
+
+    Ok(operation_result_from_parts(
+        message,
+        stdout_parts,
+        stderr_parts,
     ))
 }
 
@@ -855,6 +1007,88 @@ fn local_branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
     Ok(git_output(repo_root, &["show-ref", "--verify", "--quiet", &refname])?.success)
 }
 
+fn branch_upstream(repo_root: &Path, branch: &str) -> Result<Option<BranchUpstream>> {
+    let remote_key = format!("branch.{branch}.remote");
+    let merge_key = format!("branch.{branch}.merge");
+    let remote = git_output(repo_root, &["config", "--get", &remote_key])?;
+    if !remote.success {
+        return Ok(None);
+    }
+    let remote = remote.stdout.trim();
+    if remote.is_empty() || remote == "." {
+        return Ok(None);
+    }
+    let merge = git_output(repo_root, &["config", "--get", &merge_key])?;
+    if !merge.success {
+        return Ok(None);
+    }
+    let branch_name = merge.stdout.trim();
+    let Some(branch_name) = branch_name.strip_prefix("refs/heads/") else {
+        return Ok(None);
+    };
+    if branch_name.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(BranchUpstream {
+        remote: remote.to_string(),
+        branch: branch_name.to_string(),
+    }))
+}
+
+fn ensure_branch_not_checked_out(repo_root: &Path, branch: &str) -> Result<()> {
+    if let Some(worktree) = worktree_using_branch(repo_root, branch)? {
+        anyhow::bail!(
+            "branch '{branch}' is checked out in worktree {}",
+            worktree.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_branch_rename_allowed(repo_root: &Path, branch: &str) -> Result<()> {
+    if let Some(worktree) = worktree_using_branch(repo_root, branch)? {
+        let current = canonical_or_original(repo_root);
+        if !same_path(&worktree, &current) {
+            anyhow::bail!(
+                "branch '{branch}' is checked out in worktree {}",
+                worktree.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn worktree_using_branch(repo_root: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    Ok(list_worktree_records(repo_root)?
+        .into_iter()
+        .find(|record| record.branch.as_deref() == Some(branch))
+        .map(|record| record.path))
+}
+
+fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Result<GitCommandOutput> {
+    let mode = if force { "-D" } else { "-d" };
+    git_checked(repo_root, &["branch", mode, "--", branch])
+}
+
+fn rename_local_branch(
+    repo_root: &Path,
+    old_name: &str,
+    new_name: &str,
+) -> Result<GitCommandOutput> {
+    git_checked(repo_root, &["branch", "-m", "--", old_name, new_name])
+}
+
+fn push_branch_to_remote(repo_root: &Path, remote: &str, branch: &str) -> Result<GitCommandOutput> {
+    git_checked(repo_root, &["push", "-u", remote, branch])
+}
+
+fn delete_remote_branch(repo_root: &Path, upstream: &BranchUpstream) -> Result<GitCommandOutput> {
+    git_checked(
+        repo_root,
+        &["push", &upstream.remote, "--delete", &upstream.branch],
+    )
+}
+
 fn remote_branch_for(repo_root: &Path, branch: &str) -> Result<Option<String>> {
     let explicit_remote_ref = format!("refs/remotes/{branch}");
     if git_output(
@@ -952,6 +1186,31 @@ fn operation_result(message: impl Into<String>, output: GitCommandOutput) -> Git
         message: message.into(),
         stdout: optional_output(output.stdout),
         stderr: optional_output(output.stderr),
+    }
+}
+
+fn operation_result_from_parts(
+    message: impl Into<String>,
+    stdout_parts: Vec<String>,
+    stderr_parts: Vec<String>,
+) -> GitOperationResult {
+    GitOperationResult {
+        message: message.into(),
+        stdout: optional_output(stdout_parts.join("\n")),
+        stderr: optional_output(stderr_parts.join("\n")),
+    }
+}
+
+fn collect_command_output(
+    output: GitCommandOutput,
+    stdout_parts: &mut Vec<String>,
+    stderr_parts: &mut Vec<String>,
+) {
+    if let Some(stdout) = optional_output(output.stdout) {
+        stdout_parts.push(stdout);
+    }
+    if let Some(stderr) = optional_output(output.stderr) {
+        stderr_parts.push(stderr);
     }
 }
 
@@ -1075,4 +1334,101 @@ fn canonical_or_original(path: &Path) -> PathBuf {
 
 fn same_path(left: &Path, right: &Path) -> bool {
     canonical_or_original(left) == canonical_or_original(right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_upstream_reads_remote_and_merge_config() {
+        let repo = init_test_repo("upstream");
+        run_test_git(&repo, &["branch", "feature"]);
+        run_test_git(&repo, &["config", "branch.feature.remote", "origin"]);
+        run_test_git(
+            &repo,
+            &["config", "branch.feature.merge", "refs/heads/feature"],
+        );
+
+        let upstream = branch_upstream(&repo, "feature")
+            .expect("read upstream")
+            .expect("upstream exists");
+
+        assert_eq!(upstream.remote, "origin");
+        assert_eq!(upstream.branch, "feature");
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn deleting_checked_out_branch_is_rejected() {
+        let repo = init_test_repo("delete-checked-out");
+        let err = ensure_branch_not_checked_out(&repo, "main").unwrap_err();
+
+        assert!(err.to_string().contains("checked out in worktree"));
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn rename_allows_current_worktree_branch() {
+        let repo = init_test_repo("rename-current");
+
+        ensure_branch_rename_allowed(&repo, "main").expect("current branch may be renamed locally");
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn delete_local_branch_uses_force_flag() {
+        let repo = init_test_repo("delete-force");
+        run_test_git(&repo, &["branch", "feature"]);
+
+        delete_local_branch(&repo, "feature", true).expect("force delete branch");
+
+        assert!(!local_branch_exists(&repo, "feature").expect("check deleted branch"));
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn rename_local_branch_changes_ref() {
+        let repo = init_test_repo("rename-local");
+        run_test_git(&repo, &["branch", "old"]);
+
+        rename_local_branch(&repo, "old", "new").expect("rename branch");
+
+        assert!(!local_branch_exists(&repo, "old").expect("old branch missing"));
+        assert!(local_branch_exists(&repo, "new").expect("new branch exists"));
+        fs::remove_dir_all(repo).ok();
+    }
+
+    fn init_test_repo(name: &str) -> PathBuf {
+        if !command_available("git") {
+            panic!("git is required for git.rs tests");
+        }
+        let root = unique_temp_dir(name);
+        fs::create_dir_all(&root).expect("create git test repo");
+        run_test_git(&root, &["init", "-b", "main"]);
+        run_test_git(&root, &["config", "user.email", "test@example.com"]);
+        run_test_git(&root, &["config", "user.name", "Sinew Test"]);
+        fs::write(root.join("README.md"), "test\n").expect("write test file");
+        run_test_git(&root, &["add", "README.md"]);
+        run_test_git(&root, &["commit", "-m", "initial"]);
+        canonical_or_original(&root)
+    }
+
+    fn run_test_git(repo: &Path, args: &[&str]) {
+        git_checked(repo, args)
+            .unwrap_or_else(|err| panic!("git {} failed: {err}", args.join(" ")));
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+        let counter = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "sinew-git-test-{name}-{}-{counter}-{nanos}",
+            std::process::id()
+        ))
+    }
 }

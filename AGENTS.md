@@ -135,7 +135,9 @@ Code map:
 │   │       ├── client.rs
 │   │       ├── lib.rs
 │   │       ├── model_info.rs
+│   │       ├── responses_stream.rs
 │   │       ├── stream.rs
+│   │       ├── websocket.rs
 │   │       └── wire.rs
 │   └── sinew-openrouter
 │       ├── Cargo.toml
