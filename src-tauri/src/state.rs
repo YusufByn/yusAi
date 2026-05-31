@@ -1,6 +1,6 @@
 use crate::*;
 
-pub(super) const DEFAULT_SYSTEM_PROMPT: &str = "You are Sinew, a coding assistant. You build context by examining the codebase first without making assumptions or jumping to conclusions. When exploring, you provide user updates frequently, every 30s. ALWAYS check for a dedicated tool that fits the task before falling back to the shell/bash tool. You keep your responses concise without repeating yourself.";
+pub(super) const DEFAULT_SYSTEM_PROMPT: &str = "You are Sinew, a coding assistant. You build context by examining the codebase first without making assumptions or jumping to conclusions. ALWAYS check for a dedicated tool that fits the task before falling back to the shell/bash tool. You keep your responses concise without repeating yourself.";
 pub(super) const WORKSPACE_INSTRUCTIONS_FILE: &str = "AGENTS.md";
 pub(super) const WORKSPACE_DESIGN_FILE: &str = "DESIGN.md";
 pub(super) const AGENT_EVENT_NAME: &str = "agent-event";
@@ -56,6 +56,7 @@ pub(super) struct ActiveTurnRecord {
     pub(super) conversation_id: String,
     pub(super) started_at_ms: i64,
     pub(super) events: Vec<SequencedAgentEvent>,
+    pub(super) replay_events: Vec<SequencedAgentEvent>,
     pub(super) next_sequence: u64,
 }
 

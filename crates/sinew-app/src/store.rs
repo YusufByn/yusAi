@@ -44,17 +44,13 @@ Rules:
 - Only when the user message contains <plan_mode_control action="stop_questions">, stop asking questions and write the complete plan now.
 - When the plan is ready, respond with only the Markdown plan. Do not implement it.
 
-STRICTLY FORBIDDEN in the plan (unless the user explicitly requests it):
-- Code snippets, pseudo-code, or inline code
-- File paths, directory structures, or tree views
-- Function, class, variable, or module names
-- Shell commands or CLI instructions
-- Technical configuration details
-- Any implementation-specific notation
+STRICTLY FORBIDDEN:
+- Low-level implementation details: code snippets, file paths/structures, function/variable names, or shell commands.
 
-The plan should read as a clear description of intent and expected behavior that anyone could understand without technical background. Bullet points and paragraphs are both acceptable. The focus is on WHAT the system should do, not HOW the code should be written.
+REQUIRED:
+- All specific technologies, design choices, and parameters agreed upon during brainstorming. Do not invent extra components or options not discussed.
 
-If technical specifics become necessary to avoid ambiguity, the AI may include them at its discretion, integrated naturally into the plan - but this should remain the exception, not the default.
+Focus on WHAT the system should do and how components behave, not HOW the code is written. Keep it clear and aligned with the discussed scope.
 
 You may include Mermaid diagrams (in ```mermaid fenced blocks) when a flow, decision tree, sequence, or set of relationships would be clearer as a picture than as prose. Keep diagram labels at the same level of abstraction as the rest of the plan: describe intent and behavior, not files, functions, or implementation details."#;
 
@@ -925,11 +921,8 @@ impl AppStore {
         let tx = conn
             .transaction()
             .context("unable to open sqlite transaction")?;
-        let current_title_state = load_conversation_title_state(
-            &tx,
-            &conversation.workspace_id,
-            &conversation.id,
-        )?;
+        let current_title_state =
+            load_conversation_title_state(&tx, &conversation.workspace_id, &conversation.id)?;
         let title_state = resolve_title_for_save(
             current_title_state.as_ref(),
             &conversation.title,
@@ -996,11 +989,8 @@ impl AppStore {
         let tx = conn
             .transaction()
             .context("unable to open sqlite transaction")?;
-        let current_title_state = load_conversation_title_state(
-            &tx,
-            &conversation.workspace_id,
-            &conversation.id,
-        )?;
+        let current_title_state =
+            load_conversation_title_state(&tx, &conversation.workspace_id, &conversation.id)?;
         let title_state = resolve_title_for_save(
             current_title_state.as_ref(),
             &conversation.title,
@@ -1912,11 +1902,10 @@ mod tests {
     }
 
     #[test]
-    fn save_conversation_initializes_title_from_first_user_message_and_preserves_it() -> Result<()> {
-        let path = std::env::temp_dir().join(format!(
-            "sinew-store-title-test-{}.sqlite3",
-            Uuid::new_v4()
-        ));
+    fn save_conversation_initializes_title_from_first_user_message_and_preserves_it() -> Result<()>
+    {
+        let path =
+            std::env::temp_dir().join(format!("sinew-store-title-test-{}.sqlite3", Uuid::new_v4()));
         let store = AppStore { path: path.clone() };
         let result = (|| -> Result<()> {
             store.migrate()?;
@@ -1931,7 +1920,10 @@ mod tests {
                 .load_conversation("workspace", &conversation.id)?
                 .expect("conversation should exist");
             assert_eq!(loaded.title, "First request");
-            assert_eq!(store.list_conversations("workspace")?[0].title, "First request");
+            assert_eq!(
+                store.list_conversations("workspace")?[0].title,
+                "First request"
+            );
 
             let mut compacted = loaded;
             compacted.history = vec![

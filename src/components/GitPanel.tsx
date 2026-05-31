@@ -686,8 +686,8 @@ export function GitPanel({
         <span className="git-panel__state-title">Git isn't available</span>
         <span className="git-panel__state-text">
           {APP_NAME} couldn't find a working <code>git</code> binary on your{" "}
-          <code>PATH</code>. Install Git, restart {APP_NAME}, and this panel will
-          come back online.
+          <code>PATH</code> or in standard install locations. Install Git,
+          restart {APP_NAME} if needed, and this panel will come back online.
         </span>
         {snapshot.error && (
           <span className="git-panel__state-error">{snapshot.error}</span>
