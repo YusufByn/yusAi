@@ -74,6 +74,7 @@ Code map:
 │   │       ├── lib.rs
 │   │       ├── logs.rs
 │   │       ├── mcp.rs
+│   │       ├── powershell.rs
 │   │       ├── question.rs
 │   │       ├── read.rs
 │   │       ├── skill.rs
