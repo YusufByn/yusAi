@@ -246,6 +246,7 @@ pub(super) async fn send_message(
             workspace_root.clone(),
             turn_system_prompt.clone(),
             providers.clone(),
+            conversation.model.clone(),
             sub_agent_settings.clone(),
             mcp_settings.clone(),
             tool_settings.clone(),
