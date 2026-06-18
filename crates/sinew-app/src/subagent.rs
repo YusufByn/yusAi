@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use crate::tool_run::FileChange;
 use crate::{
     run_turn, AgentEvent, AgentEventScope, AgentMode, BashTool, CreateImageTool, DatabaseQueryTool,
+    DeployTool,
     EditFileTool, GlobTool, GoalWorkflowState, GrepTool, HttpRequestTool, LogsTool, McpSettings,
     McpToolRegistry, QuestionTool, ReadTool, SkillSettings, SkillTool, SupabaseQueryTool,
     ToDoListTool, TodoListState, ToolRunResult, ToolSettings, TurnCancel, TurnContext,
@@ -253,6 +254,10 @@ impl SubAgentTool {
             )),
             database: Arc::new(DatabaseQueryTool::with_config(
                 self.tool_settings.database_config(),
+            )),
+            deploy: Arc::new(DeployTool::new(
+                Vec::new(),
+                self.workspace_root.clone(),
             )),
             mcp: Arc::new(McpToolRegistry::new(self.mcp_settings.clone())),
             subagents: None,
