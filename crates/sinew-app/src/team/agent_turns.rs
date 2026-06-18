@@ -110,6 +110,10 @@ impl TeamTool {
             database: Arc::new(DatabaseQueryTool::with_config(
                 self.tool_settings.database_config(),
             )),
+            deploy: Arc::new(DeployTool::new(
+                Vec::new(),
+                self.workspace_root.clone(),
+            )),
             mcp: Arc::new(McpToolRegistry::new(self.mcp_settings.clone())),
             subagents: None,
             teams: Some(team_tool),

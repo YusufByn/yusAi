@@ -141,6 +141,7 @@ pub(super) async fn send_message(
         .map_err(error_to_string)?;
     let tool_settings = state.store.load_tool_settings().map_err(error_to_string)?;
     let skill_settings = state.store.load_skill_settings().map_err(error_to_string)?;
+    let deploy_settings = state.store.load_deploy_settings().map_err(error_to_string)?;
     let next_plan_workflow = policy.next_workflow.clone();
     conversation.plan_workflow = next_plan_workflow.clone();
     conversation.goal_workflow = if policy.mode == AgentMode::Goal {
@@ -240,6 +241,10 @@ pub(super) async fn send_message(
         )),
         database: Arc::new(DatabaseQueryTool::with_config(
             tool_settings.database_config(),
+        )),
+        deploy: Arc::new(DeployTool::new(
+            deploy_settings.targets.clone(),
+            workspace_root.clone(),
         )),
         mcp: Arc::new(McpToolRegistry::new(mcp_settings.clone())),
         subagents: Some(Arc::new(SubAgentTool::new(
@@ -1538,6 +1543,7 @@ pub(super) fn tool_descriptors_for_workspace(
         LogsTool::new(workspace_root).stop_descriptor(),
         SupabaseQueryTool::new().descriptor(),
         DatabaseQueryTool::new().descriptor(),
+        DeployTool::new(Vec::new(), workspace_root).descriptor(),
     ];
     if let Some(descriptor) =
         SkillTool::with_settings(workspace_root, skill_settings.clone()).descriptor()

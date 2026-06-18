@@ -326,6 +326,7 @@ pub(super) async fn wake_main_agent_for_swarm_notice(
         .map_err(error_to_string)?;
     let tool_settings = state.store.load_tool_settings().map_err(error_to_string)?;
     let skill_settings = state.store.load_skill_settings().map_err(error_to_string)?;
+    let deploy_settings = state.store.load_deploy_settings().map_err(error_to_string)?;
     let turn_system_prompt = with_turn_plan_reminder(&effective_system_prompt, None);
     let providers = provider_registry_snapshot(&state)?;
     let context = TurnContext {
@@ -373,6 +374,10 @@ pub(super) async fn wake_main_agent_for_swarm_notice(
         )),
         database: Arc::new(DatabaseQueryTool::with_config(
             tool_settings.database_config(),
+        )),
+        deploy: Arc::new(DeployTool::new(
+            deploy_settings.targets.clone(),
+            workspace_root.clone(),
         )),
         mcp: Arc::new(McpToolRegistry::new(mcp_settings.clone())),
         subagents: Some(Arc::new(SubAgentTool::new(

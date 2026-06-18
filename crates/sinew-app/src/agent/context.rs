@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use sinew_core::{ChatMessage, Provider, ServiceTier};
 
 use crate::{
-    BashTool, CreateImageTool, DatabaseQueryTool, EditFileTool, GlobTool, GoalWorkflowState,
+    BashTool, CreateImageTool, DatabaseQueryTool, DeployTool, EditFileTool, GlobTool, GoalWorkflowState,
     GrepTool, HttpRequestTool, LogsTool, McpToolRegistry, QuestionTool, ReadTool, SkillTool,
     SubAgentTool, SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolSettings,
     WebFetchTool, WebSearchTool, WriteFileTool,
@@ -53,6 +53,7 @@ pub struct TurnContext {
     pub skill: Arc<SkillTool>,
     pub supabase: Arc<SupabaseQueryTool>,
     pub database: Arc<DatabaseQueryTool>,
+    pub deploy: Arc<DeployTool>,
     pub mcp: Arc<McpToolRegistry>,
     pub subagents: Option<Arc<SubAgentTool>>,
     pub teams: Option<Arc<TeamTool>>,

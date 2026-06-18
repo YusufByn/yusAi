@@ -53,6 +53,7 @@ use sinew_app::{
     ToDoListTool, TodoListState, ToolSettings, ToolSettingsView, TurnCancel, TurnContext,
     SupabaseQueryTool,
     DatabaseQueryTool,
+    DeploySettings, DeployTool,
     WebFetchTool, WebSearchTool, WorkspaceBootstrap, WorkspaceCopyOperation, WorkspaceDeletedEntry,
     WorkspaceFileChangeEvent, WorkspaceSearchResult, WriteFileTool,
 };
@@ -310,6 +311,8 @@ pub fn run() {
             conversations::set_conversation_model_preference,
             conversations::list_mcp_settings,
             conversations::save_mcp_settings,
+            conversations::list_deploy_settings,
+            conversations::save_deploy_settings,
             conversations::list_tool_settings,
             conversations::save_tool_settings,
             conversations::test_supabase_connection_command,

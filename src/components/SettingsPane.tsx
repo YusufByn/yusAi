@@ -24,6 +24,10 @@ import {
 } from "../lib/models";
 import type {
   AnthropicProviderStatus,
+  DeployEnvironment,
+  DeployPlatform,
+  DeploySettings,
+  DeployTarget,
   GoogleProviderStatus,
   ImageProvider,
   InstalledSkill,
@@ -76,6 +80,7 @@ type Section =
   | "about"
   | "providers"
   | "datasources"
+  | "deploytargets"
   | "tools"
   | "mcp"
   | "skills"
@@ -1187,6 +1192,20 @@ export function SettingsPane({ workspacePath }: Props) {
         <button
           type="button"
           className="settings-pane__nav-item"
+          data-active={section === "deploytargets" ? "true" : "false"}
+          onClick={() => setSection("deploytargets")}
+        >
+          <Icon
+            icon="solar:rocket-2-linear"
+            width={15}
+            height={15}
+            className="settings-pane__nav-icon"
+          />
+          <span className="settings-pane__nav-label">Deploy Targets</span>
+        </button>
+        <button
+          type="button"
+          className="settings-pane__nav-item"
           data-active={section === "tools" ? "true" : "false"}
           onClick={() => setSection("tools")}
         >
@@ -1300,6 +1319,8 @@ export function SettingsPane({ workspacePath }: Props) {
             onDatabasePasswordChange={updateDatabasePassword}
             onDatabaseNameChange={updateDatabaseName}
           />
+        ) : section === "deploytargets" ? (
+          <DeployTargetsSection />
         ) : section === "tools" ? (
           <ToolsSection
             settings={toolSettings}
@@ -4933,4 +4954,391 @@ function humanizeToolName(name: string): string {
     .trim();
   if (!spaced) return name;
   return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
+}
+
+const DEPLOY_PLATFORM_LABELS: Record<DeployPlatform, string> = {
+  vercel: "Vercel",
+  railway: "Railway",
+  ssh: "SSH / VPS",
+};
+
+const DEPLOY_PLATFORM_ICONS: Record<DeployPlatform, string> = {
+  vercel: "simple-icons:vercel",
+  railway: "simple-icons:railway",
+  ssh: "solar:server-linear",
+};
+
+function createEmptyDeployTarget(): DeployTarget {
+  return {
+    id:
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `target-${Date.now()}`,
+    name: "",
+    platform: "vercel",
+    token: "",
+    project: "",
+    environment: "production",
+    host: "",
+    command: "",
+    requireConfirmation: false,
+    enabled: true,
+  };
+}
+
+function deployTargetConfigured(target: DeployTarget): boolean {
+  if (target.platform === "ssh") {
+    return target.host.trim().length > 0 && target.command.trim().length > 0;
+  }
+  return target.token.trim().length > 0;
+}
+
+function DeployTargetsSection() {
+  const [targets, setTargets] = useState<DeployTarget[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const loaded = await api.listDeploySettings();
+        if (active) setTargets(loaded.targets);
+      } catch (err) {
+        if (active) setStatus(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const patchTarget = (id: string, patch: Partial<DeployTarget>) => {
+    setTargets((prev) =>
+      prev.map((target) => (target.id === id ? { ...target, ...patch } : target)),
+    );
+    setDirty(true);
+    setStatus(null);
+  };
+
+  const addTarget = () => {
+    setTargets((prev) => [...prev, createEmptyDeployTarget()]);
+    setDirty(true);
+    setStatus(null);
+  };
+
+  const removeTarget = (id: string) => {
+    setTargets((prev) => prev.filter((target) => target.id !== id));
+    setDirty(true);
+    setStatus(null);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setStatus(null);
+    try {
+      const payload: DeploySettings = { targets };
+      const saved = await api.saveDeploySettings(payload);
+      setTargets(saved.targets);
+      setDirty(false);
+      setStatus("Saved");
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const enabledCount = targets.filter((target) => target.enabled).length;
+
+  return (
+    <>
+      <header className="settings-pane__header">
+        <div className="settings-pane__header-text">
+          <h1 className="settings-pane__title">Deploy Targets</h1>
+          <p className="settings-pane__subtitle">
+            {loading
+              ? "Loading targets…"
+              : targets.length === 0
+                ? "Add a hosting target so the agent can deploy on request."
+                : `${enabledCount}/${targets.length} enabled`}
+          </p>
+        </div>
+        <div className="settings-pane__actions">
+          {status && (
+            <span
+              className="settings-pane__status"
+              data-tone={status === "Saved" ? "ok" : "error"}
+            >
+              {status}
+            </span>
+          )}
+          <button
+            type="button"
+            className="settings-pane__btn"
+            onClick={addTarget}
+            disabled={loading}
+          >
+            <Icon icon="solar:add-circle-linear" width={13} height={13} />
+            <span>Add target</span>
+          </button>
+          <button
+            type="button"
+            className="settings-pane__btn"
+            data-primary="true"
+            onClick={() => void save()}
+            disabled={loading || saving || !dirty}
+          >
+            <Icon
+              icon={saving ? "solar:refresh-linear" : "solar:diskette-linear"}
+              width={13}
+              height={13}
+            />
+            <span>{saving ? "Saving…" : dirty ? "Save changes" : "Saved"}</span>
+          </button>
+        </div>
+      </header>
+
+      <div className="settings-pane__body settings-pane__body--providers">
+        {!loading && targets.length === 0 ? (
+          <p className="settings-pane__subtitle">
+            No deploy targets yet. Add one (Vercel, Railway, or SSH/VPS) and the
+            agent will be able to deploy this workspace when you ask.
+          </p>
+        ) : (
+          targets.map((target) => {
+            const configured = deployTargetConfigured(target);
+            return (
+              <section key={target.id} className="settings-pane__provider-card">
+                <div className="settings-pane__provider-main">
+                  <div className="settings-pane__provider-mark" aria-hidden>
+                    <Icon
+                      icon={DEPLOY_PLATFORM_ICONS[target.platform]}
+                      width={24}
+                      height={24}
+                    />
+                  </div>
+                  <div className="settings-pane__provider-copy">
+                    <div className="settings-pane__provider-title-row">
+                      <h2>{target.name.trim() || "Untitled target"}</h2>
+                      <span
+                        className="settings-pane__chip"
+                        data-tone={configured ? "ok" : "off"}
+                      >
+                        <span className="settings-pane__chip-dot" />
+                        {configured ? "Configured" : "Incomplete"}
+                      </span>
+                    </div>
+                    <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+                      <label className="settings-pane__field settings-pane__field--grow">
+                        <span>Name</span>
+                        <input
+                          type="text"
+                          placeholder="Production"
+                          value={target.name}
+                          autoComplete="off"
+                          spellCheck={false}
+                          onChange={(event) =>
+                            patchTarget(target.id, { name: event.target.value })
+                          }
+                        />
+                      </label>
+                      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                        <label className="settings-pane__field">
+                          <span>Platform</span>
+                          <select
+                            value={target.platform}
+                            onChange={(event) =>
+                              patchTarget(target.id, {
+                                platform: event.target.value as DeployPlatform,
+                              })
+                            }
+                          >
+                            {(
+                              Object.keys(
+                                DEPLOY_PLATFORM_LABELS,
+                              ) as DeployPlatform[]
+                            ).map((platform) => (
+                              <option key={platform} value={platform}>
+                                {DEPLOY_PLATFORM_LABELS[platform]}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="settings-pane__field">
+                          <span>Default environment</span>
+                          <select
+                            value={target.environment}
+                            onChange={(event) =>
+                              patchTarget(target.id, {
+                                environment: event.target
+                                  .value as DeployEnvironment,
+                              })
+                            }
+                          >
+                            <option value="preview">Preview</option>
+                            <option value="production">Production</option>
+                          </select>
+                        </label>
+                      </div>
+                      {target.platform === "ssh" ? (
+                        <>
+                          <label className="settings-pane__field settings-pane__field--grow">
+                            <span>Host (user@host)</span>
+                            <input
+                              type="text"
+                              placeholder="deploy@203.0.113.10"
+                              value={target.host}
+                              autoComplete="off"
+                              spellCheck={false}
+                              onChange={(event) =>
+                                patchTarget(target.id, {
+                                  host: event.target.value,
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="settings-pane__field settings-pane__field--grow">
+                            <span>Deploy command (run over SSH)</span>
+                            <input
+                              type="text"
+                              placeholder="cd /srv/app && git pull && ./deploy.sh"
+                              value={target.command}
+                              autoComplete="off"
+                              spellCheck={false}
+                              onChange={(event) =>
+                                patchTarget(target.id, {
+                                  command: event.target.value,
+                                })
+                              }
+                            />
+                          </label>
+                        </>
+                      ) : (
+                        <>
+                          <label className="settings-pane__field settings-pane__field--grow">
+                            <span>API token</span>
+                            <input
+                              type="password"
+                              placeholder="Token"
+                              value={target.token}
+                              autoComplete="off"
+                              spellCheck={false}
+                              onChange={(event) =>
+                                patchTarget(target.id, {
+                                  token: event.target.value,
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="settings-pane__field settings-pane__field--grow">
+                            <span>
+                              {target.platform === "railway"
+                                ? "Service (optional)"
+                                : "Project (optional)"}
+                            </span>
+                            <input
+                              type="text"
+                              placeholder={
+                                target.platform === "railway"
+                                  ? "my-service"
+                                  : "my-project"
+                              }
+                              value={target.project}
+                              autoComplete="off"
+                              spellCheck={false}
+                              onChange={(event) =>
+                                patchTarget(target.id, {
+                                  project: event.target.value,
+                                })
+                              }
+                            />
+                          </label>
+                        </>
+                      )}
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 16,
+                          alignItems: "center",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <label
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "center",
+                          }}
+                        >
+                          <button
+                            type="button"
+                            className="settings-pane__switch"
+                            role="switch"
+                            aria-checked={target.enabled}
+                            aria-label="Enable this deploy target"
+                            data-on={target.enabled ? "true" : "false"}
+                            onClick={() =>
+                              patchTarget(target.id, {
+                                enabled: !target.enabled,
+                              })
+                            }
+                          >
+                            <span className="settings-pane__switch-thumb" />
+                          </button>
+                          <span>Enabled</span>
+                        </label>
+                        <label
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "center",
+                          }}
+                        >
+                          <button
+                            type="button"
+                            className="settings-pane__switch"
+                            role="switch"
+                            aria-checked={target.requireConfirmation}
+                            aria-label="Require confirmation before production deploys"
+                            data-on={target.requireConfirmation ? "true" : "false"}
+                            onClick={() =>
+                              patchTarget(target.id, {
+                                requireConfirmation: !target.requireConfirmation,
+                              })
+                            }
+                          >
+                            <span className="settings-pane__switch-thumb" />
+                          </button>
+                          <span>Confirm production deploys</span>
+                        </label>
+                        <button
+                          type="button"
+                          className="settings-pane__btn"
+                          data-danger="true"
+                          onClick={() => removeTarget(target.id)}
+                          style={{ marginLeft: "auto" }}
+                        >
+                          <Icon
+                            icon="solar:trash-bin-trash-linear"
+                            width={13}
+                            height={13}
+                          />
+                          <span>Remove</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            );
+          })
+        )}
+      </div>
+    </>
+  );
 }

@@ -78,6 +78,7 @@ Code map:
 │   │       ├── bash.rs
 │   │       ├── compact.rs
 │   │       ├── database.rs
+│   │       ├── deploy.rs
 │   │       ├── edit.rs
 │   │       ├── glob.rs
 │   │       ├── grep.rs

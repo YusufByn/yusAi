@@ -214,6 +214,27 @@ pub(super) async fn save_mcp_settings(
 }
 
 #[tauri::command]
+pub(super) async fn list_deploy_settings(
+    state: State<'_, DesktopState>,
+) -> std::result::Result<DeploySettings, String> {
+    state.store.load_deploy_settings().map_err(error_to_string)
+}
+
+#[tauri::command]
+pub(super) async fn save_deploy_settings(
+    state: State<'_, DesktopState>,
+    input: SaveDeploySettingsInput,
+) -> std::result::Result<DeploySettings, String> {
+    let mut settings = input.settings;
+    settings.sanitize();
+    state
+        .store
+        .save_deploy_settings(&settings)
+        .map_err(error_to_string)?;
+    Ok(settings)
+}
+
+#[tauri::command]
 pub(super) async fn list_tool_settings(
     state: State<'_, DesktopState>,
     input: WorkspaceInput,

@@ -302,6 +302,27 @@ export type McpSettings = {
   servers: McpServerConfig[];
 };
 
+export type DeployPlatform = "vercel" | "railway" | "ssh";
+
+export type DeployEnvironment = "preview" | "production";
+
+export type DeployTarget = {
+  id: string;
+  name: string;
+  platform: DeployPlatform;
+  token: string;
+  project: string;
+  environment: DeployEnvironment;
+  host: string;
+  command: string;
+  requireConfirmation: boolean;
+  enabled: boolean;
+};
+
+export type DeploySettings = {
+  targets: DeployTarget[];
+};
+
 export type McpToolInfo = {
   serverId: string;
   serverName: string;

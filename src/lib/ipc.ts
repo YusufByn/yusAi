@@ -22,6 +22,7 @@ import type {
   MessageVisibility,
   McpServerProbe,
   McpSettings,
+  DeploySettings,
   ModeModelSettings,
   ModelRef,
   OpenAiProviderStatus,
@@ -355,6 +356,14 @@ export const api = {
   },
   saveMcpSettings(settings: McpSettings) {
     return invoke<McpSettings>("save_mcp_settings", {
+      input: { settings },
+    });
+  },
+  listDeploySettings() {
+    return invoke<DeploySettings>("list_deploy_settings");
+  },
+  saveDeploySettings(settings: DeploySettings) {
+    return invoke<DeploySettings>("save_deploy_settings", {
       input: { settings },
     });
   },

@@ -4,7 +4,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
-    tool_names, BashTool, CreateImageTool, DatabaseQueryTool, EditFileTool, GlobTool, GrepTool,
+    tool_names, BashTool, CreateImageTool, DatabaseQueryTool, DeployTool, EditFileTool, GlobTool, GrepTool,
     HttpRequestTool, LogsTool, McpToolRegistry, QuestionTool, ReadFingerprint, ReadTool, SkillTool,
     SubAgentTool, SupabaseQueryTool, TeamTool, ToDoListTool, TodoListState, ToolRunResult,
     ToolSettings, WebFetchTool, WebSearchTool, WriteFileTool, LOGS_LIST_TOOL, LOGS_START_TOOL,
@@ -44,6 +44,7 @@ pub(super) async fn run_tool(
     skill: &SkillTool,
     supabase: &SupabaseQueryTool,
     database: &DatabaseQueryTool,
+    deploy: &DeployTool,
     mcp: &McpToolRegistry,
     subagents: Option<&SubAgentTool>,
     teams: Option<&TeamTool>,
@@ -117,6 +118,8 @@ pub(super) async fn run_tool(
         supabase.run(input).await
     } else if name == "DatabaseQuery" {
         database.run(input).await
+    } else if name == crate::DEPLOY_TOOL_NAME {
+        deploy.run(input).await
     } else if canonical_name == tool_names::SKILL {
         skill.run(input).await
     } else if name.starts_with("subagent_") {

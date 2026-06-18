@@ -2,6 +2,7 @@ pub mod agent;
 pub mod bash;
 pub mod compact;
 pub mod database;
+pub mod deploy;
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -68,6 +69,9 @@ pub use supabase::{
 pub use database::{
     test_database_connection, DatabaseConfig, DatabaseKind, DatabaseQueryTool,
     DATABASE_QUERY_TOOL_DEFAULT_DESCRIPTION, DATABASE_QUERY_TOOL_NAME,
+};
+pub use deploy::{
+    DeployEnvironment, DeployPlatform, DeploySettings, DeployTarget, DeployTool, DEPLOY_TOOL_NAME,
 };
 pub use team::{is_team_tool_name, TeamRuntime, TeamTool};
 pub use todo::{

@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::agent::AgentMode;
 use crate::bash::active_shell_display_name;
 use crate::database::{DatabaseConfig, DatabaseKind};
+use crate::deploy::DeploySettings;
 use crate::mcp::McpSettings;
 use crate::skill::SkillSettings;
 use crate::subagent::SubAgentSettings;
@@ -26,6 +27,7 @@ use crate::workspace::{workspace_info, WorkspaceInfo};
 const DEFAULT_CONVERSATION_TITLE: &str = "New conversation";
 const MODE_MODEL_SETTINGS_KEY: &str = "mode_model_settings";
 const MCP_SETTINGS_KEY: &str = "mcp_settings";
+const DEPLOY_SETTINGS_KEY: &str = "deploy_settings";
 const SUB_AGENT_SETTINGS_KEY: &str = "sub_agent_settings";
 const TOOL_SETTINGS_KEY: &str = "tool_settings";
 const SKILL_SETTINGS_KEY: &str = "skill_settings";
@@ -1261,6 +1263,45 @@ impl AppStore {
             params![MCP_SETTINGS_KEY, serde_json::to_string(settings)?, now_ms()],
         )
         .context("unable to save MCP settings")?;
+        Ok(())
+    }
+
+    pub fn load_deploy_settings(&self) -> Result<DeploySettings> {
+        let conn = self.connection()?;
+        let stored = conn
+            .query_row(
+                "select value_json from app_settings where key = ?1",
+                params![DEPLOY_SETTINGS_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("unable to read deploy settings")?;
+
+        if let Some(json) = stored {
+            if let Ok(mut settings) = serde_json::from_str::<DeploySettings>(&json) {
+                settings.sanitize();
+                return Ok(settings);
+            }
+        }
+
+        Ok(DeploySettings::default())
+    }
+
+    pub fn save_deploy_settings(&self, settings: &DeploySettings) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "insert into app_settings (key, value_json, updated_at_ms)
+             values (?1, ?2, ?3)
+             on conflict(key) do update set
+                value_json = excluded.value_json,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                DEPLOY_SETTINGS_KEY,
+                serde_json::to_string(settings)?,
+                now_ms()
+            ],
+        )
+        .context("unable to save deploy settings")?;
         Ok(())
     }
 

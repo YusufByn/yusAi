@@ -69,6 +69,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
         skill,
         supabase,
         database,
+        deploy,
         mcp,
         subagents,
         teams,
@@ -125,6 +126,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
             logs.stop_descriptor(),
             supabase.descriptor(),
             database.descriptor(),
+            deploy.descriptor(),
         ];
         if let Some(question) = &question {
             tool_descriptors.insert(6, question.descriptor());
@@ -645,6 +647,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                         &skill,
                         &supabase,
                         &database,
+                        &deploy,
                         &mcp,
                         subagents.as_deref(),
                         teams.as_deref(),
@@ -693,6 +696,7 @@ pub async fn run_turn(ctx: TurnContext) -> TurnOutput {
                             &skill,
                             &supabase,
                             &database,
+                            &deploy,
                             &mcp,
                             subagents.as_deref(),
                             teams.as_deref(),
