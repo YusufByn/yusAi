@@ -408,6 +408,12 @@ pub(super) struct SaveDeploySettingsInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct McpOAuthInput {
+    pub(super) server_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct SaveToolSettingsInput {
     pub(super) workspace_path: String,
     pub(super) settings: ToolSettings,
