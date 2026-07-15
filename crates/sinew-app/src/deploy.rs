@@ -349,6 +349,15 @@ fn build_deploy_command(
             if production {
                 command.push_str(" --prod");
             }
+            // The Vercel CLI does NOT read a VERCEL_TOKEN env var; it requires
+            // an explicit `--token` flag (or `vercel login`). We still keep the
+            // secret out of the echoed command string by referencing the env
+            // var and letting the shell expand it at execution time.
+            if cfg!(windows) {
+                command.push_str(" --token %VERCEL_TOKEN%");
+            } else {
+                command.push_str(" --token \"$VERCEL_TOKEN\"");
+            }
             Ok((command, vec![("VERCEL_TOKEN".into(), target.token.clone())]))
         }
         DeployPlatform::Railway => {
