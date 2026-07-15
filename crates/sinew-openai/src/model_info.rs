@@ -21,6 +21,27 @@ const MODELS: &[OpenAiModelInfo] = &[
         supports_images: true,
     },
     OpenAiModelInfo {
+        id: "gpt-5.6-sol",
+        context_window: 1_050_000,
+        preferred_window: 950_000,
+        max_output_tokens: 128_000,
+        supports_images: true,
+    },
+    OpenAiModelInfo {
+        id: "gpt-5.6-terra",
+        context_window: 1_050_000,
+        preferred_window: 950_000,
+        max_output_tokens: 128_000,
+        supports_images: true,
+    },
+    OpenAiModelInfo {
+        id: "gpt-5.6-luna",
+        context_window: 1_050_000,
+        preferred_window: 950_000,
+        max_output_tokens: 128_000,
+        supports_images: true,
+    },
+    OpenAiModelInfo {
         id: "gpt-5.4",
         context_window: 1_050_000,
         preferred_window: 950_000,
@@ -76,5 +97,24 @@ pub fn capabilities(model: &ModelRef) -> ModelCapabilities {
         supports_tools: true,
         supports_images: info.supports_images,
         effort_mode: EffortMode::Tier,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sinew_core::ModelRef;
+
+    use super::capabilities;
+
+    #[test]
+    fn gpt_5_6_models_use_expected_capabilities() {
+        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let capabilities = capabilities(&ModelRef::new("openai", model_id));
+
+            assert_eq!(capabilities.context_window, 1_050_000, "{model_id}");
+            assert_eq!(capabilities.preferred_window, 950_000, "{model_id}");
+            assert_eq!(capabilities.max_output_tokens, 128_000, "{model_id}");
+            assert!(capabilities.supports_images, "{model_id}");
+        }
     }
 }

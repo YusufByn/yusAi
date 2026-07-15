@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "Sinew"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4201,7 +4201,7 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "sinew-anthropic"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4223,7 +4223,7 @@ dependencies = [
 
 [[package]]
 name = "sinew-app"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4255,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "sinew-core"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "async-trait",
  "futures",
@@ -4266,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "sinew-google"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4288,7 +4288,7 @@ dependencies = [
 
 [[package]]
 name = "sinew-kimi"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4307,7 +4307,7 @@ dependencies = [
 
 [[package]]
 name = "sinew-openai"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4329,7 +4329,7 @@ dependencies = [
 
 [[package]]
 name = "sinew-openrouter"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "async-trait",
  "bytes",
