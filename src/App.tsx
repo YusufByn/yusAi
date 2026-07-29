@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { Welcome } from "./components/Welcome";
 import { Workspace } from "./components/Workspace";
 import { UpdaterLockScreen } from "./components/UpdaterLockScreen";
-import { SinewDesignDialog } from "./components/SinewDesignDialog";
 import { loadLastWorkspace, recordRecent, deriveName } from "./lib/recents";
 import { api } from "./lib/ipc";
 import type { UpdateInfo, WorkspaceBootstrap } from "./types";
@@ -16,15 +15,6 @@ type AppState =
 const startsEmpty =
   new URLSearchParams(window.location.search).get("newWindow") === "1";
 
-// Module-level guard for the Sinew Design launch popup. Lives for the
-// lifetime of the JS realm (the app process / page session), so the popup
-// fires exactly once per launch — not on every Welcome ↔ Workspace switch,
-// and not again after the user dismisses it. A full reload (new process)
-// starts a fresh realm and re-arms it, which is the intended "per launch"
-// behaviour. Kept outside React state so StrictMode's double-mount in dev
-// can't show it twice.
-let sinewDesignShown = false;
-
 /// Maximum time we wait on the boot updater check before falling through to
 /// the normal flow. Keeps the app responsive on flaky networks — if the
 /// update endpoint is unreachable we don't trap the user on a black canvas.
@@ -33,7 +23,6 @@ const BOOT_CHECK_TIMEOUT_MS = 4000;
 export default function App() {
   const [state, setState] = useState<AppState>({ kind: "boot" });
   const [bootError, setBootError] = useState<string | null>(null);
-  const [showDesignDialog, setShowDesignDialog] = useState(false);
 
   const openWorkspace = useCallback(async (path: string) => {
     setBootError(null);
@@ -121,20 +110,6 @@ export default function App() {
     return () => window.removeEventListener("sinew:install-update", handler);
   }, []);
 
-  // Sinew Design launch popup. Arms only once the boot gate has resolved to a
-  // normal surface (welcome / workspace) — never on `boot` (splash) or
-  // `update_required` (the unbypassable lock screen), so it can't stack on
-  // top of the updater. The module-level guard makes it once-per-session.
-  useEffect(() => {
-    if (sinewDesignShown) return;
-    if (state.kind === "welcome" || state.kind === "workspace") {
-      sinewDesignShown = true;
-      setShowDesignDialog(true);
-    }
-  }, [state.kind]);
-
-  const dismissDesignDialog = useCallback(() => setShowDesignDialog(false), []);
-
   const backToWelcome = useCallback(() => {
     void api.resetWindowTitle().catch(() => {
       // best-effort; leaving the previous title is harmless
@@ -163,9 +138,6 @@ export default function App() {
           error={bootError}
           deriveName={deriveName}
         />
-        {showDesignDialog && (
-          <SinewDesignDialog onDismiss={dismissDesignDialog} />
-        )}
       </>
     );
   }
@@ -179,9 +151,6 @@ export default function App() {
           setState({ kind: "workspace", bootstrap: b })
         }
       />
-      {showDesignDialog && (
-        <SinewDesignDialog onDismiss={dismissDesignDialog} />
-      )}
     </>
   );
 }

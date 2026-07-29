@@ -282,7 +282,6 @@ Code map:
     │   ├── RemotePanel.tsx
     │   ├── SearchPane.tsx
     │   ├── SettingsPane.tsx
-    │   ├── SinewDesignDialog.tsx
     │   ├── SinewMark.tsx
     │   ├── Splitter.tsx
     │   ├── TerminalPanel.tsx

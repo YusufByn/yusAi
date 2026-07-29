@@ -71,6 +71,13 @@ export const MODELS: ModelEntry[] = [
     defaultThinking: "medium",
   },
   {
+    value: "anthropic:claude-opus-5",
+    provider: "anthropic",
+    label: "Opus 5",
+    thinking: ["off", "low", "medium", "high", "xhigh", "max"],
+    defaultThinking: "medium",
+  },
+  {
     value: "anthropic:claude-opus-4-8",
     provider: "anthropic",
     label: "Opus 4.8",
