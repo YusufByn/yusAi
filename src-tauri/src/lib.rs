@@ -104,6 +104,7 @@ mod git;
 mod models;
 mod platform;
 pub mod prime;
+pub mod prime_session;
 mod providers;
 mod remote;
 mod state;
@@ -272,6 +273,7 @@ pub fn run() {
         })
         .manage(state)
         .manage(updater::UpdaterState::new())
+        .manage(prime_session::PrimeState::default())
         .invoke_handler(tauri::generate_handler![
             workspace::open_workspace,
             workspace::open_new_window,
@@ -387,6 +389,10 @@ pub fn run() {
             updater::updater_download_and_install,
             updater::updater_restart,
             updater::updater_current_version,
+            prime_session::prime_create_session,
+            prime_session::prime_prompt,
+            prime_session::prime_abort,
+            prime_session::prime_close_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while building sinew desktop")

@@ -75,3 +75,95 @@ async fn spawns_supervisor_and_connects() {
     client.close();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Un prompt envoyé par le protocole natif ressort en `text_delta` dans les
+/// `SessionEvent` (réponse scriptée par le moteur `faux` de Prime).
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_streams_assistant_text() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_desktop_lib::prime_session::{create_session, kill_session, prompt};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "engine": "faux",
+            "responses": [{ "text": "bonjour depuis Prime" }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let session = create_session(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        }),
+    )
+    .await
+    .expect("session created and attached");
+    prompt(&client, &session, "salut")
+        .await
+        .expect("prompt admitted");
+
+    let mut text = String::new();
+    let mut seen_types = Vec::new();
+    let collected = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            let DaemonClientEvent::SessionEvent {
+                active_session_id,
+                event,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            assert_eq!(active_session_id, session);
+            let kind = event["type"].as_str().unwrap_or_default().to_string();
+            if kind == "message_update" && event["assistantMessageEvent"]["type"] == "text_delta" {
+                text.push_str(
+                    event["assistantMessageEvent"]["delta"]
+                        .as_str()
+                        .unwrap_or_default(),
+                );
+            }
+            let done = kind == "agent_end";
+            seen_types.push(kind);
+            if done {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(collected.is_ok(), "turn ended; events seen: {seen_types:?}");
+    assert_eq!(text, "bonjour depuis Prime", "events seen: {seen_types:?}");
+
+    kill_session(&client, &session)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
