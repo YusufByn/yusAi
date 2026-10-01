@@ -8,6 +8,7 @@ Code map:
 ├── Cargo.lock
 ├── Cargo.toml
 ├── CLAUDE.md # règles de l'intégration Prime Agent
+├── CONTEXT.md # état de l'intégration Prime Agent, pièges, suite (à relire en début de session)
 ├── EDIT_FILE_HARNESS_COMPARISON.md
 ├── EDIT_TOOL_COMPARISON.md
 ├── FEATURES.md
