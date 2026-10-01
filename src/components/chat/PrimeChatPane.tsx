@@ -2,7 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { listen } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
-import type { PrimeEventPayload, PrimeSessionConfig } from "../../types";
+import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
+import type { PrimeEventPayload, PrimeModelOption, PrimeSessionConfig } from "../../types";
 import { Markdown } from "./Markdown";
 
 // Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
@@ -244,12 +245,6 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
 
   const busy = status !== "idle";
   const pickersDisabled = busy || configBusy || !config;
-  const modelIndex = config?.model
-    ? config.models.findIndex(
-        (model) =>
-          model.provider === config.model?.provider && model.id === config.model?.id,
-      )
-    : -1;
 
   return (
     <div className="chat-col prime-chat">
@@ -300,7 +295,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
           )}
         </div>
       </div>
-      <div className="composer">
+      <div className={`composer${busy ? " composer--selector-locked" : ""}`}>
         <div className="composer__box">
           <div className="composer__input-wrap">
             <textarea
@@ -318,41 +313,41 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
             />
           </div>
           <div className="composer__actions">
-            <div className="composer__actions-left prime-chat__pickers">
+            <div className="composer__actions-left">
               {config && (
                 <>
-                  <select
-                    className="prime-chat__select"
-                    aria-label="Prime model"
-                    title="Model"
-                    value={modelIndex}
-                    disabled={pickersDisabled}
-                    onChange={(event) => void changeModel(Number(event.target.value))}
-                  >
-                    {modelIndex === -1 && config.model && (
-                      <option value={-1}>{config.model.name}</option>
-                    )}
-                    {config.models.map((model, index) => (
-                      <option key={`${model.provider}/${model.id}`} value={index}>
-                        {model.name}
-                      </option>
-                    ))}
-                  </select>
+                  <ComposerPicker
+                    kind="model"
+                    title={busy ? "Model locked while streaming" : "Model"}
+                    disabled={pickersDisabled || config.models.length === 0}
+                    selectedKey={config.model ? modelKey(config.model) : null}
+                    label={config.model ? modelLabel(config.model) : "No models"}
+                    options={config.models.map((model) => ({
+                      key: modelKey(model),
+                      label: modelLabel(model),
+                      icon: PROVIDERS.find((provider) => provider.value === model.provider)
+                        ?.icon,
+                    }))}
+                    onSelect={(key) => {
+                      const index = config.models.findIndex(
+                        (model) => modelKey(model) === key,
+                      );
+                      if (index >= 0) void changeModel(index);
+                    }}
+                  />
                   {config.availableThinkingLevels.some((level) => level !== "off") && (
-                    <select
-                      className="prime-chat__select"
-                      aria-label="Prime thinking level"
-                      title="Thinking level"
-                      value={config.thinkingLevel ?? ""}
+                    <ComposerPicker
+                      kind="thinking"
+                      title={busy ? "Thinking locked while streaming" : "Thinking"}
                       disabled={pickersDisabled}
-                      onChange={(event) => void changeThinkingLevel(event.target.value)}
-                    >
-                      {config.availableThinkingLevels.map((level) => (
-                        <option key={level} value={level}>
-                          {thinkingLevelLabel(level)}
-                        </option>
-                      ))}
-                    </select>
+                      selectedKey={config.thinkingLevel}
+                      label={thinkingLevelLabel(config.thinkingLevel ?? "off")}
+                      options={config.availableThinkingLevels.map((level) => ({
+                        key: level,
+                        label: thinkingLevelLabel(level),
+                      }))}
+                      onSelect={(level) => void changeThinkingLevel(level)}
+                    />
                   )}
                 </>
               )}
@@ -382,6 +377,105 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
   );
 }
 
+function modelKey(model: PrimeModelOption): string {
+  return `${model.provider}:${model.id}`;
+}
+
+// The Sinew label for models both engines know ("Opus 5.5"), else Prime's.
+function modelLabel(model: PrimeModelOption): string {
+  return MODELS.find((entry) => entry.value === modelKey(model))?.label ?? model.name;
+}
+
 function thinkingLevelLabel(level: string): string {
-  return level === "xhigh" ? "XHigh" : level.charAt(0).toUpperCase() + level.slice(1);
+  return THINKING_LEVELS.find((entry) => entry.value === level)?.label ?? level;
+}
+
+type PickerOption = { key: string; label: string; icon?: string };
+
+// The Sinew composer picker (ChatPane.tsx, composer__picker*): a button
+// opening a popover, closed by an outside click or Escape.
+function ComposerPicker({
+  kind,
+  title,
+  label,
+  options,
+  selectedKey,
+  disabled,
+  onSelect,
+}: {
+  kind: string;
+  title: string;
+  label: string;
+  options: PickerOption[];
+  selectedKey: string | null;
+  disabled: boolean;
+  onSelect: (key: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="composer__picker" data-kind={kind} ref={ref}>
+      <button
+        type="button"
+        className="composer__picker-btn"
+        data-open={open ? "true" : "false"}
+        data-locked={disabled ? "true" : "false"}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        title={title}
+      >
+        <span className="composer__picker-label">{label}</span>
+        <Icon icon="solar:alt-arrow-down-linear" width={11} height={11} />
+      </button>
+      {open && !disabled && (
+        <div className="composer__popover" role="menu" aria-label={title}>
+          {options.map((option) => {
+            const selected = option.key === selectedKey;
+            return (
+              <button
+                key={option.key}
+                type="button"
+                className="composer__popover-row"
+                data-selected={selected ? "true" : "false"}
+                onClick={() => {
+                  setOpen(false);
+                  onSelect(option.key);
+                }}
+              >
+                <span className="composer__popover-label">
+                  {option.icon && <Icon icon={option.icon} width={13} height={13} />}
+                  <span>{option.label}</span>
+                </span>
+                {selected && (
+                  <Icon
+                    icon="solar:check-read-linear"
+                    width={13}
+                    height={13}
+                    className="composer__popover-check"
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
