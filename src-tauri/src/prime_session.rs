@@ -326,29 +326,41 @@ pub async fn close_ide_sessions(client: &DaemonClient, sessions: &[String]) -> R
 const EXIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `RunEvent::Exit` : nettoyage borné dans le temps, sans lancer de daemon.
+///
+/// Appelé sur le thread principal depuis `applicationWillTerminate` sur
+/// macOS, où un panic avorte le processus : rien de Tokio n'y tourne. Le
+/// nettoyage s'exécute dans le runtime de Tauri et le thread principal
+/// attend seulement sa fin sur un canal std.
 pub fn on_exit(app: &AppHandle) {
-    let Some(state) = app.try_state::<PrimeState>() else {
+    if app.try_state::<PrimeState>().is_none() {
         return;
-    };
-    let sessions: Vec<String> = state
-        .sessions
-        .lock()
-        .map(|mut sessions| sessions.drain().collect())
-        .unwrap_or_default();
-    let client = tauri::async_runtime::block_on(async { state.client.lock().await.clone() });
-    let Some(client) = client.filter(|client| !*client.reader_dead().borrow()) else {
-        return;
-    };
-    let result = tauri::async_runtime::block_on(tokio::time::timeout(
-        EXIT_CLEANUP_TIMEOUT,
-        close_ide_sessions(&client, &sessions),
-    ));
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => tracing::warn!(error = %error, "prime exit cleanup failed"),
-        Err(_) => tracing::warn!("prime exit cleanup timed out"),
     }
-    client.close();
+    let app = app.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<PrimeState>();
+        let sessions: Vec<String> = state
+            .sessions
+            .lock()
+            .map(|mut sessions| sessions.drain().collect())
+            .unwrap_or_default();
+        let client = state.client.lock().await.clone();
+        if let Some(client) = client.filter(|client| !*client.reader_dead().borrow()) {
+            match close_ide_sessions(&client, &sessions).await {
+                Ok(stopped) => tracing::info!(
+                    sessions = sessions.len(),
+                    daemon_stopped = stopped,
+                    "prime exit cleanup done"
+                ),
+                Err(error) => tracing::warn!(error = %error, "prime exit cleanup failed"),
+            }
+            client.close();
+        }
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(EXIT_CLEANUP_TIMEOUT).is_err() {
+        tracing::warn!("prime exit cleanup timed out");
+    }
 }
 
 /// Démarrage de l'IDE : si un daemon yusAi tourne déjà (resté d'un crash),
