@@ -40,6 +40,20 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   tuées. Le marquage se lit dans les descripteurs de workers (List ne le
   renvoie pas).
 
+## Fait récemment (commits)
+
+- **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
+  identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
+  le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
+  rien ne reste après Cmd+Q, et un orphelin est tué au redémarrage.
+- **Texte invisible dans la saisie Prime** : `ca46736`.
+- **Style Prime aligné sur Sinew** : `b87fe91` (sélecteurs modèle /
+  réflexion avec les classes `composer__picker*` / `composer__popover*`,
+  libellés `MODELS` / `THINKING_LEVELS`, icônes `PROVIDERS`). Les messages et
+  le composer réutilisaient déjà les classes Sinew (`msg`, `user-text`,
+  `composer*`, `Markdown`). Vérifié dans un banc d'essai navigateur, pas dans
+  l'app.
+
 ## Tests
 
 - `cargo test --workspace` : dont `src-tauri/tests/prime_daemon.rs`
