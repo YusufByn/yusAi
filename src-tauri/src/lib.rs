@@ -243,6 +243,7 @@ pub fn run() {
                 install_desktop_menu(app.handle())?;
             }
             start_remote_if_enabled(app.handle());
+            prime_session::reap_orphans_at_startup(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -407,8 +408,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building sinew desktop")
         .run(|app, event| {
-            #[cfg(not(target_os = "macos"))]
-            let _ = (&app, &event);
+            if let tauri::RunEvent::Exit = event {
+                prime_session::on_exit(app);
+                return;
+            }
 
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {

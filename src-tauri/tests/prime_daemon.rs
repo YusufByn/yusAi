@@ -289,3 +289,118 @@ async fn client_owned_worker_survives_disconnect() {
     cleanup.close();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Nettoyage des workers orphelins : au démarrage, seules les sessions dont
+/// l'IDE n'existe plus sont tuées ; à la sortie, l'IDE tue ses sessions et
+/// n'arrête le daemon que s'il n'en reste aucune.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn orphaned_sessions_are_reaped_and_exit_stops_the_daemon() {
+    use sinew_desktop_lib::prime_session::{
+        close_ide_sessions, create_session_with_metadata, ide_runtime_metadata,
+        reap_orphaned_sessions,
+    };
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
+    )
+    .unwrap();
+    let config = serde_json::json!({
+        "cwd": workspace.to_string_lossy(),
+        "script": script.to_string_lossy(),
+    });
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, _events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+
+    // Un IDE disparu : le pid d'un processus terminé.
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id();
+    gone.wait().unwrap();
+    let orphan = create_session_with_metadata(
+        &client,
+        config.clone(),
+        serde_json::json!({ "yusai": { "idePid": gone_pid, "ideProcessStartId": "gone" } }),
+    )
+    .await
+    .expect("orphan session");
+    // Deux sessions d'IDE vivants (ce processus de test).
+    let mine = create_session_with_metadata(&client, config.clone(), ide_runtime_metadata())
+        .await
+        .expect("own session");
+    let other = create_session_with_metadata(&client, config.clone(), ide_runtime_metadata())
+        .await
+        .expect("other live session");
+
+    let live_sessions = |client: &pa_tui::daemon_client::DaemonClient| {
+        let client = client.clone();
+        async move {
+            let listed = client
+                .request_ok(pa_types::daemon::DaemonCommand::List {
+                    id: None,
+                    all: None,
+                    cwd: None,
+                    session_dir: None,
+                    include_client_owned: Some(true),
+                    rest: serde_json::Map::default(),
+                })
+                .await
+                .expect("list");
+            listed["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| row["activeSessionId"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let reaped = reap_orphaned_sessions(&client, &agent_dir, &socket_path)
+        .await
+        .expect("reap");
+    assert_eq!(
+        reaped,
+        vec![orphan.clone()],
+        "only the dead IDE's session is reaped"
+    );
+    let live = live_sessions(&client).await;
+    assert!(!live.contains(&orphan), "orphan killed: {live:?}");
+    assert!(
+        live.contains(&mine) && live.contains(&other),
+        "live IDE sessions kept: {live:?}"
+    );
+
+    // Sortie avec une autre session encore ouverte : le daemon reste.
+    let stopped = close_ide_sessions(&client, std::slice::from_ref(&mine))
+        .await
+        .expect("exit cleanup");
+    assert!(!stopped, "a remaining session keeps the daemon up");
+    assert_eq!(live_sessions(&client).await, vec![other.clone()]);
+
+    // Dernière sortie : plus aucune session, le daemon s'arrête.
+    let stopped = close_ide_sessions(&client, std::slice::from_ref(&other))
+        .await
+        .expect("exit cleanup");
+    assert!(stopped, "no session left: the daemon shuts down");
+    client.close();
+    let mut down = false;
+    for _ in 0..100 {
+        if !pa_daemon::socket::can_connect(&socket_path, std::time::Duration::from_millis(100))
+            .await
+        {
+            down = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(down, "the supervisor stopped listening");
+    let _ = std::fs::remove_dir_all(&root);
+}

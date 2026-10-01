@@ -3,23 +3,90 @@
 //! `DaemonClientEvent` vers le front (événement Tauri `prime-event`).
 //!
 //! Le daemon n'est lancé qu'à la première création de session.
+//!
+//! Nettoyage des workers (une déconnexion ne les arrête pas,
+//! pa-daemon/src/supervisor/clients.rs:354-373) :
+//! - à la sortie de l'IDE ([`on_exit`]) : `Kill` des sessions créées par ce
+//!   processus, puis `Shutdown` du daemon s'il n'en reste aucune ;
+//! - après un crash ou une fermeture forcée, au démarrage suivant
+//!   ([`reap_orphans_at_startup`]) : chaque session porte dans son
+//!   `runtimeMetadata` le pid et l'identité de démarrage de l'IDE qui l'a
+//!   créée ([`ide_runtime_metadata`]) ; celles dont l'IDE n'existe plus sont
+//!   tuées ([`reap_orphaned_sessions`]), jamais celles d'une autre instance
+//!   ouverte.
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use pa_tui::daemon_client::{DaemonClient, DaemonClientEvent};
 use pa_types::daemon::{DaemonCommand, PromptInput, StreamingBehavior};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc::UnboundedReceiver, watch, Mutex};
 
 pub const PRIME_EVENT_NAME: &str = "prime-event";
 
-/// Client du daemon partagé par toutes les fenêtres, connecté à la demande.
+/// Client du daemon partagé par toutes les fenêtres, connecté à la demande,
+/// et sessions créées par ce processus (tuées à la sortie).
 #[derive(Default)]
 pub struct PrimeState {
     client: Mutex<Option<DaemonClient>>,
+    sessions: StdMutex<HashSet<String>>,
+}
+
+impl PrimeState {
+    fn track(&self, active_session_id: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.insert(active_session_id.to_string());
+        }
+    }
+
+    fn untrack(&self, active_session_id: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(active_session_id);
+        }
+    }
+}
+
+/// Clé du marquage yusAi dans le `runtimeMetadata` du `Create`. Prime ne
+/// lit que ses propres clés (`kind`, `parentActiveSessionId`,
+/// pa-daemon/src/worker/create.rs:153-175,
+/// pa-daemon/src/supervisor_parent_death.rs:221-228).
+const IDE_METADATA_KEY: &str = "yusai";
+
+/// Marquage de l'IDE courant : son pid et son identité de démarrage, qui
+/// distingue un pid réutilisé par un autre processus
+/// (pa-types/src/platform/process.rs:22).
+pub fn ide_runtime_metadata() -> Value {
+    let pid = std::process::id();
+    json!({
+        IDE_METADATA_KEY: {
+            "idePid": pid,
+            "ideProcessStartId": pa_types::platform::process::process_start_id(pid),
+        }
+    })
+}
+
+/// L'IDE marqué existe-t-il encore ? Sans identité enregistrée, rien ne
+/// prouve sa mort : la session est gardée.
+fn ide_alive(marker: &Value) -> bool {
+    let Some(pid) = marker
+        .get("idePid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return true;
+    };
+    match marker.get("ideProcessStartId").and_then(Value::as_str) {
+        Some(expected) => {
+            pa_types::platform::process::process_start_id(pid).as_deref() == Some(expected)
+        }
+        None => true,
+    }
 }
 
 /// Un `DaemonClientEvent` tel que le front le reçoit.
@@ -67,10 +134,20 @@ impl PrimeEventPayload {
     }
 }
 
+/// Crée une session marquée pour l'IDE courant (voir
+/// [`create_session_with_metadata`]).
+pub async fn create_session(client: &DaemonClient, config: Value) -> Result<String> {
+    create_session_with_metadata(client, config, ide_runtime_metadata()).await
+}
+
 /// Crée une session sans fichier persistant (comme l'ACP daemon-attached,
 /// pa-daemon/src/acp/daemon.rs:545-560) et s'y attache pour recevoir ses
 /// événements (daemon.rs:584-595). Renvoie l'`activeSessionId`.
-pub async fn create_session(client: &DaemonClient, config: Value) -> Result<String> {
+pub async fn create_session_with_metadata(
+    client: &DaemonClient,
+    config: Value,
+    runtime_metadata: Value,
+) -> Result<String> {
     let summary = client
         .request_ok(DaemonCommand::Create {
             id: None,
@@ -83,7 +160,7 @@ pub async fn create_session(client: &DaemonClient, config: Value) -> Result<Stri
             // l'env (pa-daemon/src/agent_engine/lifecycle.rs:1075) ; le flag
             // suit le worker jusqu'à ses relances (descriptor.rs:113-117).
             telemetry_disabled: Some(true),
-            runtime_metadata: None,
+            runtime_metadata: Some(runtime_metadata),
             lifecycle: None,
             env: None,
             launch_env: None,
@@ -168,6 +245,126 @@ pub async fn kill_session(client: &DaemonClient, active_session_id: &str) -> Res
         })
         .await?;
     Ok(())
+}
+
+/// Tue les sessions marquées par un IDE qui n'existe plus. Le marquage se
+/// lit dans les descripteurs que le superviseur persiste pour chaque worker,
+/// commande `Create` comprise (pa-daemon/src/descriptor.rs:208-212) :
+/// `List` ne le renvoie pas. Renvoie les sessions tuées.
+pub async fn reap_orphaned_sessions(
+    client: &DaemonClient,
+    agent_dir: &Path,
+    socket_path: &Path,
+) -> Result<Vec<String>> {
+    let dir = pa_daemon::descriptor::descriptor_dir(agent_dir, socket_path);
+    let mut orphans = Vec::new();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(descriptor) =
+            serde_json::from_str::<pa_types::daemon::DaemonWorkerDescriptor>(&text)
+        else {
+            continue;
+        };
+        if descriptor.lifecycle == pa_types::daemon::DaemonWorkerLifecycle::Stopping {
+            continue;
+        }
+        let marker = descriptor
+            .create_command
+            .rest
+            .get("runtimeMetadata")
+            .and_then(|metadata| metadata.get(IDE_METADATA_KEY));
+        if marker.is_some_and(|marker| !ide_alive(marker)) {
+            orphans.push(descriptor.root_active_session_id);
+        }
+    }
+    let mut reaped = Vec::new();
+    for active_session_id in orphans {
+        if kill_session(client, &active_session_id).await.is_ok() {
+            reaped.push(active_session_id);
+        }
+    }
+    Ok(reaped)
+}
+
+/// Sortie de l'IDE : tue ses sessions, puis arrête le daemon s'il ne reste
+/// aucune session (d'une autre instance ouverte, par exemple). Renvoie si le
+/// daemon a été arrêté.
+pub async fn close_ide_sessions(client: &DaemonClient, sessions: &[String]) -> Result<bool> {
+    for active_session_id in sessions {
+        let _ = kill_session(client, active_session_id).await;
+    }
+    let listed = client
+        .request_ok(DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: Some(true),
+            rest: Map::default(),
+        })
+        .await?;
+    let remaining = listed
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if remaining > 0 {
+        return Ok(false);
+    }
+    client
+        .request_ok(DaemonCommand::Shutdown {
+            id: None,
+            force: None,
+            rest: Map::default(),
+        })
+        .await?;
+    Ok(true)
+}
+
+/// Budget du nettoyage à la sortie : l'IDE ne doit pas rester bloqué.
+const EXIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `RunEvent::Exit` : nettoyage borné dans le temps, sans lancer de daemon.
+pub fn on_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<PrimeState>() else {
+        return;
+    };
+    let sessions: Vec<String> = state
+        .sessions
+        .lock()
+        .map(|mut sessions| sessions.drain().collect())
+        .unwrap_or_default();
+    let client = tauri::async_runtime::block_on(async { state.client.lock().await.clone() });
+    let Some(client) = client.filter(|client| !*client.reader_dead().borrow()) else {
+        return;
+    };
+    let result = tauri::async_runtime::block_on(tokio::time::timeout(
+        EXIT_CLEANUP_TIMEOUT,
+        close_ide_sessions(&client, &sessions),
+    ));
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::warn!(error = %error, "prime exit cleanup failed"),
+        Err(_) => tracing::warn!("prime exit cleanup timed out"),
+    }
+    client.close();
+}
+
+/// Démarrage de l'IDE : si un daemon yusAi tourne déjà (resté d'un crash),
+/// on s'y connecte, ce qui tue les sessions orphelines
+/// ([`connected_client`]). Sans daemon, rien à faire et rien n'est lancé.
+pub fn reap_orphans_at_startup(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let socket_path = crate::prime::daemon_socket_path();
+        if !pa_daemon::socket::can_connect(&socket_path, Duration::from_millis(250)).await {
+            return;
+        }
+        let state = app.state::<PrimeState>();
+        if let Err(error) = connected_client(&app, &state).await {
+            tracing::warn!(error = %error, "prime orphan cleanup could not connect");
+        }
+    });
 }
 
 /// Un modèle proposé dans le sélecteur du chat Prime.
@@ -336,10 +533,21 @@ async fn connected_client(app: &AppHandle, state: &PrimeState) -> Result<DaemonC
             return Ok(client.clone());
         }
     }
-    let (client, events) =
-        crate::prime::ensure_daemon_running(&crate::prime::daemon_socket_path()).await?;
+    let socket_path = crate::prime::daemon_socket_path();
+    let (client, events) = crate::prime::ensure_daemon_running(&socket_path).await?;
     spawn_event_relay(app.clone(), events, client.reader_dead());
     *slot = Some(client.clone());
+    // Chaque nouvelle connexion tue les sessions d'IDE disparus.
+    let reaper = client.clone();
+    tauri::async_runtime::spawn(async move {
+        match reap_orphaned_sessions(&reaper, &crate::prime::agent_dir(), &socket_path).await {
+            Ok(reaped) if !reaped.is_empty() => {
+                tracing::info!(count = reaped.len(), "reaped orphaned prime sessions");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(error = %error, "prime orphan cleanup failed"),
+        }
+    });
     Ok(client)
 }
 
@@ -360,9 +568,11 @@ pub async fn prime_create_session(
     // La connexion Anthropic de yusAi, recopiée avant que le worker ne
     // résolve son modèle.
     crate::prime_auth::ensure_anthropic_sync(&crate::prime::agent_dir()).await;
-    create_session(&client, create_config(&workspace_path))
+    let active_session_id = create_session(&client, create_config(&workspace_path))
         .await
-        .map_err(error_text)
+        .map_err(error_text)?;
+    state.track(&active_session_id);
+    Ok(active_session_id)
 }
 
 #[tauri::command]
@@ -441,6 +651,7 @@ pub async fn prime_close_session(
     state: State<'_, PrimeState>,
     active_session_id: String,
 ) -> Result<(), String> {
+    state.untrack(&active_session_id);
     let client = state.client.lock().await.clone();
     match client {
         Some(client) if !*client.reader_dead().borrow() => {

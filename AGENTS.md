@@ -263,7 +263,7 @@ Code map:
 │   │       ├── AppIcon-76x76@2x.png
 │   │       └── AppIcon-83.5x83.5@2x.png
 │   ├── tests
-│   │   └── prime_daemon.rs # tests : lancement détaché du superviseur Prime, connexion DaemonClient, prompt scripté (moteur faux)
+│   │   └── prime_daemon.rs # tests : superviseur Prime détaché, DaemonClient, prompt scripté (moteur faux), workers orphelins et sortie
 │   └── src
 │       ├── context.rs
 │       ├── conversations.rs
@@ -274,7 +274,7 @@ Code map:
 │       ├── platform.rs
 │       ├── prime.rs # Prime Agent : binaire multi-rôle (superviseur/worker), isolation, lancement du daemon
 │       ├── prime_auth.rs # Prime Agent : recopie la connexion Anthropic de yusAi dans l'auth.json de Prime (yusAi seul rafraîchit)
-│       ├── prime_session.rs # Prime Agent : commandes Tauri (créer/prompt/annuler/fermer) + relais des événements `prime-event`
+│       ├── prime_session.rs # Prime Agent : commandes Tauri (session, prompt, modèle, réflexion) + relais `prime-event` + nettoyage des workers (sortie, orphelins)
 │       ├── providers.rs
 │       ├── remote.rs
 │       ├── state.rs
