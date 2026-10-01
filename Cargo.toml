@@ -12,7 +12,9 @@ members = [
 ]
 # Prime Agent is vendored as a git subtree and keeps its own nested workspace
 # (versions, lints, wire-compat serde settings). Its engine crates are pulled
-# in as path dependencies of src-tauri; pa-tui and pa-cli are never built.
+# in as path dependencies of src-tauri. pa-tui is linked only for its
+# daemon socket client (pa_tui::daemon_client::DaemonClient); pa-cli is
+# never built.
 exclude = ["vendor/prime-agent"]
 
 [workspace.package]
@@ -39,6 +41,7 @@ pa-models = { path = "vendor/prime-agent/crates/pa-models" }
 pa-agent = { path = "vendor/prime-agent/crates/pa-agent" }
 pa-core = { path = "vendor/prime-agent/crates/pa-core" }
 pa-daemon = { path = "vendor/prime-agent/crates/pa-daemon" }
+pa-tui = { path = "vendor/prime-agent/crates/pa-tui" }
 
 tokio = { version = "1.40", features = ["full"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
@@ -77,3 +80,8 @@ tauri-plugin-dialog = "2.0"
 tauri-plugin-updater = "2.0"
 walkdir = "2.5"
 zip = { version = "4.6", default-features = false, features = ["deflate-flate2"] }
+
+# pa-tui is built against Prime's patched crossterm (waker/poll_opt); a
+# [patch] only applies from the root workspace, so it is mirrored here.
+[patch.crates-io]
+crossterm = { path = "vendor/prime-agent/vendor/crossterm" }
