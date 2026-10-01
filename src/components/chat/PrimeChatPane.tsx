@@ -137,15 +137,17 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
 
   // The session dies with the pane (conversation deleted or workspace
   // changed, see Workspace.tsx); one still being created closes on arrival.
-  useEffect(
-    () => () => {
+  // The flag is reset on (re)mount: StrictMode mounts, unmounts and mounts
+  // again in dev.
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
       unmountedRef.current = true;
       const sessionId = sessionIdRef.current;
       sessionIdRef.current = null;
       if (sessionId) void api.primeCloseSession(sessionId).catch(console.error);
-    },
-    [],
-  );
+    };
+  }, []);
 
   const ensureSession = useCallback((): Promise<string> => {
     if (sessionIdRef.current) return Promise.resolve(sessionIdRef.current);
