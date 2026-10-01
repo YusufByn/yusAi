@@ -49,13 +49,22 @@ pub fn run_role_from_args() -> Option<i32> {
 
     if daemon_mode {
         pa_types::memory_release::cap_thread_arenas();
-        configure_environment();
+        // Lancement manuel en dev : l'IDE passe ces valeurs explicitement.
+        #[cfg(debug_assertions)]
+        if std::env::var_os(PACKAGE_DIR_ENV).is_none() {
+            std::env::set_var(PACKAGE_DIR_ENV, dev_package_dir());
+        }
         let socket_path = flag_value(&args, "--daemon-socket")
             .map(PathBuf::from)
             .unwrap_or_else(daemon_socket_path);
+        // Les workers reçoivent ce dossier par leur env de lancement
+        // (pa-daemon/src/descriptor.rs:102-105).
+        let agent_dir = flag_value(&args, "--agent-dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(agent_dir);
         let options = pa_daemon::supervisor::SupervisorOptions {
             socket_path,
-            agent_dir: agent_dir(),
+            agent_dir,
         };
         return Some(block_on_role(pa_daemon::supervisor::run_supervisor(
             options,
@@ -64,7 +73,6 @@ pub fn run_role_from_args() -> Option<i32> {
 
     #[cfg(debug_assertions)]
     if args.first().map(String::as_str) == Some("--prime-ping") {
-        configure_environment();
         let socket_path = args
             .get(1)
             .map(PathBuf::from)
@@ -145,20 +153,22 @@ pub fn daemon_socket_path() -> PathBuf {
     PathBuf::from(format!(r"\\.\pipe\yusai-prime-daemon-{key}"))
 }
 
-/// Isole Prime du reste de la machine : état sous le dossier de données de
-/// yusAi, et en dev les ressources de Prime prises dans vendor/prime-agent.
-/// Écrase toujours le dossier d'état : une valeur héritée du shell de
-/// l'utilisateur viserait l'installation `prime-agent` personnelle.
-///
-/// À appeler avant tout démarrage de thread (variables d'environnement du
-/// processus).
-pub fn configure_environment() {
-    std::env::set_var(AGENT_DIR_ENV, agent_dir());
+/// Environnement propre à yusAi passé au seul superviseur (ses workers en
+/// héritent) : jamais posé sur le processus IDE, dont les terminaux et
+/// l'outil bash viseraient sinon l'état Prime de yusAi.
+fn supervisor_env(agent_dir: &Path) -> Vec<(&'static str, PathBuf)> {
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut env = vec![(AGENT_DIR_ENV, agent_dir.to_path_buf())];
     #[cfg(debug_assertions)]
-    std::env::set_var(
-        PACKAGE_DIR_ENV,
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/prime-agent"),
-    );
+    env.push((PACKAGE_DIR_ENV, dev_package_dir()));
+    env
+}
+
+/// En dev, les ressources de Prime viennent de vendor/prime-agent (les
+/// ressources de l'app viendront avec le packaging).
+#[cfg(debug_assertions)]
+fn dev_package_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/prime-agent")
 }
 
 /// Résultat d'une sonde du socket (pa-cli/src/interactive_mode/daemon.rs:20-30).
@@ -278,9 +288,8 @@ async fn shutdown_stale_daemon(client: DaemonClient, socket_path: &Path) -> Resu
 }
 
 /// Lance `exe --mode daemon --daemon-socket <path>` détaché
-/// (pa-cli/src/interactive_mode/daemon.rs:177-212). Le dossier d'état est
-/// passé explicitement : le superviseur et ses workers en héritent
-/// (pa-daemon/src/descriptor.rs:102-105). Le stderr du superviseur va dans
+/// (pa-cli/src/interactive_mode/daemon.rs:177-212), avec le dossier d'état
+/// et l'env de [`supervisor_env`]. Le stderr du superviseur va dans
 /// `<agent_dir>/yusai-supervisor.log`.
 fn spawn_supervisor_detached(exe: &Path, socket_path: &Path, agent_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(agent_dir)
@@ -295,8 +304,10 @@ fn spawn_supervisor_detached(exe: &Path, socket_path: &Path, agent_dir: &Path) -
     command
         .args(["--mode", "daemon", "--daemon-socket"])
         .arg(socket_path)
+        .arg("--agent-dir")
+        .arg(agent_dir)
         .current_dir(agent_dir)
-        .env(AGENT_DIR_ENV, agent_dir)
+        .envs(supervisor_env(agent_dir))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)

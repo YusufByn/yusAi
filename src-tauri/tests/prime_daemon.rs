@@ -39,9 +39,19 @@ async fn spawns_supervisor_and_connects() {
         client.hello().get("schemaId"),
         Some(&serde_json::json!(pa_types::daemon::DAEMON_SCHEMA_ID))
     );
+    // Le superviseur écrit son état dans le dossier temporaire passé, pas
+    // dans celui de yusAi : `daemon-workers` n'est créé que par lui.
+    let workers_dir = agent_dir.join("daemon-workers");
+    for _ in 0..100 {
+        if workers_dir.is_dir() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     assert!(
-        agent_dir.is_dir(),
-        "supervisor state lives in the given agent dir"
+        workers_dir.is_dir(),
+        "supervisor state lives in {}",
+        agent_dir.display()
     );
 
     // Un second appel réutilise le superviseur déjà lancé.

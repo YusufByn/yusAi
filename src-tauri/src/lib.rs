@@ -128,9 +128,6 @@ use workflow::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Avant tout thread : l'environnement de Prime est celui du processus.
-    prime::configure_environment();
-
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
