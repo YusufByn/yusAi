@@ -2,12 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { listen } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
-import type { PrimeEventPayload } from "../../types";
+import type { PrimeEventPayload, PrimeSessionConfig } from "../../types";
 import { Markdown } from "./Markdown";
 
 // Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
-// one pane per yusAi conversation), created on the first prompt. Only user prompts and assistant text are rendered; tool
-// calls, thinking and sub-agents are out of scope for this milestone.
+// one pane per yusAi conversation), created the first time the pane is
+// shown so the model and thinking pickers reflect the worker's state. Only
+// user prompts and assistant text are rendered; tool calls, thinking and
+// sub-agents are out of scope for this milestone.
 
 type PrimeMessage = {
   id: number;
@@ -19,15 +21,22 @@ type PrimeStatus = "idle" | "starting" | "streaming";
 
 type Props = {
   workspacePath: string;
+  // The pane is the one on screen (Prime engine, active conversation).
+  active: boolean;
   headerExtra?: ReactNode;
   onOpenFile: (path: string) => void;
 };
 
-export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props) {
+export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }: Props) {
   const [messages, setMessages] = useState<PrimeMessage[]>([]);
   const [status, setStatus] = useState<PrimeStatus>("idle");
   const [text, setText] = useState("");
+  const [config, setConfig] = useState<PrimeSessionConfig | null>(null);
+  const [configBusy, setConfigBusy] = useState(false);
   const sessionIdRef = useRef<string | null>(null);
+  // The in-flight session creation, shared by the eager start and a send.
+  const creatingRef = useRef<Promise<string> | null>(null);
+  const unmountedRef = useRef(false);
   const nextIdRef = useRef(1);
   // The assistant message currently receiving text deltas.
   const streamingIdRef = useRef<number | null>(null);
@@ -66,6 +75,7 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
         sessionIdRef.current = null;
         streamingIdRef.current = null;
         setStatus("idle");
+        setConfig(null);
         pushMessage("error", `Prime daemon disconnected: ${payload.reason}`);
         return;
       }
@@ -74,6 +84,7 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
         sessionIdRef.current = null;
         streamingIdRef.current = null;
         setStatus("idle");
+        setConfig(null);
         pushMessage("error", `Prime session closed: ${payload.reason}`);
         return;
       }
@@ -88,6 +99,11 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
         case "agent_end":
           streamingIdRef.current = null;
           setStatus("idle");
+          // A turn can fail over to another model or clamp the level.
+          void api
+            .primeSessionConfig(payload.activeSessionId)
+            .then(setConfig)
+            .catch(console.error);
           break;
         case "message_start":
           if (message?.role === "assistant") streamingIdRef.current = null;
@@ -120,15 +136,46 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
   }, [appendAssistantText, pushMessage]);
 
   // The session dies with the pane (conversation deleted or workspace
-  // changed, see Workspace.tsx).
+  // changed, see Workspace.tsx); one still being created closes on arrival.
   useEffect(
     () => () => {
+      unmountedRef.current = true;
       const sessionId = sessionIdRef.current;
       sessionIdRef.current = null;
       if (sessionId) void api.primeCloseSession(sessionId).catch(console.error);
     },
     [],
   );
+
+  const ensureSession = useCallback((): Promise<string> => {
+    if (sessionIdRef.current) return Promise.resolve(sessionIdRef.current);
+    if (creatingRef.current) return creatingRef.current;
+    setStatus("starting");
+    const creating = (async () => {
+      try {
+        const sessionId = await api.primeCreateSession(workspacePath);
+        if (unmountedRef.current) {
+          void api.primeCloseSession(sessionId).catch(console.error);
+          throw new Error("Prime pane closed");
+        }
+        sessionIdRef.current = sessionId;
+        setConfig(await api.primeSessionConfig(sessionId).catch(() => null));
+        return sessionId;
+      } finally {
+        creatingRef.current = null;
+        setStatus((current) => (current === "starting" ? "idle" : current));
+      }
+    })();
+    creatingRef.current = creating;
+    return creating;
+  }, [workspacePath]);
+
+  useEffect(() => {
+    if (!active || sessionIdRef.current || creatingRef.current) return;
+    void ensureSession().catch((err) => {
+      if (!unmountedRef.current) pushMessage("error", String(err));
+    });
+  }, [active, ensureSession, pushMessage]);
 
   useLayoutEffect(() => {
     const body = bodyRef.current;
@@ -141,19 +188,47 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
     setText("");
     pushMessage("user", prompt);
     try {
-      let sessionId = sessionIdRef.current;
-      if (!sessionId) {
-        setStatus("starting");
-        sessionId = await api.primeCreateSession(workspacePath);
-        sessionIdRef.current = sessionId;
-      }
+      const sessionId = await ensureSession();
       setStatus("streaming");
       await api.primePrompt(sessionId, prompt);
     } catch (err) {
       setStatus("idle");
       pushMessage("error", String(err));
     }
-  }, [text, status, workspacePath, pushMessage]);
+  }, [text, status, ensureSession, pushMessage]);
+
+  const changeModel = useCallback(
+    async (index: number) => {
+      const sessionId = sessionIdRef.current;
+      const model = config?.models[index];
+      if (!sessionId || !model) return;
+      setConfigBusy(true);
+      try {
+        setConfig(await api.primeSetModel(sessionId, model.provider, model.id));
+      } catch (err) {
+        pushMessage("error", String(err));
+      } finally {
+        setConfigBusy(false);
+      }
+    },
+    [config, pushMessage],
+  );
+
+  const changeThinkingLevel = useCallback(
+    async (level: string) => {
+      const sessionId = sessionIdRef.current;
+      if (!sessionId) return;
+      setConfigBusy(true);
+      try {
+        setConfig(await api.primeSetThinkingLevel(sessionId, level));
+      } catch (err) {
+        pushMessage("error", String(err));
+      } finally {
+        setConfigBusy(false);
+      }
+    },
+    [pushMessage],
+  );
 
   const stop = useCallback(async () => {
     const sessionId = sessionIdRef.current;
@@ -166,6 +241,13 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
   }, [pushMessage]);
 
   const busy = status !== "idle";
+  const pickersDisabled = busy || configBusy || !config;
+  const modelIndex = config?.model
+    ? config.models.findIndex(
+        (model) =>
+          model.provider === config.model?.provider && model.id === config.model?.id,
+      )
+    : -1;
 
   return (
     <div className="chat-col prime-chat">
@@ -234,7 +316,45 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
             />
           </div>
           <div className="composer__actions">
-            <div className="composer__actions-left" />
+            <div className="composer__actions-left prime-chat__pickers">
+              {config && (
+                <>
+                  <select
+                    className="prime-chat__select"
+                    aria-label="Prime model"
+                    title="Model"
+                    value={modelIndex}
+                    disabled={pickersDisabled}
+                    onChange={(event) => void changeModel(Number(event.target.value))}
+                  >
+                    {modelIndex === -1 && config.model && (
+                      <option value={-1}>{config.model.name}</option>
+                    )}
+                    {config.models.map((model, index) => (
+                      <option key={`${model.provider}/${model.id}`} value={index}>
+                        {model.name}
+                      </option>
+                    ))}
+                  </select>
+                  {config.availableThinkingLevels.some((level) => level !== "off") && (
+                    <select
+                      className="prime-chat__select"
+                      aria-label="Prime thinking level"
+                      title="Thinking level"
+                      value={config.thinkingLevel ?? ""}
+                      disabled={pickersDisabled}
+                      onChange={(event) => void changeThinkingLevel(event.target.value)}
+                    >
+                      {config.availableThinkingLevels.map((level) => (
+                        <option key={level} value={level}>
+                          {thinkingLevelLabel(level)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </>
+              )}
+            </div>
             <div className="composer__actions-right">
               {status === "streaming" && (
                 <button
@@ -258,4 +378,8 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
       </div>
     </div>
   );
+}
+
+function thinkingLevelLabel(level: string): string {
+  return level === "xhigh" ? "XHigh" : level.charAt(0).toUpperCase() + level.slice(1);
 }

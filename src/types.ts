@@ -842,3 +842,12 @@ export type PrimeEventPayload =
     }
   | { kind: "sessionClosed"; activeSessionId: string; reason: string }
   | { kind: "disconnected"; reason: string };
+
+// Modèle et niveau de réflexion d'une session Prime (prime_session_config).
+export type PrimeModelOption = { provider: string; id: string; name: string };
+export type PrimeSessionConfig = {
+  model: PrimeModelOption | null;
+  thinkingLevel: string | null;
+  availableThinkingLevels: string[];
+  models: PrimeModelOption[];
+};

@@ -2300,6 +2300,7 @@ export function Workspace({
             >
               <PrimeChatPane
                 workspacePath={workspacePath}
+                active={chatEngine === "prime" && conversationId === activeConv.id}
                 onOpenFile={openChatFile}
                 headerExtra={
                   <ChatEngineToggle value={chatEngine} onChange={selectChatEngine} />

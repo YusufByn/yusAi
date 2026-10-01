@@ -31,6 +31,7 @@ import type {
   OpenRouterModelSearchResult,
   OpenRouterProviderStatus,
   PlanControl,
+  PrimeSessionConfig,
   QuestionAnswer,
   SavedConversation,
   ServiceTier,
@@ -757,5 +758,21 @@ export const api = {
   },
   primeCloseSession(activeSessionId: string) {
     return invoke<void>("prime_close_session", { activeSessionId });
+  },
+  primeSessionConfig(activeSessionId: string) {
+    return invoke<PrimeSessionConfig>("prime_session_config", { activeSessionId });
+  },
+  primeSetModel(activeSessionId: string, provider: string, modelId: string) {
+    return invoke<PrimeSessionConfig>("prime_set_model", {
+      activeSessionId,
+      provider,
+      modelId,
+    });
+  },
+  primeSetThinkingLevel(activeSessionId: string, level: string) {
+    return invoke<PrimeSessionConfig>("prime_set_thinking_level", {
+      activeSessionId,
+      level,
+    });
   },
 };
