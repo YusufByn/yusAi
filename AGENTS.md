@@ -261,6 +261,8 @@ Code map:
 │   │       ├── AppIcon-76x76@1x.png
 │   │       ├── AppIcon-76x76@2x.png
 │   │       └── AppIcon-83.5x83.5@2x.png
+│   ├── tests
+│   │   └── prime_daemon.rs # test : lancement détaché du superviseur Prime + connexion DaemonClient
 │   └── src
 │       ├── context.rs
 │       ├── conversations.rs
@@ -269,6 +271,7 @@ Code map:
 │       ├── main.rs
 │       ├── models.rs
 │       ├── platform.rs
+│       ├── prime.rs # Prime Agent : binaire multi-rôle (superviseur/worker), isolation, lancement du daemon
 │       ├── providers.rs
 │       ├── remote.rs
 │       ├── state.rs
