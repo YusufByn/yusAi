@@ -64,6 +64,13 @@ export const THINKING_LEVELS: { value: ThinkingLevel; label: string }[] = [
 
 export const MODELS: ModelEntry[] = [
   {
+    value: "anthropic:claude-fable-5-1",
+    provider: "anthropic",
+    label: "Fable 5.1",
+    thinking: ["off", "low", "medium", "high", "xhigh", "max"],
+    defaultThinking: "medium",
+  },
+  {
     value: "anthropic:claude-fable-5",
     provider: "anthropic",
     label: "Fable 5",
@@ -71,31 +78,10 @@ export const MODELS: ModelEntry[] = [
     defaultThinking: "medium",
   },
   {
-    value: "anthropic:claude-opus-5",
+    value: "anthropic:claude-opus-5-5",
     provider: "anthropic",
-    label: "Opus 5",
+    label: "Opus 5.5",
     thinking: ["off", "low", "medium", "high", "xhigh", "max"],
-    defaultThinking: "medium",
-  },
-  {
-    value: "anthropic:claude-opus-4-8",
-    provider: "anthropic",
-    label: "Opus 4.8",
-    thinking: ["off", "low", "medium", "high", "xhigh", "max"],
-    defaultThinking: "medium",
-  },
-  {
-    value: "anthropic:claude-opus-4-7",
-    provider: "anthropic",
-    label: "Opus 4.7",
-    thinking: ["off", "low", "medium", "high", "xhigh", "max"],
-    defaultThinking: "medium",
-  },
-  {
-    value: "anthropic:claude-opus-4-6",
-    provider: "anthropic",
-    label: "Opus 4.6",
-    thinking: ["off", "low", "medium", "high", "max"],
     defaultThinking: "medium",
   },
   {
@@ -106,109 +92,33 @@ export const MODELS: ModelEntry[] = [
     defaultThinking: "medium",
   },
   {
-    value: "anthropic:claude-sonnet-4-6",
-    provider: "anthropic",
-    label: "Sonnet 4.6",
-    thinking: ["off", "low", "medium", "high", "max"],
-    defaultThinking: "medium",
-  },
-  {
-    value: "anthropic:claude-haiku-4-5",
-    provider: "anthropic",
-    label: "Haiku 4.5",
-    thinking: ["off", "low", "medium", "high"],
-    defaultThinking: "medium",
-  },
-  {
-    value: "openai:gpt-5.6-sol",
+    value: "openai:gpt-6-astra",
     provider: "openai",
-    label: "GPT-5.6 Sol",
+    label: "GPT-6 Astra",
     thinking: ["off", "low", "medium", "high", "xhigh", "max"],
     defaultThinking: "medium",
     supportsFast: true,
   },
   {
-    value: "openai:gpt-5.6-terra",
+    value: "openai:gpt-6-sol",
     provider: "openai",
-    label: "GPT-5.6 Terra",
+    label: "GPT-6 Sol",
     thinking: ["off", "low", "medium", "high", "xhigh", "max"],
     defaultThinking: "medium",
     supportsFast: true,
   },
   {
-    value: "openai:gpt-5.6-luna",
+    value: "openai:gpt-6-luna",
     provider: "openai",
-    label: "GPT-5.6 Luna",
+    label: "GPT-6 Luna",
     thinking: ["off", "low", "medium", "high", "xhigh", "max"],
     defaultThinking: "medium",
     supportsFast: true,
   },
   {
-    value: "openai:gpt-5.5",
-    provider: "openai",
-    label: "GPT-5.5",
-    thinking: ["off", "low", "medium", "high", "xhigh"],
-    defaultThinking: "medium",
-    supportsFast: true,
-  },
-  {
-    value: "openai:gpt-5.4",
-    provider: "openai",
-    label: "GPT-5.4",
-    thinking: ["off", "low", "medium", "high", "xhigh"],
-    defaultThinking: "medium",
-    supportsFast: true,
-  },
-  {
-    value: "openai:gpt-5.4-mini",
-    provider: "openai",
-    label: "GPT-5.4 Mini",
-    thinking: ["off", "low", "medium", "high", "xhigh"],
-    defaultThinking: "medium",
-    supportsFast: true,
-  },
-  {
-    value: "openai:gpt-5.3-codex",
-    provider: "openai",
-    label: "GPT-5.3 Codex",
-    thinking: ["off", "low", "medium", "high", "xhigh"],
-    defaultThinking: "medium",
-    supportsFast: true,
-  },
-  {
-    value: "openai:gpt-5.3-codex-spark",
-    provider: "openai",
-    label: "GPT-5.3 Codex Spark",
-    thinking: ["low", "medium", "high", "xhigh"],
-    defaultThinking: "low",
-    supportsFast: true,
-  },
-  {
-    value: "openai:gpt-5.2",
-    provider: "openai",
-    label: "GPT-5.2",
-    thinking: ["off", "low", "medium", "high", "xhigh"],
-    defaultThinking: "medium",
-    supportsFast: true,
-  },
-  {
-    value: "google:gemini-3.1-pro",
+    value: "google:gemini-3.8-flash",
     provider: "google",
-    label: "Gemini 3.1 Pro",
-    thinking: ["low", "medium", "high"],
-    defaultThinking: "high",
-  },
-  {
-    value: "google:gemini-3-flash",
-    provider: "google",
-    label: "Gemini 3 Flash",
-    thinking: ["minimal", "low", "medium", "high"],
-    defaultThinking: "high",
-  },
-  {
-    value: "google:gemini-3.5-flash",
-    provider: "google",
-    label: "Gemini 3.5 Flash",
+    label: "Gemini 3.8 Flash",
     thinking: ["minimal", "low", "medium", "high"],
     defaultThinking: "high",
   },
@@ -323,13 +233,6 @@ export function thinkingFromRef(
     }
     return "medium";
   }
-  if (
-    model?.provider === "openai" &&
-    model.name === "gpt-5.3-codex-spark" &&
-    model.effort === "none"
-  ) {
-    return "low";
-  }
   if (model?.effort === "none") return "off";
   if (model?.effort === "xhigh") return "xhigh";
   if (
@@ -369,13 +272,6 @@ export function modelRefWithThinking(
   if (model.provider === "kimi" && model.name === "kimi-k2.7-code") {
     return { ...model, effort: "high" };
   }
-  if (
-    model.provider === "openai" &&
-    model.name === "gpt-5.3-codex-spark" &&
-    thinking === "off"
-  ) {
-    return { ...model, effort: "low" };
-  }
   if (thinking === "off") return { ...model, effort: "none" };
   if (model.provider === "kimi") return { ...model, effort: "high" };
   if (model.provider === "openrouter" && thinking === "max") {
@@ -401,7 +297,7 @@ function modelId(provider: string, name: string): ModelId {
 }
 
 function supportsOpenAiMaxEffort(modelName: string): boolean {
-  return modelName === "gpt-5.6" || modelName.startsWith("gpt-5.6-");
+  return modelName === "gpt-6" || modelName.startsWith("gpt-6-");
 }
 
 function normalizedModelName(provider: string, name: string): string {
@@ -410,17 +306,13 @@ function normalizedModelName(provider: string, name: string): string {
 }
 
 function normalizedGoogleModelName(name: string): string {
-  if (name === "gemini-3.1-pro-preview") return "gemini-3.1-pro";
-  if (name === "gemini-3-flash-preview") return "gemini-3-flash";
-  if (name === "gemini-3.1-pro-low" || name === "gemini-3.1-pro-high") {
-    return "gemini-3.1-pro";
-  }
+  if (name === "gemini-3.8-flash-preview") return "gemini-3.8-flash";
   if (
-    name === "gemini-3.5-flash-low" ||
-    name === "gemini-3.5-flash-medium" ||
-    name === "gemini-3.5-flash-high"
+    name === "gemini-3.8-flash-low" ||
+    name === "gemini-3.8-flash-medium" ||
+    name === "gemini-3.8-flash-high"
   ) {
-    return "gemini-3.5-flash";
+    return "gemini-3.8-flash";
   }
   return name;
 }

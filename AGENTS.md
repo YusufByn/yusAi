@@ -1,5 +1,6 @@
 Code map:
 - L'agent doit garder à jour cette carte simple des fichiers à chaque création, suppression, renommage, déplacement ou modification.
+- Version de l'application : 0.1.51 (Cargo.toml, Cargo.lock, package.json, package-lock.json et src-tauri/tauri.conf.json).
 
 .
 ├── .gitignore
@@ -68,7 +69,8 @@ Code map:
 │   │   ├── Cargo.toml
 │   │   └── src
 │   │       ├── auth.rs
-│   │       ├── client.rs
+│   │       ├── cli_version.rs # version Claude Code annoncée (npm registry + auto-réparation sur erreur serveur)
+│   │       ├── client.rs # requêtes HTTP Anthropic, user-agent claude-cli dynamique
 │   │       ├── lib.rs
 │   │       ├── model_info.rs
 │   │       ├── stream.rs

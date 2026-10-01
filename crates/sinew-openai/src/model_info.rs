@@ -1,6 +1,6 @@
 use sinew_core::{EffortMode, ModelCapabilities, ModelRef};
 
-pub const MODEL_ID: &str = "gpt-5.5";
+pub const MODEL_ID: &str = "gpt-6-astra";
 pub const MODEL_WINDOW: u32 = 272_000;
 pub const MODEL_MAX_OUTPUT: u32 = 128_000;
 
@@ -14,65 +14,23 @@ struct OpenAiModelInfo {
 
 const MODELS: &[OpenAiModelInfo] = &[
     OpenAiModelInfo {
-        id: "gpt-5.5",
+        id: "gpt-6-astra",
         context_window: 272_000,
         preferred_window: 240_000,
         max_output_tokens: 128_000,
         supports_images: true,
     },
     OpenAiModelInfo {
-        id: "gpt-5.6-sol",
+        id: "gpt-6-sol",
         context_window: 1_050_000,
         preferred_window: 950_000,
         max_output_tokens: 128_000,
         supports_images: true,
     },
     OpenAiModelInfo {
-        id: "gpt-5.6-terra",
+        id: "gpt-6-luna",
         context_window: 1_050_000,
         preferred_window: 950_000,
-        max_output_tokens: 128_000,
-        supports_images: true,
-    },
-    OpenAiModelInfo {
-        id: "gpt-5.6-luna",
-        context_window: 1_050_000,
-        preferred_window: 950_000,
-        max_output_tokens: 128_000,
-        supports_images: true,
-    },
-    OpenAiModelInfo {
-        id: "gpt-5.4",
-        context_window: 1_050_000,
-        preferred_window: 950_000,
-        max_output_tokens: 128_000,
-        supports_images: true,
-    },
-    OpenAiModelInfo {
-        id: "gpt-5.4-mini",
-        context_window: 400_000,
-        preferred_window: 360_000,
-        max_output_tokens: 128_000,
-        supports_images: true,
-    },
-    OpenAiModelInfo {
-        id: "gpt-5.3-codex",
-        context_window: 400_000,
-        preferred_window: 360_000,
-        max_output_tokens: 128_000,
-        supports_images: true,
-    },
-    OpenAiModelInfo {
-        id: "gpt-5.3-codex-spark",
-        context_window: 128_000,
-        preferred_window: 115_000,
-        max_output_tokens: 128_000,
-        supports_images: false,
-    },
-    OpenAiModelInfo {
-        id: "gpt-5.2",
-        context_window: 400_000,
-        preferred_window: 360_000,
         max_output_tokens: 128_000,
         supports_images: true,
     },
@@ -107,8 +65,18 @@ mod tests {
     use super::capabilities;
 
     #[test]
-    fn gpt_5_6_models_use_expected_capabilities() {
-        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+    fn gpt_6_astra_uses_codex_account_capabilities() {
+        let capabilities = capabilities(&ModelRef::new("openai", "gpt-6-astra"));
+
+        assert_eq!(capabilities.context_window, 272_000);
+        assert_eq!(capabilities.preferred_window, 240_000);
+        assert_eq!(capabilities.max_output_tokens, 128_000);
+        assert!(capabilities.supports_images);
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_use_expected_capabilities() {
+        for model_id in ["gpt-6-sol", "gpt-6-luna"] {
             let capabilities = capabilities(&ModelRef::new("openai", model_id));
 
             assert_eq!(capabilities.context_window, 1_050_000, "{model_id}");

@@ -88,7 +88,9 @@ impl OpenAiProvider {
             .header("authorization", format!("Bearer {}", bearer.token));
 
         if bearer.is_oauth {
-            request = request.header("openai-beta", "responses=experimental");
+            request = request
+                .header("openai-beta", "responses=experimental")
+                .header("originator", "sinew");
             if let Some(account_id) = bearer.account_id {
                 request = request.header("chatgpt-account-id", account_id);
             }
@@ -251,7 +253,9 @@ async fn stream_sse_request_with_bearer(
         .header("authorization", format!("Bearer {}", bearer.token));
 
     if bearer.is_oauth {
-        builder = builder.header("openai-beta", "responses=experimental");
+        builder = builder
+            .header("openai-beta", "responses=experimental")
+            .header("originator", "sinew");
         if let Some(account_id) = bearer.account_id {
             builder = builder.header("chatgpt-account-id", account_id);
         }
@@ -361,7 +365,7 @@ fn effort_to_reasoning(model_id: &str, effort: Option<Effort>) -> Option<wire::R
 }
 
 fn supports_max_reasoning_effort(model_id: &str) -> bool {
-    model_id == "gpt-5.6" || model_id.starts_with("gpt-5.6-")
+    model_id == "gpt-6" || model_id.starts_with("gpt-6-")
 }
 
 fn service_tier_param(service_tier: Option<ServiceTier>) -> Option<&'static str> {
@@ -689,7 +693,7 @@ mod tests {
     #[test]
     fn sse_request_body_uses_responses_stream_shape() {
         let request = ProviderRequest::new(
-            ModelRef::new("openai", "gpt-5.5"),
+            ModelRef::new("openai", "gpt-6-astra"),
             vec![ChatMessage::user_text("hello")],
         )
         .with_system("be helpful")
@@ -714,7 +718,7 @@ mod tests {
     #[test]
     fn sse_request_body_maps_fast_service_tier_to_priority() {
         let request = ProviderRequest::new(
-            ModelRef::new("openai", "gpt-5.5"),
+            ModelRef::new("openai", "gpt-6-astra"),
             vec![ChatMessage::user_text("hello")],
         )
         .with_service_tier(ServiceTier::Fast);
@@ -732,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_request_body_serializes_all_supported_reasoning_efforts() {
+    fn latest_models_serialize_all_supported_reasoning_efforts() {
         let efforts = [
             (Effort::None, "none"),
             (Effort::Low, "low"),
@@ -742,7 +746,7 @@ mod tests {
             (Effort::Max, "max"),
         ];
 
-        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        for model_id in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
             for (effort, expected) in efforts {
                 let request = ProviderRequest::new(
                     ModelRef::new("openai", model_id).with_effort(effort),
@@ -765,8 +769,9 @@ mod tests {
 
     #[test]
     fn legacy_openai_request_body_clamps_max_reasoning_effort_to_xhigh() {
+        // Any model outside the GPT-6 family still clamps `max` to `xhigh`.
         let request = ProviderRequest::new(
-            ModelRef::new("openai", "gpt-5.5").with_effort(Effort::Max),
+            ModelRef::new("openai", "gpt-5.2").with_effort(Effort::Max),
             vec![ChatMessage::user_text("hello")],
         );
         let body = build_responses_request(
