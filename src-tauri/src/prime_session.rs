@@ -170,6 +170,120 @@ pub async fn kill_session(client: &DaemonClient, active_session_id: &str) -> Res
     Ok(())
 }
 
+/// Un modèle proposé dans le sélecteur du chat Prime.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimeModelOption {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+}
+
+impl PrimeModelOption {
+    fn from_value(model: &Value) -> Option<Self> {
+        let provider = model.get("provider")?.as_str()?.to_string();
+        let id = model.get("id")?.as_str()?.to_string();
+        let name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&id)
+            .to_string();
+        Some(Self { provider, id, name })
+    }
+}
+
+/// Modèle et niveau de réflexion d'une session, avec les choix possibles.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimeSessionConfig {
+    pub model: Option<PrimeModelOption>,
+    pub thinking_level: Option<String>,
+    pub available_thinking_levels: Vec<String>,
+    pub models: Vec<PrimeModelOption>,
+}
+
+/// L'état du worker (`get_connection_state`) et ses modèles disponibles
+/// (`get_available_models`), comme les sélecteurs de l'ACP
+/// (pa-daemon/src/acp/wire_config.rs:274-320).
+pub async fn session_config(
+    client: &DaemonClient,
+    active_session_id: &str,
+) -> Result<PrimeSessionConfig> {
+    let state = client
+        .request_ok(DaemonCommand::GetConnectionState {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    let available = client
+        .request_ok(DaemonCommand::GetAvailableModels {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    Ok(PrimeSessionConfig {
+        model: state.get("model").and_then(PrimeModelOption::from_value),
+        thinking_level: state
+            .get("thinkingLevel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        available_thinking_levels: state
+            .get("availableThinkingLevels")
+            .and_then(|levels| serde_json::from_value(levels.clone()).ok())
+            .unwrap_or_default(),
+        models: available
+            .get("models")
+            .and_then(Value::as_array)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(PrimeModelOption::from_value)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// Change le modèle de la session ; le worker l'enregistre aussi comme défaut
+/// des sessions suivantes (pa-daemon/src/model_switch.rs:123-126).
+pub async fn set_model(
+    client: &DaemonClient,
+    active_session_id: &str,
+    provider: &str,
+    model_id: &str,
+) -> Result<()> {
+    client
+        .request_ok(DaemonCommand::SetModel {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Change le niveau de réflexion (aussi enregistré comme défaut,
+/// pa-daemon/src/model_switch.rs:221-228).
+pub async fn set_thinking_level(
+    client: &DaemonClient,
+    active_session_id: &str,
+    level: &str,
+) -> Result<()> {
+    client
+        .request_ok(DaemonCommand::SetThinkingLevel {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            level: level.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    Ok(())
+}
+
 /// Config de création : le cwd de l'espace de travail. En dev,
 /// `YUSAI_PRIME_FAUX_SCRIPT` remplace le modèle par une réponse scriptée
 /// (le moteur `faux` de Prime, utilisé par ses tests e2e).
@@ -272,6 +386,52 @@ pub async fn prime_abort(
 ) -> Result<(), String> {
     let client = connected_client(&app, &state).await.map_err(error_text)?;
     abort(&client, &active_session_id).await.map_err(error_text)
+}
+
+#[tauri::command]
+pub async fn prime_session_config(
+    app: AppHandle,
+    state: State<'_, PrimeState>,
+    active_session_id: String,
+) -> Result<PrimeSessionConfig, String> {
+    let client = connected_client(&app, &state).await.map_err(error_text)?;
+    session_config(&client, &active_session_id)
+        .await
+        .map_err(error_text)
+}
+
+/// Renvoie la config relue : le niveau peut être ajusté au nouveau modèle.
+#[tauri::command]
+pub async fn prime_set_model(
+    app: AppHandle,
+    state: State<'_, PrimeState>,
+    active_session_id: String,
+    provider: String,
+    model_id: String,
+) -> Result<PrimeSessionConfig, String> {
+    let client = connected_client(&app, &state).await.map_err(error_text)?;
+    set_model(&client, &active_session_id, &provider, &model_id)
+        .await
+        .map_err(error_text)?;
+    session_config(&client, &active_session_id)
+        .await
+        .map_err(error_text)
+}
+
+#[tauri::command]
+pub async fn prime_set_thinking_level(
+    app: AppHandle,
+    state: State<'_, PrimeState>,
+    active_session_id: String,
+    level: String,
+) -> Result<PrimeSessionConfig, String> {
+    let client = connected_client(&app, &state).await.map_err(error_text)?;
+    set_thinking_level(&client, &active_session_id, &level)
+        .await
+        .map_err(error_text)?;
+    session_config(&client, &active_session_id)
+        .await
+        .map_err(error_text)
 }
 
 /// Ferme une session : sans client connecté, il n'y a rien à fermer (un

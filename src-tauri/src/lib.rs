@@ -400,6 +400,9 @@ pub fn run() {
             prime_session::prime_prompt,
             prime_session::prime_abort,
             prime_session::prime_close_session,
+            prime_session::prime_session_config,
+            prime_session::prime_set_model,
+            prime_session::prime_set_thinking_level,
         ])
         .build(tauri::generate_context!())
         .expect("error while building sinew desktop")

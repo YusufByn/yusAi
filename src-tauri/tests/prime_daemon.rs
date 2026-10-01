@@ -88,7 +88,7 @@ async fn spawns_supervisor_and_connects() {
 #[tokio::test(flavor = "multi_thread")]
 async fn prompt_streams_assistant_text() {
     use pa_tui::daemon_client::DaemonClientEvent;
-    use sinew_desktop_lib::prime_session::{create_session, kill_session, prompt};
+    use sinew_desktop_lib::prime_session::{create_session, kill_session, prompt, session_config};
 
     let root = scratch_dir();
     let agent_dir = root.join("agent");
@@ -160,6 +160,16 @@ async fn prompt_streams_assistant_text() {
     .await;
     assert!(collected.is_ok(), "turn ended; events seen: {seen_types:?}");
     assert_eq!(text, "bonjour depuis Prime", "events seen: {seen_types:?}");
+
+    // La config de session se lit (le moteur faux n'a qu'un niveau, `off`).
+    let config = session_config(&client, &session)
+        .await
+        .expect("session config");
+    assert_eq!(
+        config.model.map(|model| model.id).as_deref(),
+        Some("faux-1")
+    );
+    assert_eq!(config.available_thinking_levels, vec!["off".to_string()]);
 
     // Télémétrie de session coupée au Create : ni identifiant ni copie
     // locale des événements.
