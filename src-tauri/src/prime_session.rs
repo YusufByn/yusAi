@@ -24,7 +24,7 @@ pub struct PrimeState {
 
 /// Un `DaemonClientEvent` tel que le front le reçoit.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum PrimeEventPayload {
     /// Événement de session brut (`message_update`, `agent_end`, …).
     SessionEvent {
@@ -279,5 +279,26 @@ pub async fn prime_close_session(
                 .map_err(error_text)
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_payload_is_camel_case_for_the_webview() {
+        let payload = PrimeEventPayload::SessionEvent {
+            active_session_id: "s1".into(),
+            event: json!({ "type": "agent_end" }),
+        };
+        assert_eq!(
+            serde_json::to_value(payload).unwrap(),
+            json!({
+                "kind": "sessionEvent",
+                "activeSessionId": "s1",
+                "event": { "type": "agent_end" },
+            })
+        );
     }
 }
