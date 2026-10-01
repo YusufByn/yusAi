@@ -72,7 +72,7 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
    (aujourd'hui invisibles alors qu'il exécute bash, edit, etc.) :
    événements `tool_execution_start` / `tool_execution_end`, réutiliser
    `ToolCard.tsx`. Référence de mapping : `pa-daemon/src/acp/wire_events.rs`.
-2. **Donner à Prime les outils de yusAi** : exposer les outils de
+2. **Donner à Prime les outils de yusAi** (prévu, pas pour tout de suite) : exposer les outils de
    `crates/sinew-app` sous forme de serveur MCP et l'attacher à chaque
    session avec `DaemonCommand::ReplaceAcpMcpServers`
    (`pa-types/src/daemon/command.rs:676`, usage dans
