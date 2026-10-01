@@ -67,11 +67,16 @@ pub(super) fn install_openai_provider(
 pub(super) fn install_anthropic_provider(
     providers: &Arc<StdMutex<HashMap<String, Arc<dyn Provider>>>>,
 ) -> std::result::Result<(), String> {
-    let provider = AnthropicProvider::from_default_sources().map_err(error_to_string)?;
+    // Même construction que `AnthropicProvider::from_default_sources`, en
+    // gardant le Credential partagé pour Prime (src/prime_auth.rs).
+    let config = AnthropicConfig::from_default_sources().map_err(error_to_string)?;
+    let credential = config.credential.clone();
+    let provider = AnthropicProvider::new(config).map_err(error_to_string)?;
     providers
         .lock()
         .map_err(|_| "provider registry is unavailable".to_string())?
         .insert("anthropic".into(), Arc::new(provider) as Arc<dyn Provider>);
+    crate::prime_auth::set_anthropic_credential(Some(credential));
     Ok(())
 }
 
@@ -156,6 +161,7 @@ pub(super) fn remove_anthropic_provider(
         .lock()
         .map_err(|_| "provider registry is unavailable".to_string())?
         .remove("anthropic");
+    crate::prime_auth::set_anthropic_credential(None);
     Ok(())
 }
 

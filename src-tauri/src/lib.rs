@@ -30,8 +30,8 @@ use sinew_anthropic::{
     exchange_oauth_code as exchange_anthropic_oauth_code, generate_pkce as generate_anthropic_pkce,
     generate_state as generate_anthropic_state,
     load_default_auth_status as load_default_anthropic_auth_status,
-    oauth_authorize_url as anthropic_oauth_authorize_url, AnthropicAuthStatus, AnthropicProvider,
-    PkceCodes as AnthropicPkceCodes, MODEL_ID as ANTHROPIC_MODEL_ID,
+    oauth_authorize_url as anthropic_oauth_authorize_url, AnthropicAuthStatus, AnthropicConfig,
+    AnthropicProvider, PkceCodes as AnthropicPkceCodes, MODEL_ID as ANTHROPIC_MODEL_ID,
 };
 use sinew_app::{
     checkpoint_from_snapshots, clean_context_descriptor, compact_conversation_history,
@@ -104,6 +104,7 @@ mod git;
 mod models;
 mod platform;
 pub mod prime;
+pub mod prime_auth;
 pub mod prime_session;
 mod providers;
 mod remote;
@@ -139,8 +140,14 @@ pub fn run() {
     let store = AppStore::open_default().expect("unable to open app store");
     let openrouter_models = store.load_openrouter_models().unwrap_or_default();
     let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
-    if let Ok(provider) = AnthropicProvider::from_default_sources() {
-        providers.insert("anthropic".into(), Arc::new(provider) as Arc<dyn Provider>);
+    // Même construction que `AnthropicProvider::from_default_sources`, en
+    // gardant le Credential partagé pour Prime (src/prime_auth.rs).
+    if let Ok(config) = AnthropicConfig::from_default_sources() {
+        let credential = config.credential.clone();
+        if let Ok(provider) = AnthropicProvider::new(config) {
+            prime_auth::set_anthropic_credential(Some(credential));
+            providers.insert("anthropic".into(), Arc::new(provider) as Arc<dyn Provider>);
+        }
     }
     if let Ok(provider) = OpenAiProvider::from_default_sources() {
         providers.insert("openai".into(), Arc::new(provider) as Arc<dyn Provider>);

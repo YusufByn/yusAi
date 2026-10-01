@@ -273,6 +273,7 @@ Code map:
 │       ├── models.rs
 │       ├── platform.rs
 │       ├── prime.rs # Prime Agent : binaire multi-rôle (superviseur/worker), isolation, lancement du daemon
+│       ├── prime_auth.rs # Prime Agent : recopie la connexion Anthropic de yusAi dans l'auth.json de Prime (yusAi seul rafraîchit)
 │       ├── prime_session.rs # Prime Agent : commandes Tauri (créer/prompt/annuler/fermer) + relais des événements `prime-event`
 │       ├── providers.rs
 │       ├── remote.rs

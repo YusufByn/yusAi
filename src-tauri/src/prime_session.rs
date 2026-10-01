@@ -243,6 +243,9 @@ pub async fn prime_create_session(
         return Err(format!("workspace not found: {workspace_path}"));
     }
     let client = connected_client(&app, &state).await.map_err(error_text)?;
+    // La connexion Anthropic de yusAi, recopiée avant que le worker ne
+    // résolve son modèle.
+    crate::prime_auth::ensure_anthropic_sync(&crate::prime::agent_dir()).await;
     create_session(&client, create_config(&workspace_path))
         .await
         .map_err(error_text)
