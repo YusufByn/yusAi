@@ -7,6 +7,7 @@ Code map:
 ├── AGENTS.md
 ├── Cargo.lock
 ├── Cargo.toml
+├── CLAUDE.md # règles de l'intégration Prime Agent
 ├── EDIT_FILE_HARNESS_COMPARISON.md
 ├── EDIT_TOOL_COMPARISON.md
 ├── FEATURES.md
