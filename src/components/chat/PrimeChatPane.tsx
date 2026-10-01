@@ -5,8 +5,8 @@ import { api } from "../../lib/ipc";
 import type { PrimeEventPayload } from "../../types";
 import { Markdown } from "./Markdown";
 
-// Minimal Prime Agent chat: one daemon session per pane, created on the
-// first prompt. Only user prompts and assistant text are rendered; tool
+// Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
+// one pane per yusAi conversation), created on the first prompt. Only user prompts and assistant text are rendered; tool
 // calls, thinking and sub-agents are out of scope for this milestone.
 
 type PrimeMessage = {
@@ -119,7 +119,8 @@ export function PrimeChatPane({ workspacePath, headerExtra, onOpenFile }: Props)
     };
   }, [appendAssistantText, pushMessage]);
 
-  // The session dies with the pane (keyed by workspace in Workspace.tsx).
+  // The session dies with the pane (conversation deleted or workspace
+  // changed, see Workspace.tsx).
   useEffect(
     () => () => {
       const sessionId = sessionIdRef.current;

@@ -1741,14 +1741,38 @@ export function Workspace({
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalFullHeight, setTerminalFullHeight] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(INITIAL_TERMINAL_HEIGHT);
-  // Chat engine: Sinew by default. The Prime pane mounts on first use and
-  // stays mounted (hidden) so its daemon session survives toggling back.
+  // Chat engine: Sinew by default. Each conversation gets its own Prime
+  // pane (and daemon session) the first time Prime is shown for it; panes
+  // stay mounted (hidden) so sessions survive toggling and switching
+  // conversations, and unmount when the conversation is deleted or the
+  // workspace changes.
   const [chatEngine, setChatEngine] = useState<ChatEngine>("sinew");
-  const [primeOpened, setPrimeOpened] = useState(false);
+  const [primeConversationIds, setPrimeConversationIds] = useState<string[]>([]);
   const selectChatEngine = useCallback((engine: ChatEngine) => {
-    if (engine === "prime") setPrimeOpened(true);
     setChatEngine(engine);
   }, []);
+  useEffect(() => {
+    setPrimeConversationIds([]);
+  }, [workspacePath]);
+  useEffect(() => {
+    if (chatEngine !== "prime") return;
+    setPrimeConversationIds((ids) =>
+      ids.includes(activeConv.id) ? ids : [...ids, activeConv.id],
+    );
+  }, [chatEngine, activeConv.id]);
+  useEffect(() => {
+    const live = new Set(conversations.map((conversation) => conversation.id));
+    setPrimeConversationIds((ids) => {
+      const kept = ids.filter((id) => live.has(id) || id === activeConv.id);
+      return kept.length === ids.length ? ids : kept;
+    });
+  }, [conversations, activeConv.id]);
+  // Rendered list: includes the active conversation right away, so toggling
+  // to Prime never shows an empty column for the frame before the effect.
+  const renderedPrimeConversationIds =
+    chatEngine === "prime" && !primeConversationIds.includes(activeConv.id)
+      ? [...primeConversationIds, activeConv.id]
+      : primeConversationIds;
 
   const clampColumn = useCallback((v: number) => {
     if (typeof window === "undefined") return v;
@@ -2263,13 +2287,18 @@ export function Workspace({
               }
             />
           </div>
-          {primeOpened && (
+          {renderedPrimeConversationIds.map((conversationId) => (
             <div
+              key={`${workspacePath}:${conversationId}`}
               className="chat-engine-slot"
-              style={{ display: chatEngine === "prime" ? "flex" : "none" }}
+              style={{
+                display:
+                  chatEngine === "prime" && conversationId === activeConv.id
+                    ? "flex"
+                    : "none",
+              }}
             >
               <PrimeChatPane
-                key={workspacePath}
                 workspacePath={workspacePath}
                 onOpenFile={openChatFile}
                 headerExtra={
@@ -2277,7 +2306,7 @@ export function Workspace({
                 }
               />
             </div>
-          )}
+          ))}
         </div>
       </div>
     </div>
