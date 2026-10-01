@@ -6304,12 +6304,14 @@ textarea {
   color: var(--text-0);
 }
 
-/* Minimal Prime chat (PrimeChatPane): plain textarea, no mention overlay. */
-.prime-chat__input {
+/* Minimal Prime chat (PrimeChatPane): plain textarea, no mention overlay.
+   `.composer__input` paints its text transparent (the Sinew overlay draws
+   it) and comes later in this file, hence the doubled class. */
+.composer__input.prime-chat__input {
   color: var(--text-0);
   -webkit-text-fill-color: var(--text-0);
 }
-.prime-chat__input::selection {
+.composer__input.prime-chat__input::selection {
   color: var(--text-0);
   -webkit-text-fill-color: var(--text-0);
 }
