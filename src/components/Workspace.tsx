@@ -22,6 +22,7 @@ import { TerminalPanel } from "./TerminalPanel";
 import { RemotePanel } from "./RemotePanel";
 import { SearchPane } from "./SearchPane";
 import { ChatPane, type ExternalDropFeed } from "./chat/ChatPane";
+import { PrimeChatPane } from "./chat/PrimeChatPane";
 import { SinewMark } from "./SinewMark";
 import { APP_NAME } from "../branding";
 import { UpdateBadge } from "./UpdateBadge";
@@ -38,6 +39,7 @@ import type {
   ActiveTurnsChangedPayload,
   AgentEvent,
   AgentMode,
+  ChatEngine,
   ConversationEventPayload,
   ConversationSummary,
   EditorRevealTarget,
@@ -1739,6 +1741,14 @@ export function Workspace({
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalFullHeight, setTerminalFullHeight] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(INITIAL_TERMINAL_HEIGHT);
+  // Chat engine: Sinew by default. The Prime pane mounts on first use and
+  // stays mounted (hidden) so its daemon session survives toggling back.
+  const [chatEngine, setChatEngine] = useState<ChatEngine>("sinew");
+  const [primeOpened, setPrimeOpened] = useState(false);
+  const selectChatEngine = useCallback((engine: ChatEngine) => {
+    if (engine === "prime") setPrimeOpened(true);
+    setChatEngine(engine);
+  }, []);
 
   const clampColumn = useCallback((v: number) => {
     if (typeof window === "undefined") return v;
@@ -2223,30 +2233,83 @@ export function Workspace({
             display: "flex",
           }}
         >
-          <ChatPane
-            workspacePath={workspacePath}
-            conversationId={activeConv.id}
-            activeModel={activeConv.model}
-            modeModelSettings={chatModeModelSettings}
-            streamingModel={activeStreamingModel}
-            planWorkflow={activeConv.planWorkflow}
-            goalWorkflow={activeConv.goalWorkflow}
-            isStreaming={activeConversationIsStreaming}
-            history={activeConv.history}
-            subscribeEvents={subscribeEvents}
-            onSend={sendMessage}
-            onCompact={compactConversation}
-            onModeChange={changeConversationMode}
-            onModelPreferenceChange={changeConversationModelPreference}
-            onImplementPlanFresh={implementPlanFresh}
-            onStop={stopTurn}
-            onOpenFile={openChatFile}
-            onOpenSettings={openSettings}
-            externalDrops={externalDropFeed}
-            dropZoneRef={chatDropZoneRef}
-          />
+          <div
+            className="chat-engine-slot"
+            style={{ display: chatEngine === "sinew" ? "flex" : "none" }}
+          >
+            <ChatPane
+              workspacePath={workspacePath}
+              conversationId={activeConv.id}
+              activeModel={activeConv.model}
+              modeModelSettings={chatModeModelSettings}
+              streamingModel={activeStreamingModel}
+              planWorkflow={activeConv.planWorkflow}
+              goalWorkflow={activeConv.goalWorkflow}
+              isStreaming={activeConversationIsStreaming}
+              history={activeConv.history}
+              subscribeEvents={subscribeEvents}
+              onSend={sendMessage}
+              onCompact={compactConversation}
+              onModeChange={changeConversationMode}
+              onModelPreferenceChange={changeConversationModelPreference}
+              onImplementPlanFresh={implementPlanFresh}
+              onStop={stopTurn}
+              onOpenFile={openChatFile}
+              onOpenSettings={openSettings}
+              externalDrops={externalDropFeed}
+              dropZoneRef={chatDropZoneRef}
+              headerExtra={
+                <ChatEngineToggle value={chatEngine} onChange={selectChatEngine} />
+              }
+            />
+          </div>
+          {primeOpened && (
+            <div
+              className="chat-engine-slot"
+              style={{ display: chatEngine === "prime" ? "flex" : "none" }}
+            >
+              <PrimeChatPane
+                key={workspacePath}
+                workspacePath={workspacePath}
+                onOpenFile={openChatFile}
+                headerExtra={
+                  <ChatEngineToggle value={chatEngine} onChange={selectChatEngine} />
+                }
+              />
+            </div>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ChatEngineToggle({
+  value,
+  onChange,
+}: {
+  value: ChatEngine;
+  onChange: (engine: ChatEngine) => void;
+}) {
+  const engines: { id: ChatEngine; label: string }[] = [
+    { id: "sinew", label: "Sinew" },
+    { id: "prime", label: "Prime" },
+  ];
+  return (
+    <div className="chat-engine-toggle" role="radiogroup" aria-label="Chat engine">
+      {engines.map((engine) => (
+        <button
+          key={engine.id}
+          type="button"
+          role="radio"
+          aria-checked={value === engine.id}
+          className="chat-engine-toggle__option"
+          data-active={value === engine.id ? "true" : "false"}
+          onClick={() => onChange(engine.id)}
+        >
+          {engine.label}
+        </button>
+      ))}
     </div>
   );
 }

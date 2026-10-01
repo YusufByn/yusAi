@@ -6272,6 +6272,58 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Sinew / Prime engine toggle in the chat header. */
+.chat-engine-slot {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.chat-engine-toggle {
+  display: inline-flex;
+  margin-left: auto;
+  padding: 2px;
+  gap: 2px;
+  border-radius: var(--r-med);
+  background: var(--bg-2);
+}
+.chat-engine-toggle + .chat-head__dot {
+  margin-left: 0;
+}
+.chat-engine-toggle__option {
+  padding: 1px 8px;
+  border-radius: var(--r-med);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  transition: background 150ms ease, color 150ms ease;
+}
+.chat-engine-toggle__option:hover {
+  color: var(--text-0);
+}
+.chat-engine-toggle__option[data-active="true"] {
+  background: var(--bg-4);
+  color: var(--text-0);
+}
+
+/* Minimal Prime chat (PrimeChatPane): plain textarea, no mention overlay. */
+.prime-chat__input {
+  color: var(--text-0);
+  -webkit-text-fill-color: var(--text-0);
+}
+.prime-chat__input::selection {
+  color: var(--text-0);
+  -webkit-text-fill-color: var(--text-0);
+}
+.prime-chat__error {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+}
+.prime-chat__status {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  padding: 4px 0;
+}
+
 .chat-head__dot {
   width: 6px;
   height: 6px;

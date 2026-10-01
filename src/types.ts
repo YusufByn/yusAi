@@ -828,3 +828,17 @@ export type RecentWorkspace = {
   name: string;
   lastOpenedMs: number;
 };
+
+// Moteur du chat : Sinew (historique) ou Prime Agent (daemon vendored).
+export type ChatEngine = "sinew" | "prime";
+
+// Événement Tauri `prime-event` (src-tauri/src/prime_session.rs).
+export type PrimeEventPayload =
+  | {
+      kind: "sessionEvent";
+      activeSessionId: string;
+      // Événement de session brut de Prime (`message_update`, `agent_end`…).
+      event: { type?: string; [key: string]: unknown };
+    }
+  | { kind: "sessionClosed"; activeSessionId: string; reason: string }
+  | { kind: "disconnected"; reason: string };

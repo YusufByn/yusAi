@@ -262,7 +262,7 @@ Code map:
 │   │       ├── AppIcon-76x76@2x.png
 │   │       └── AppIcon-83.5x83.5@2x.png
 │   ├── tests
-│   │   └── prime_daemon.rs # test : lancement détaché du superviseur Prime + connexion DaemonClient
+│   │   └── prime_daemon.rs # tests : lancement détaché du superviseur Prime, connexion DaemonClient, prompt scripté (moteur faux)
 │   └── src
 │       ├── context.rs
 │       ├── conversations.rs
@@ -272,6 +272,7 @@ Code map:
 │       ├── models.rs
 │       ├── platform.rs
 │       ├── prime.rs # Prime Agent : binaire multi-rôle (superviseur/worker), isolation, lancement du daemon
+│       ├── prime_session.rs # Prime Agent : commandes Tauri (créer/prompt/annuler/fermer) + relais des événements `prime-event`
 │       ├── providers.rs
 │       ├── remote.rs
 │       ├── state.rs
@@ -314,6 +315,7 @@ Code map:
     │       ├── Markdown.tsx
     │       ├── MermaidDiagram.tsx
     │       ├── PlanningNextMoveBlock.tsx
+    │       ├── PrimeChatPane.tsx # chat minimal Prime Agent (texte seul), bascule Sinew/Prime
     │       ├── Questionnaire.tsx
     │       ├── TodoStrip.tsx
     │       ├── ToolCard.tsx

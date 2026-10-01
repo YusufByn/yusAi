@@ -744,4 +744,18 @@ export const api = {
       input: { deviceId },
     });
   },
+  // Prime Agent (daemon natif) : la réponse arrive par l'événement
+  // `prime-event` (voir PrimeEventPayload).
+  primeCreateSession(workspacePath: string) {
+    return invoke<string>("prime_create_session", { workspacePath });
+  },
+  primePrompt(activeSessionId: string, message: string) {
+    return invoke<void>("prime_prompt", { activeSessionId, message });
+  },
+  primeAbort(activeSessionId: string) {
+    return invoke<void>("prime_abort", { activeSessionId });
+  },
+  primeCloseSession(activeSessionId: string) {
+    return invoke<void>("prime_close_session", { activeSessionId });
+  },
 };

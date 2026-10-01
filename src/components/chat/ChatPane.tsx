@@ -192,6 +192,8 @@ type Props = {
   onOpenSettings: (section?: "providers") => void;
   externalDrops: ExternalDropFeed;
   dropZoneRef: RefObject<HTMLDivElement>;
+  // Extra controls in the chat header (the Sinew / Prime engine toggle).
+  headerExtra?: ReactNode;
 };
 
 function preserveTrailingTurnDuration(
@@ -416,6 +418,7 @@ export function ChatPane({
   onOpenSettings,
   externalDrops,
   dropZoneRef,
+  headerExtra,
 }: Props) {
   const conversationViewsRef = useRef<Map<string, ChatViewState>>(new Map());
   const composerDraftsRef = useRef<Map<string, ComposerDraft>>(new Map());
@@ -3198,6 +3201,7 @@ export function ChatPane({
           )}
           <span>{activeSubAgent?.title ?? "Chat"}</span>
         </span>
+        {headerExtra}
         <span className="chat-head__dot" data-status={displayView.status} />
       </div>
       <div className="chat-body" ref={bodyRef}>
