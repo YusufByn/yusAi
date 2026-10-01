@@ -19,7 +19,7 @@ const API_VERSION: &str = "2023-06-01";
 // itself from the npm registry instead of going stale here.
 const CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 // Note: we intentionally do NOT advertise `context-1m-2025-08-07` here.
-// Every model we ship (Opus 5.5, Sonnet 5, Fable 5/5.1) already exposes a 1M
+// Every model we ship (Opus 5.5, Sonnet 5.5/5, Fable 5/5.1) already exposes a 1M
 // context window natively. Sending the beta inconditionally broke the models
 // we shipped back then:
 //   * Sonnet 4.6 → server-side tier gating → `rate_limit_error: Extra usage
