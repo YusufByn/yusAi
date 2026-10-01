@@ -23,6 +23,14 @@ sinew-kimi = { workspace = true }
 sinew-openai = { workspace = true }
 sinew-openrouter = { workspace = true }
 
+# Prime Agent engine (vendor/prime-agent)
+pa-types = { workspace = true }
+pa-ai = { workspace = true }
+pa-models = { workspace = true }
+pa-agent = { workspace = true }
+pa-core = { workspace = true }
+pa-daemon = { workspace = true }
+
 anyhow = { workspace = true }
 base64 = { workspace = true }
 notify = { workspace = true }
