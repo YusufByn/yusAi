@@ -12,6 +12,7 @@
 //! (`pa_tui::daemon_client::DaemonClient` + `pa_types::daemon::DaemonCommand`),
 //! jamais par ACP.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -24,6 +25,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 const AGENT_DIR_ENV: &str = pa_daemon::paths::AGENT_DIR_ENV;
 /// Dossier des ressources packagées de Prime (prime-agent-runtime, skills…).
 const PACKAGE_DIR_ENV: &str = "PI_PACKAGE_DIR";
+/// Interrupteur de télémétrie de Prime (pa-telemetry/src/env.rs:27-33).
+const TELEMETRY_ENV: &str = "PRIME_AGENT_TELEMETRY";
 
 /// Budget de démarrage du superviseur (pa-cli: `DAEMON_STARTUP_TIMEOUT_MS`).
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -156,11 +159,21 @@ pub fn daemon_socket_path() -> PathBuf {
 /// Environnement propre à yusAi passé au seul superviseur (ses workers en
 /// héritent) : jamais posé sur le processus IDE, dont les terminaux et
 /// l'outil bash viseraient sinon l'état Prime de yusAi.
-fn supervisor_env(agent_dir: &Path) -> Vec<(&'static str, PathBuf)> {
+///
+/// `PRIME_AGENT_TELEMETRY=0` coupe la télémétrie du superviseur
+/// (pa-daemon/src/supervisor.rs:343-346) et l'événement « model refused »
+/// des workers (pa-daemon/src/model_allowlist.rs:139-145) ; la liste des
+/// modèles autorisés n'en dépend pas (model_allowlist.rs:31-91). La
+/// télémétrie de session des workers se coupe au `Create`
+/// (prime_session.rs).
+fn supervisor_env(agent_dir: &Path) -> Vec<(&'static str, OsString)> {
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
-    let mut env = vec![(AGENT_DIR_ENV, agent_dir.to_path_buf())];
+    let mut env = vec![
+        (AGENT_DIR_ENV, agent_dir.as_os_str().to_owned()),
+        (TELEMETRY_ENV, OsString::from("0")),
+    ];
     #[cfg(debug_assertions)]
-    env.push((PACKAGE_DIR_ENV, dev_package_dir()));
+    env.push((PACKAGE_DIR_ENV, dev_package_dir().into_os_string()));
     env
 }
 

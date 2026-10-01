@@ -24,7 +24,11 @@ pub struct PrimeState {
 
 /// Un `DaemonClientEvent` tel que le front le reçoit.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PrimeEventPayload {
     /// Événement de session brut (`message_update`, `agent_end`, …).
     SessionEvent {
@@ -75,7 +79,10 @@ pub async fn create_session(client: &DaemonClient, config: Value) -> Result<Stri
             no_session: Some(true),
             name: None,
             config: Some(config),
-            telemetry_disabled: None,
+            // Coupe la télémétrie de session du worker, qui ne lit pas
+            // l'env (pa-daemon/src/agent_engine/lifecycle.rs:1075) ; le flag
+            // suit le worker jusqu'à ses relances (descriptor.rs:113-117).
+            telemetry_disabled: Some(true),
             runtime_metadata: None,
             lifecycle: None,
             env: None,

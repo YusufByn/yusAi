@@ -54,6 +54,13 @@ async fn spawns_supervisor_and_connects() {
         agent_dir.display()
     );
 
+    // Télémétrie coupée : le superviseur ne crée pas d'identifiant
+    // d'installation (pa-core/src/session_engine/telemetry.rs:1078).
+    assert!(
+        !agent_dir.join("telemetry.json").exists(),
+        "telemetry is disabled for the supervisor"
+    );
+
     // Un second appel réutilise le superviseur déjà lancé.
     let (second, _second_events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
         .await
@@ -153,6 +160,11 @@ async fn prompt_streams_assistant_text() {
     .await;
     assert!(collected.is_ok(), "turn ended; events seen: {seen_types:?}");
     assert_eq!(text, "bonjour depuis Prime", "events seen: {seen_types:?}");
+
+    // Télémétrie de session coupée au Create : ni identifiant ni copie
+    // locale des événements.
+    assert!(!agent_dir.join("telemetry.json").exists());
+    assert!(!agent_dir.join("telemetry.jsonl").exists());
 
     kill_session(&client, &session)
         .await
