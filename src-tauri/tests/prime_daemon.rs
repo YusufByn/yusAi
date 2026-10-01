@@ -179,3 +179,103 @@ async fn prompt_streams_assistant_text() {
     client.close();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Cycle `ClientOwned` (pa-daemon/src/supervisor/sessions.rs:621-638) : une
+/// déconnexion sans `Kill` ne fait qu'un `detach`
+/// (pa-daemon/src/supervisor/clients.rs:354-373) et le worker continue de
+/// tourner. Ce test fige ce comportement : yusAi doit donc tuer lui-même
+/// ses sessions.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn client_owned_worker_survives_disconnect() {
+    use pa_types::daemon::{DaemonCommand, DaemonSessionLifecycle};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+
+    let (mut client, events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let summary = client
+        .request_ok(DaemonCommand::Create {
+            id: None,
+            session_path: None,
+            continue_recent: None,
+            no_session: Some(true),
+            name: None,
+            config: Some(serde_json::json!({
+                "cwd": workspace.to_string_lossy(),
+                "script": script.to_string_lossy(),
+            })),
+            telemetry_disabled: Some(true),
+            runtime_metadata: None,
+            lifecycle: Some(DaemonSessionLifecycle::ClientOwned),
+            env: None,
+            launch_env: None,
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("client-owned session created");
+    let session = summary["activeSessionId"].as_str().unwrap().to_string();
+
+    // Le pid du worker, lu dans son descripteur.
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket_path);
+    let worker_pid = std::fs::read_dir(&descriptor_dir)
+        .expect("descriptor dir")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(|descriptor| descriptor["ownerClientId"].is_string())
+        .find_map(|descriptor| descriptor["pid"].as_u64())
+        .expect("client-owned worker descriptor with a pid");
+    let alive = |pid: u64| {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    assert!(alive(worker_pid), "worker {worker_pid} runs");
+
+    // Coupure de la connexion, sans Kill.
+    client.hard_close();
+    drop(client);
+    drop(events);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(
+        alive(worker_pid),
+        "client-owned worker {worker_pid} still runs after its client disconnected"
+    );
+
+    // Nettoyage : un nouveau client du même processus (même clientId) tue la
+    // session puis arrête le daemon.
+    let (cleanup, _events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon still up");
+    cleanup
+        .request_ok(DaemonCommand::Kill {
+            id: None,
+            active_session_id: session,
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("owned session killed by its owner id");
+    let _ = cleanup
+        .request_ok(DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    cleanup.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
