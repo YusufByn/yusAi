@@ -199,7 +199,14 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   ne charge qu'au commit 11), puis une puce par leçon
   (`[projet · fait] Titre : contenu`, 300 caractères au plus), 4 000 au
   total, et une puce qui compte les leçons restées dehors. Figé au
-  `Create` : une leçon nouvelle n'arrive qu'à la réouverture du fil.
+  `Create` : une leçon nouvelle n'arrive qu'à la réouverture du fil. Bouton
+  « Remember » (« Retenir », en-tête du chat Prime, commande `prime_retain`) :
+  refine locale par la file, instructions facultatives, résumé dans
+  l'en-tête ; désactivé pendant un tour. L'historique des leçons note
+  l'auteur `refine:retain` ; pendant une refine de la file, le relais
+  n'importe rien pour la session (`refine_in_flight`), la file importe la
+  sienne puis rattrape les autres. Vérifié dans un banc d'essai navigateur
+  (IPC simulé), pas encore dans l'app.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
@@ -362,6 +369,11 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   moteur faux). Si le lien direct est refusé, repli par le superviseur puis
   relecture du fil (`GetMessages`) jusqu'à la nouvelle ligne
   `refinement_outcome`, dans la limite de 10 min.
+  Refine et tour se chevauchent sans s'attendre, dans les deux sens (test
+  e2e `a_refine_and_a_turn_can_overlap`) : un prompt envoyé pendant une
+  refine est admis et son tour se joue aussitôt ; une refine lancée pendant
+  un tour part tout de suite. Le planificateur ne voit que le fil d'avant
+  son départ ; aucune ligne ne se perd.
   Une refine d'une autre conversation peut voir nos `yl_…` amorcés : son
   import ignore les edits sur des leçons qui ne s'appliquent pas à sa
   conversation (`LessonTarget::Elsewhere`).

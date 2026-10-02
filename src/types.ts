@@ -866,6 +866,20 @@ export type PrimeOpenedSession = {
   messages: unknown[];
 };
 
+// Ce qu'une refine a fait dans le magasin des leçons (prime_lessons.rs,
+// ImportReport) : ids des leçons et propositions, edits écartées.
+export type PrimeImportReport = {
+  refinementId: string;
+  created: string[];
+  duplicates: string[];
+  updated: string[];
+  archived: string[];
+  proposals: string[];
+  skipped: string[];
+  failed: string[];
+  removedEntries: number;
+};
+
 export type PrimeSessionConfig = {
   model: PrimeModelOption | null;
   thinkingLevel: string | null;

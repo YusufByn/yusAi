@@ -8,8 +8,11 @@
 //!    du projet, global), pour que le planificateur de Prime puisse les
 //!    modifier ou les supprimer ;
 //! 3. envoyer `Refine` au worker, sur une connexion à part ;
-//! 4. importer la refine dans le magasin (une seule fois par
-//!    `refinementId` : le relais a pu le faire avant nous) ;
+//! 4. importer la refine dans le magasin, avec son déclencheur
+//!    ([`RefineOrigin`]) comme auteur dans l'historique des leçons. Pendant
+//!    la refine, le relais n'importe rien pour cette session
+//!    ([`refine_in_flight`]) : la file importe la sienne puis rattrape les
+//!    autres lignes `refinement_outcome` du fil ;
 //! 5. retirer nos entrées `yl_…` du harness, même si la refine a échoué ;
 //! 6. noter la refine faite (`mark_refined`) si elle a réussi. Un échec
 //!    ne touche pas l'état de refine de la conversation : c'est à
@@ -42,9 +45,61 @@ use serde_json::Value;
 use sinew_app::store::AppStore;
 
 use crate::prime_lessons::{
-    import_refinement_outcome, refinement_outcome_details, seed_thread_lessons,
-    unseed_thread_lessons, ImportReport, ThreadContext,
+    import_refinement_outcome, import_refinement_outcome_as, refinement_outcome_details,
+    seed_thread_lessons, unseed_thread_lessons, ImportReport, ThreadContext,
 };
+
+/// Ce qui a lancé une refine de la file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefineOrigin {
+    /// Le bouton « Retenir ».
+    Retain,
+}
+
+impl RefineOrigin {
+    /// L'auteur noté dans l'historique des leçons.
+    pub fn actor(self) -> &'static str {
+        match self {
+            Self::Retain => "refine:retain",
+        }
+    }
+}
+
+/// Les sessions dont la file fait une refine en ce moment.
+static IN_FLIGHT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Vrai pendant qu'une refine de la file tourne pour cette session : le
+/// relais laisse alors l'import à la file, qui connaît le déclencheur.
+pub fn refine_in_flight(active_session_id: &str) -> bool {
+    IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|id| id == active_session_id)
+}
+
+struct InFlight(String);
+
+impl InFlight {
+    fn start(active_session_id: &str) -> Self {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(active_session_id.to_string());
+        Self(active_session_id.to_string())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut sessions = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = sessions.iter().position(|id| *id == self.0) {
+            sessions.remove(index);
+        }
+    }
+}
 
 /// Ce qu'une refine de la file a donné.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,9 +128,11 @@ pub async fn run_refine(
     agent_dir: PathBuf,
     active_session_id: &str,
     thread: ThreadContext,
+    origin: RefineOrigin,
     instructions: Option<String>,
 ) -> Result<RefineRun> {
     let _turn = REFINE_QUEUE.lock().await;
+    let _in_flight = InFlight::start(active_session_id);
 
     let seeded = {
         let (store, agent_dir, thread) = (store.clone(), agent_dir.clone(), thread.clone());
@@ -94,6 +151,7 @@ pub async fn run_refine(
         &agent_dir,
         active_session_id,
         &thread,
+        origin,
         instructions,
     )
     .await;
@@ -119,6 +177,7 @@ async fn refine_and_import(
     agent_dir: &Path,
     active_session_id: &str,
     thread: &ThreadContext,
+    origin: RefineOrigin,
     instructions: Option<String>,
 ) -> Result<(String, Option<ImportReport>)> {
     // Une connexion à part : le lien direct ne sert qu'à cette session, et
@@ -130,11 +189,46 @@ async fn refine_and_import(
         agent_dir,
         active_session_id,
         thread,
+        origin,
         instructions,
     )
     .await;
+    if refined.is_ok() {
+        catch_up_other_outcomes(&client, store, agent_dir, active_session_id, thread).await;
+    }
     client.close();
     refined
+}
+
+/// Les autres lignes `refinement_outcome` du fil que le relais a laissées
+/// pendant la refine (auto-refine de Prime, `refine.run()` du modèle).
+async fn catch_up_other_outcomes(
+    client: &DaemonClient,
+    store: &AppStore,
+    agent_dir: &Path,
+    active_session_id: &str,
+    thread: &ThreadContext,
+) {
+    let outcomes = match thread_outcomes(client, active_session_id).await {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            tracing::warn!(error = %error, "prime refines of the thread not caught up");
+            return;
+        }
+    };
+    let (store, agent_dir, thread) = (store.clone(), agent_dir.to_path_buf(), thread.clone());
+    let caught_up = blocking(move || {
+        for details in &outcomes {
+            if let Err(error) = import_refinement_outcome(&store, &agent_dir, &thread, details) {
+                tracing::warn!(error = %error, "prime refine import failed");
+            }
+        }
+        Ok(())
+    })
+    .await;
+    if let Err(error) = caught_up {
+        tracing::warn!(error = %error, "prime refines of the thread not caught up");
+    }
 }
 
 async fn refine_on(
@@ -143,6 +237,7 @@ async fn refine_on(
     agent_dir: &Path,
     active_session_id: &str,
     thread: &ThreadContext,
+    origin: RefineOrigin,
     instructions: Option<String>,
 ) -> Result<(String, Option<ImportReport>)> {
     let direct = client
@@ -187,8 +282,10 @@ async fn refine_on(
         .to_string();
 
     let (store, agent_dir, thread) = (store.clone(), agent_dir.to_path_buf(), thread.clone());
-    let report =
-        blocking(move || import_refinement_outcome(&store, &agent_dir, &thread, &details)).await?;
+    let report = blocking(move || {
+        import_refinement_outcome_as(&store, &agent_dir, &thread, &details, origin.actor())
+    })
+    .await?;
     Ok((refinement_id, report))
 }
 

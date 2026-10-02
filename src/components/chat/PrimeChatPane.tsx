@@ -20,7 +20,12 @@ import {
 } from "../../lib/primeHistory";
 import { primeToolTitle } from "../../lib/primeToolTitle";
 import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
-import type { PrimeEventPayload, PrimeModelOption, PrimeSessionConfig } from "../../types";
+import type {
+  PrimeEventPayload,
+  PrimeImportReport,
+  PrimeModelOption,
+  PrimeSessionConfig,
+} from "../../types";
 import { AIThinkingBlock } from "./AIThinkingBlock";
 import { Markdown } from "./Markdown";
 import { AiAgentGlyph, ToolCard, type ToolOutputLimit } from "./ToolCard";
@@ -520,6 +525,34 @@ export function PrimeChatPane({
     }
   }, [pushMessage]);
 
+  // "Remember" (« Retenir ») : a local refine of the conversation now,
+  // imported as yusAi lessons (prime_session.rs, prime_retain).
+  const [retaining, setRetaining] = useState(false);
+  const [retainNote, setRetainNote] = useState<string | null>(null);
+  const retain = useCallback(
+    async (instructions: string) => {
+      setRetaining(true);
+      setRetainNote(null);
+      try {
+        const sessionId = await ensureSession();
+        const report = await api.primeRetain(sessionId, instructions.trim() || null);
+        setRetainNote(retainSummary(report));
+      } catch (err) {
+        setRetainNote("Remember failed");
+        pushMessage("error", String(err));
+      } finally {
+        setRetaining(false);
+      }
+    },
+    [ensureSession, pushMessage],
+  );
+  // The summary stays a few seconds in the header.
+  useEffect(() => {
+    if (!retainNote) return;
+    const timer = window.setTimeout(() => setRetainNote(null), RETAIN_NOTE_MS);
+    return () => window.clearTimeout(timer);
+  }, [retainNote]);
+
   const busy = status !== "idle";
   const pickersDisabled = busy || configBusy || !config;
 
@@ -536,6 +569,12 @@ export function PrimeChatPane({
           <span>Prime</span>
         </span>
         {headerExtra}
+        <RetainButton
+          running={retaining}
+          disabled={busy || retaining || messages.length === 0}
+          note={retainNote}
+          onRetain={(instructions) => void retain(instructions)}
+        />
         <span className="chat-head__dot" data-status={busy ? "streaming" : "idle"} />
       </div>
       <div className="chat-body" ref={bodyRef}>
@@ -712,6 +751,106 @@ function modelLabel(model: PrimeModelOption): string {
 
 function thinkingLevelLabel(level: string): string {
   return THINKING_LEVELS.find((entry) => entry.value === level)?.label ?? level;
+}
+
+// How long the result of "Remember" stays in the header.
+const RETAIN_NOTE_MS = 8000;
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+// "2 lessons created · 1 updated · 1 proposal", or "Nothing new".
+function retainSummary(report: PrimeImportReport): string {
+  const parts = [];
+  if (report.created.length) parts.push(`${plural(report.created.length, "lesson")} created`);
+  if (report.updated.length) parts.push(`${report.updated.length} updated`);
+  if (report.archived.length) parts.push(`${report.archived.length} archived`);
+  if (report.proposals.length) parts.push(plural(report.proposals.length, "proposal"));
+  if (report.failed.length) parts.push(`${report.failed.length} failed`);
+  return parts.length ? parts.join(" · ") : "Nothing new";
+}
+
+// The header's "Remember" button: a popover with optional instructions
+// ("focus on…"), closed by an outside click or Escape, like ComposerPicker.
+function RetainButton({
+  running,
+  disabled,
+  note,
+  onRetain,
+}: {
+  running: boolean;
+  disabled: boolean;
+  note: string | null;
+  onRetain: (instructions: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [instructions, setInstructions] = useState("");
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const submit = () => {
+    setOpen(false);
+    onRetain(instructions);
+    setInstructions("");
+  };
+
+  return (
+    <div className="prime-retain" ref={ref}>
+      {note && !running && <span className="prime-retain__note">{note}</span>}
+      <button
+        type="button"
+        className="prime-retain__btn"
+        data-running={running ? "true" : "false"}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        title={
+          running
+            ? "Remembering…"
+            : "Turn what this conversation taught into lessons for the project"
+        }
+      >
+        <Icon icon="solar:bookmark-linear" width={13} height={13} />
+        <span>{running ? "Remembering…" : "Remember"}</span>
+      </button>
+      {open && !disabled && (
+        <div className="prime-retain__popover" role="dialog" aria-label="Remember">
+          <textarea
+            className="prime-retain__input"
+            rows={3}
+            autoFocus
+            placeholder="Focus on… (optional)"
+            value={instructions}
+            onChange={(event) => setInstructions(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                submit();
+              }
+            }}
+          />
+          <button type="button" className="prime-retain__submit" onClick={submit}>
+            Remember
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 type PickerOption = { key: string; label: string; icon?: string };

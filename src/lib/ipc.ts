@@ -31,6 +31,7 @@ import type {
   OpenRouterModelSearchResult,
   OpenRouterProviderStatus,
   PlanControl,
+  PrimeImportReport,
   PrimeOpenedSession,
   PrimeSubAgent,
   PrimeSessionConfig,
@@ -758,6 +759,11 @@ export const api = {
   },
   primePrompt(activeSessionId: string, message: string) {
     return invoke<void>("prime_prompt", { activeSessionId, message });
+  },
+  // Bouton « Retenir » : refine locale de la conversation, importée en
+  // leçons yusAi ; `instructions` facultatives (« retiens surtout X »).
+  primeRetain(activeSessionId: string, instructions: string | null) {
+    return invoke<PrimeImportReport>("prime_retain", { activeSessionId, instructions });
   },
   primeAbort(activeSessionId: string) {
     return invoke<void>("prime_abort", { activeSessionId });

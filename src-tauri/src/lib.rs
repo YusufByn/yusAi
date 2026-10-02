@@ -403,6 +403,7 @@ pub fn run() {
             updater::updater_current_version,
             prime_session::prime_create_session,
             prime_session::prime_prompt,
+            prime_session::prime_retain,
             prime_session::prime_abort,
             prime_session::prime_close_session,
             prime_session::prime_rlm_children,

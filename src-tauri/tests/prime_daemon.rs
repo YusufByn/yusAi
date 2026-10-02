@@ -1601,15 +1601,24 @@ async fn model_global_harness_writes_become_proposed_project_lessons() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// La file des refines est commune au processus : les tests qui lancent
+/// des refines (et mesurent leur durée) passent l'un après l'autre.
+static REFINE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Un fil scripté prêt pour des refines : daemon lancé, premier tour fini
-/// (première réponse du script), événements vidés en tâche de fond (le
-/// relais de l'app n'existe pas ici : la file importe elle-même).
+/// (première réponse du script), puis les réponses données, dans l'ordre
+/// des appels au modèle (planificateur de refine ou tour). Le relais de
+/// l'app n'existe pas ici : la file importe elle-même.
 #[cfg(unix)]
-async fn scripted_thread(
+async fn scripted_thread_with_events(
     root: &std::path::Path,
     workspace: &std::path::Path,
     refine_plans: &[(serde_json::Value, u64)],
-) -> (pa_tui::daemon_client::DaemonClient, String) {
+) -> (
+    pa_tui::daemon_client::DaemonClient,
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<pa_tui::daemon_client::DaemonClientEvent>,
+) {
     use pa_tui::daemon_client::DaemonClientEvent;
     use sinew_desktop_lib::prime_session::{open_thread, prompt, thread_path};
 
@@ -1652,6 +1661,18 @@ async fn scripted_thread(
     })
     .await;
     assert!(turn.is_ok(), "turn ended");
+    (client, session, events)
+}
+
+/// [`scripted_thread_with_events`], événements vidés en tâche de fond.
+#[cfg(unix)]
+async fn scripted_thread(
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    responses: &[(serde_json::Value, u64)],
+) -> (pa_tui::daemon_client::DaemonClient, String) {
+    let (client, session, mut events) =
+        scripted_thread_with_events(root, workspace, responses).await;
     tokio::spawn(async move { while events.recv().await.is_some() {} });
     (client, session)
 }
@@ -1696,12 +1717,13 @@ async fn stop_scripted_thread(
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
+    let _alone = REFINE_TESTS.lock().await;
     use sinew_app::store::{
         AppStore, InsertLessonOutcome, LessonKind, LessonLevel, LessonOrigin, LessonScope,
         NewLesson, ProposalKind,
     };
     use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
-    use sinew_desktop_lib::prime_refine::run_refine;
+    use sinew_desktop_lib::prime_refine::{run_refine, RefineOrigin};
 
     let root = scratch_dir();
     let agent_dir = root.join("agent");
@@ -1784,6 +1806,7 @@ async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
             agent_dir.clone(),
             &session,
             thread.clone(),
+            RefineOrigin::Retain,
             None
         ),
         async {
@@ -1794,6 +1817,7 @@ async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
                 agent_dir.clone(),
                 &session,
                 thread.clone(),
+                RefineOrigin::Retain,
                 None,
             )
             .await
@@ -1871,9 +1895,10 @@ fn project_lesson(store: &sinew_app::store::AppStore, workspace: &std::path::Pat
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn refines_longer_than_the_supervisor_route_get_their_answer() {
+    let _alone = REFINE_TESTS.lock().await;
     use sinew_app::store::{AppStore, LessonScope};
     use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
-    use sinew_desktop_lib::prime_refine::run_refine;
+    use sinew_desktop_lib::prime_refine::{run_refine, RefineOrigin};
 
     let root = scratch_dir();
     let agent_dir = root.join("agent");
@@ -1905,6 +1930,7 @@ async fn refines_longer_than_the_supervisor_route_get_their_answer() {
             agent_dir.clone(),
             &session,
             thread.clone(),
+            RefineOrigin::Retain,
             None,
         )
     };
@@ -1934,10 +1960,9 @@ async fn refines_longer_than_the_supervisor_route_get_their_answer() {
     let started = std::time::Instant::now();
     let error = refine().await.expect_err("an unreadable plan fails");
     let elapsed = started.elapsed();
-    // Borne large : la file est commune aux tests du processus.
     assert!(
         elapsed >= std::time::Duration::from_secs(31)
-            && elapsed < std::time::Duration::from_secs(120),
+            && elapsed < std::time::Duration::from_secs(60),
         "the failure arrives with the refine, not at the 10 min limit: {elapsed:?}"
     );
     assert!(
@@ -1958,9 +1983,10 @@ async fn refines_longer_than_the_supervisor_route_get_their_answer() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_worker_killed_during_a_refine_frees_the_queue_at_once() {
+    let _alone = REFINE_TESTS.lock().await;
     use sinew_app::store::AppStore;
     use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
-    use sinew_desktop_lib::prime_refine::run_refine;
+    use sinew_desktop_lib::prime_refine::{run_refine, RefineOrigin};
 
     let root = scratch_dir();
     let agent_dir = root.join("agent");
@@ -2001,13 +2027,22 @@ async fn a_worker_killed_during_a_refine_frees_the_queue_at_once() {
             agent_dir.clone(),
             session.clone(),
         );
-        async move { run_refine(&socket_path, store, agent_dir, &session, thread, None).await }
+        async move {
+            run_refine(
+                &socket_path,
+                store,
+                agent_dir,
+                &session,
+                thread,
+                RefineOrigin::Retain,
+                None,
+            )
+            .await
+        }
     });
-    // La refine est partie : nos leçons sont dans le harness. La file est
-    // commune au processus : elle peut d'abord attendre les refines des
-    // autres tests.
+    // La refine est partie : nos leçons sont dans le harness.
     let mut seeded = false;
-    for _ in 0..4_000 {
+    for _ in 0..100 {
         if !harness_entry_ids(&local_file, "memory").is_empty() {
             seeded = true;
             break;
@@ -2167,6 +2202,216 @@ async fn lessons_reach_the_system_prompt_when_a_thread_opens() {
         .await;
     client.close();
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Une refine et un tour qui se chevauchent, dans les deux sens : un
+/// prompt envoyé pendant une refine (« Retenir » est actif hors tour, mais
+/// un tour peut partir pendant la refine), et une refine lancée pendant un
+/// tour. La refine « Retenir » est notée `refine:retain` dans l'historique.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refine_and_a_turn_can_overlap() {
+    let _alone = REFINE_TESTS.lock().await;
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::{AppStore, LessonScope};
+    use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
+    use sinew_desktop_lib::prime_refine::{run_refine, RefineOrigin};
+    use sinew_desktop_lib::prime_session::prompt;
+    use std::time::{Duration, Instant};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    project_lesson(&store, &workspace);
+    let plan = |id: &str, content: &str| {
+        serde_json::json!({
+            "summary": id,
+            "rationale": "trajectory evidence",
+            "expectedOutcome": "reused",
+            "edits": [{ "action": "create", "kind": "memory", "id": id,
+                        "title": "Chevauchement", "content": content }],
+        })
+    };
+    // Ordre des appels au modèle : planificateur (lent), tour envoyé
+    // pendant la refine, tour lent, planificateur lancé pendant ce tour.
+    let (client, session, mut events) = scripted_thread_with_events(
+        &root,
+        &workspace,
+        &[
+            (
+                plan("pendant-refine", "Leçon d'une refine doublée d'un tour."),
+                4_000,
+            ),
+            (serde_json::json!("réponse pendant la refine"), 0),
+            (serde_json::json!("réponse lente"), 4_000),
+            (
+                plan("pendant-tour", "Leçon d'une refine lancée pendant un tour."),
+                0,
+            ),
+        ],
+    )
+    .await;
+    let turn_ends = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Instant>::new()));
+    let recorder = {
+        let turn_ends = turn_ends.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                    if event["type"] == "agent_end" {
+                        turn_ends.lock().unwrap().push(Instant::now());
+                    }
+                }
+            }
+        })
+    };
+    let wait_turn_ends = |count: usize| {
+        let turn_ends = turn_ends.clone();
+        async move {
+            for _ in 0..300 {
+                if turn_ends.lock().unwrap().len() >= count {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        }
+    };
+    let socket_path = root.join("daemon.sock");
+    let thread = ThreadContext {
+        conversation_id: "conv-queue".to_string(),
+        workspace_id: workspace.to_string_lossy().into_owned(),
+    };
+    let refine = |thread: ThreadContext| {
+        let (socket_path, store, agent_dir, session) = (
+            socket_path.clone(),
+            store.clone(),
+            agent_dir.clone(),
+            session.clone(),
+        );
+        tokio::spawn(async move {
+            let run = run_refine(
+                &socket_path,
+                store,
+                agent_dir,
+                &session,
+                thread,
+                RefineOrigin::Retain,
+                Some("Retiens surtout les chevauchements.".to_string()),
+            )
+            .await;
+            (run, Instant::now())
+        })
+    };
+    let local_file = refine_harness_file(&agent_dir, false);
+
+    // 1. Un prompt pendant la refine : admis, et son tour se joue pendant
+    // que le planificateur attend.
+    let started = refine(thread.clone());
+    let mut seeded = false;
+    for _ in 0..100 {
+        if !harness_entry_ids(&local_file, "memory").is_empty() {
+            seeded = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(seeded, "lessons seeded");
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    prompt(&client, &session, "un tour pendant la refine")
+        .await
+        .expect("a prompt during a refine is admitted");
+    assert!(wait_turn_ends(1).await, "the turn ends");
+    let (run, refined_at) = started.await.unwrap();
+    let run = run.expect("the refine ends too");
+    let turn_end = turn_ends.lock().unwrap()[0];
+    eprintln!(
+        "prompt during refine: turn ended {:?} the refine",
+        if turn_end < refined_at {
+            "before"
+        } else {
+            "after"
+        }
+    );
+    assert!(
+        turn_end < refined_at,
+        "the turn does not wait for the refine"
+    );
+    let report = run.report.expect("imported by the queue");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    let events = store.lesson_events(&report.created[0]).unwrap();
+    assert_eq!(events[0].actor, "refine:retain");
+    assert_eq!(events[0].conversation_id.as_deref(), Some("conv-queue"));
+
+    // 2. Une refine pendant un tour : elle tourne aussi.
+    prompt(&client, &session, "un tour lent")
+        .await
+        .expect("prompt admitted");
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let started_at = Instant::now();
+    let (run, refined_at) = refine(thread.clone()).await.unwrap();
+    let run = run.expect("a refine during a turn runs");
+    assert!(wait_turn_ends(2).await, "the slow turn ends");
+    let turn_end = turn_ends.lock().unwrap()[1];
+    eprintln!(
+        "refine during turn: refine took {:?}, ended {:?} the turn",
+        refined_at - started_at,
+        if refined_at < turn_end {
+            "before"
+        } else {
+            "after"
+        }
+    );
+    assert!(
+        refined_at < turn_end,
+        "the refine does not wait for the turn"
+    );
+    let report = run.report.expect("imported by the queue");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    let scope = LessonScope {
+        workspace_id: thread.workspace_id.clone(),
+        project_type: None,
+    };
+    assert_eq!(store.applicable_lessons(&scope).unwrap().len(), 3);
+    assert!(harness_entry_ids(&local_file, "memory").is_empty());
+    let mut contents: Vec<String> = store
+        .applicable_lessons(&scope)
+        .unwrap()
+        .into_iter()
+        .map(|lesson| lesson.content)
+        .collect();
+    contents.sort();
+    assert_eq!(
+        contents,
+        vec![
+            "Lancer cargo test.",
+            "Leçon d'une refine doublée d'un tour.",
+            "Leçon d'une refine lancée pendant un tour.",
+        ]
+    );
+
+    // Rien ne se perd dans le fil : les deux réponses et les deux refines.
+    let messages = client
+        .request_ok(pa_types::daemon::DaemonCommand::GetMessages {
+            id: None,
+            active_session_id: session.clone(),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("get_messages")["messages"]
+        .to_string();
+    assert!(messages.contains("réponse pendant la refine"));
+    assert!(messages.contains("réponse lente"));
+    assert_eq!(
+        messages
+            .matches("\"customType\":\"refinement_outcome\"")
+            .count(),
+        2
+    );
+
+    recorder.abort();
+    stop_scripted_thread(client, &session, &root).await;
 }
 
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).

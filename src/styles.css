@@ -6349,6 +6349,85 @@ textarea {
   font-size: var(--fs-sm);
   padding: 4px 0;
 }
+/* "Remember" in the Prime chat header (PrimeChatPane, RetainButton). */
+.prime-retain {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* The engine toggle pushes itself, this button and the dot to the right;
+   without it, the button does. */
+.chat-head__title + .prime-retain {
+  margin-left: auto;
+}
+.prime-retain + .chat-head__dot {
+  margin-left: 0;
+}
+.prime-retain__note {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.prime-retain__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: var(--r-med);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  transition: background 150ms ease, color 150ms ease;
+}
+.prime-retain__btn:hover:not(:disabled) {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+.prime-retain__btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.prime-retain__btn[data-running="true"] {
+  opacity: 1;
+  color: var(--text-1);
+  animation: pulse 1.4s infinite ease-in-out;
+}
+.prime-retain__popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 260px;
+  background: var(--bg-3);
+  border-radius: var(--r-card);
+  padding: 6px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.prime-retain__input {
+  resize: none;
+  background: var(--bg-2);
+  border-radius: var(--r-small);
+  padding: 6px 8px;
+  color: var(--text-0);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+}
+.prime-retain__submit {
+  align-self: flex-end;
+  padding: 3px 10px;
+  border-radius: var(--r-med);
+  background: var(--bg-4);
+  color: var(--text-0);
+  font-size: var(--fs-xs);
+}
+.prime-retain__submit:hover {
+  background: var(--bg-5);
+}
 
 .chat-head__dot {
   width: 6px;

@@ -32,7 +32,7 @@ use crate::prime_diffs::PrimeDiffs;
 use crate::prime_guidance::{with_guidance, Guidance};
 use crate::prime_lessons::{
     import_global_harness_writes, import_refinement_outcome, import_thread_outcomes,
-    refinement_outcome_details, ThreadContext,
+    refinement_outcome_details, ImportReport, ThreadContext,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, watch, Mutex};
 
@@ -922,6 +922,11 @@ fn import_live_refinement(
     let Some(thread) = state.thread(active_session_id) else {
         return;
     };
+    // La file importe elle-même la refine qu'elle a lancée, avec son
+    // déclencheur, puis rattrape les autres.
+    if crate::prime_refine::refine_in_flight(active_session_id) {
+        return;
+    }
     let Some(store) = app
         .try_state::<crate::DesktopState>()
         .map(|desktop| desktop.store.clone())
@@ -1064,6 +1069,45 @@ pub async fn prime_create_session(
         Err(error) => tracing::warn!(error = %error, "prime tool diffs disabled for this session"),
     }
     Ok(opened)
+}
+
+/// Bouton « Retenir » : une refine locale de la conversation, tout de suite
+/// (à son tour dans la file des refines), avec les `instructions` facultatives
+/// de l'utilisateur. Renvoie ce que l'import a fait dans le magasin.
+#[tauri::command]
+pub async fn prime_retain(
+    app: AppHandle,
+    state: State<'_, PrimeState>,
+    active_session_id: String,
+    instructions: Option<String>,
+) -> Result<ImportReport, String> {
+    let thread = state
+        .thread(&active_session_id)
+        .ok_or_else(|| format!("unknown prime session: {active_session_id}"))?;
+    let store = app
+        .try_state::<crate::DesktopState>()
+        .map(|desktop| desktop.store.clone())
+        .ok_or_else(|| "app store unavailable".to_string())?;
+    // Le daemon tourne (le relancer au besoin) avant la connexion de la file.
+    connected_client(&app, &state).await.map_err(error_text)?;
+    let instructions = instructions
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    let run = crate::prime_refine::run_refine(
+        &crate::prime::daemon_socket_path(),
+        store,
+        crate::prime::agent_dir(),
+        &active_session_id,
+        thread,
+        crate::prime_refine::RefineOrigin::Retain,
+        instructions,
+    )
+    .await
+    .map_err(error_text)?;
+    Ok(run.report.unwrap_or_else(|| ImportReport {
+        refinement_id: run.refinement_id,
+        ..ImportReport::default()
+    }))
 }
 
 #[tauri::command]

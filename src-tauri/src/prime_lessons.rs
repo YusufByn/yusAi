@@ -308,11 +308,30 @@ static IMPORT_LOCK: Mutex<()> = Mutex::new(());
 /// relirait). Une création qui échoue garde son entrée dans le fichier ;
 /// chaque échec est noté avec la refine. Les erreurs du retrait ne font pas
 /// échouer l'import.
+///
+/// L'historique des leçons note `refine` comme auteur (déclencheur inconnu :
+/// auto-refine de Prime, `refine.run()` du modèle, refine rattrapée), ou
+/// `refine:global` pour une refine globale.
 pub fn import_refinement_outcome(
     store: &AppStore,
     agent_dir: &Path,
     thread: &ThreadContext,
     details: &Value,
+) -> Result<Option<ImportReport>> {
+    import_refinement_outcome_as(store, agent_dir, thread, details, REFINE_ACTOR)
+}
+
+/// Auteur des refines dont on ne connaît pas le déclencheur.
+pub const REFINE_ACTOR: &str = "refine";
+
+/// [`import_refinement_outcome`] pour une refine locale dont on connaît le
+/// déclencheur (`refine:retain`…), noté comme auteur dans l'historique.
+pub fn import_refinement_outcome_as(
+    store: &AppStore,
+    agent_dir: &Path,
+    thread: &ThreadContext,
+    details: &Value,
+    actor: &str,
 ) -> Result<Option<ImportReport>> {
     let _guard = IMPORT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let refinement_id = details
@@ -331,7 +350,7 @@ pub fn import_refinement_outcome(
     })?;
     let global = details.get("scope").and_then(Value::as_str) == Some("global");
     let origin = LessonOrigin {
-        actor: if global { "refine:global" } else { "refine" }.to_string(),
+        actor: if global { "refine:global" } else { actor }.to_string(),
         conversation_id: Some(thread.conversation_id.clone()),
         refinement_id: Some(import.refinement_id.clone()),
     };
@@ -1658,6 +1677,33 @@ mod tests {
             1,
             "the archived lesson comes back: {report:?}"
         );
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn the_trigger_of_a_refine_is_kept_in_the_lesson_history() {
+        let (store, agent_dir) = import_fixture(&[]);
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        let actor_of = |details: &Value, actor: &str| {
+            let report = import_refinement_outcome_as(&store, &agent_dir, &thread, details, actor)
+                .unwrap()
+                .unwrap();
+            store.lesson_events(&report.created[0]).unwrap()[0]
+                .actor
+                .clone()
+        };
+        let retained = outcome(vec![create_edit("memory", "a", "Lancer cargo test.")]);
+        assert_eq!(actor_of(&retained, "refine:retain"), "refine:retain");
+        let mut caught_up = outcome(vec![create_edit("memory", "b", "Relire le diff.")]);
+        caught_up["refinementId"] = json!("refine_2");
+        assert_eq!(actor_of(&caught_up, REFINE_ACTOR), "refine");
+        let mut global = outcome(vec![create_edit("memory", "c", "Répondre en français.")]);
+        global["refinementId"] = json!("refine_3");
+        global["scope"] = json!("global");
+        assert_eq!(actor_of(&global, "refine:retain"), "refine:global");
         let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }
 }
