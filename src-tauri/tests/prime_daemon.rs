@@ -322,6 +322,180 @@ async fn tool_calls_reach_the_client() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Fichiers modifiés par un appel d'outil : photo de référence à chaque
+/// `agent_start`, comparaison à chaque `tool_execution_end`. Le test joue
+/// l'outil en écrivant le fichier pendant la pause scriptée entre le début
+/// et la fin de l'appel. Une modification faite à la main entre deux tours
+/// n'est pas attribuée à l'appel du tour suivant. La racine photographiée
+/// est le dossier de travail de la session, relu auprès du worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_file_changes_follow_each_turn() {
+    use std::sync::Arc;
+
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::tool_run::{FileChange, FileChangeKind};
+    use sinew_desktop_lib::prime_diffs::PrimeDiffs;
+    use sinew_desktop_lib::prime_session::{create_session, kill_session, prompt, session_cwd};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("a.txt"), "one\n").unwrap();
+    std::fs::write(workspace.join("b.txt"), "hand\n").unwrap();
+    let tool_call = |id: &str| {
+        serde_json::json!({
+            "toolCallId": id,
+            "toolName": "ipython",
+            "args": { "code": "await edit(path='a.txt', old_str=old, new_str=new)" },
+            "result": "Edited a.txt",
+            "delayMs": 1500,
+        })
+    };
+    let script = root.join("scripted.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "responses": [
+                { "text": "tour 1", "toolCalls": [tool_call("call-1")] },
+                { "text": "tour 2", "toolCalls": [tool_call("call-2")] },
+            ],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let session = create_session(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        }),
+    )
+    .await
+    .expect("session created and attached");
+
+    let cwd = session_cwd(&client, &session).await.expect("session cwd");
+    assert_eq!(
+        cwd, workspace,
+        "snapshot root is the session's working directory"
+    );
+    assert_ne!(Some(cwd.clone()), std::env::current_dir().ok());
+
+    let (changes_tx, mut changes_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Vec<FileChange>)>();
+    let mut diffs = PrimeDiffs::default();
+    diffs.track(
+        &session,
+        cwd,
+        Arc::new(move |tool_call_id, changes| {
+            let _ = changes_tx.send((tool_call_id, changes));
+        }),
+    );
+
+    let mut next_content = ["one\ntwo\n", "one\ntwo\nthree\n"].into_iter();
+    let mut seen_types = Vec::new();
+    for turn in 0..2 {
+        if turn == 1 {
+            // Modification à la main entre les deux tours.
+            std::fs::write(workspace.join("b.txt"), "hand edited\n").unwrap();
+        }
+        prompt(&client, &session, "vas-y")
+            .await
+            .expect("prompt admitted");
+        let collected = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while let Some(event) = events.recv().await {
+                let DaemonClientEvent::SessionEvent {
+                    active_session_id,
+                    event,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                diffs.observe(&active_session_id, &event);
+                let kind = event["type"].as_str().unwrap_or_default().to_string();
+                match kind.as_str() {
+                    // La référence est prise avant que « l'outil » n'écrive.
+                    "agent_start" => diffs.flush(&session).await,
+                    "tool_execution_start" => {
+                        std::fs::write(workspace.join("a.txt"), next_content.next().unwrap())
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                let done = kind == "agent_end";
+                seen_types.push(kind);
+                if done {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            collected.is_ok(),
+            "turn {turn} ended; events seen: {seen_types:?}"
+        );
+    }
+    diffs.flush(&session).await;
+
+    let mut reported = Vec::new();
+    while let Ok(entry) = changes_rx.try_recv() {
+        reported.push(entry);
+    }
+    let summary: Vec<_> = reported
+        .iter()
+        .map(|(tool_call_id, changes)| {
+            (
+                tool_call_id.as_str(),
+                changes
+                    .iter()
+                    .map(|change| {
+                        (
+                            change.relative_path.as_str(),
+                            matches!(change.kind, FileChangeKind::Modified),
+                            change.added_lines,
+                            change.removed_lines,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("call-1", vec![("a.txt", true, 1, 0)]),
+            ("call-2", vec![("a.txt", true, 1, 0)]),
+        ],
+        "events seen: {seen_types:?}"
+    );
+
+    kill_session(&client, &session)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cycle `ClientOwned` (pa-daemon/src/supervisor/sessions.rs:621-638) : une
 /// déconnexion sans `Kill` ne fait qu'un `detach`
 /// (pa-daemon/src/supervisor/clients.rs:354-373) et le worker continue de

@@ -16,8 +16,8 @@
 //!   ouverte.
 
 use std::collections::HashSet;
-use std::path::Path;
-use std::sync::Mutex as StdMutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -25,17 +25,22 @@ use pa_tui::daemon_client::{DaemonClient, DaemonClientEvent};
 use pa_types::daemon::{DaemonCommand, PromptInput, StreamingBehavior};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use sinew_app::tool_run::FileChange;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::prime_diffs::PrimeDiffs;
 use tokio::sync::{mpsc::UnboundedReceiver, watch, Mutex};
 
 pub const PRIME_EVENT_NAME: &str = "prime-event";
 
 /// Client du daemon partagé par toutes les fenêtres, connecté à la demande,
-/// et sessions créées par ce processus (tuées à la sortie).
+/// sessions créées par ce processus (tuées à la sortie) et fichiers
+/// modifiés par leurs appels d'outils.
 #[derive(Default)]
 pub struct PrimeState {
     client: Mutex<Option<DaemonClient>>,
     sessions: StdMutex<HashSet<String>>,
+    diffs: StdMutex<PrimeDiffs>,
 }
 
 impl PrimeState {
@@ -48,6 +53,13 @@ impl PrimeState {
     fn untrack(&self, active_session_id: &str) {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.remove(active_session_id);
+        }
+        self.with_diffs(|diffs| diffs.forget(active_session_id));
+    }
+
+    fn with_diffs(&self, f: impl FnOnce(&mut PrimeDiffs)) {
+        if let Ok(mut diffs) = self.diffs.lock() {
+            f(&mut diffs);
         }
     }
 }
@@ -108,6 +120,13 @@ pub enum PrimeEventPayload {
     },
     /// Connexion au superviseur perdue : les sessions ouvertes sont perdues.
     Disconnected { reason: String },
+    /// Fichiers modifiés par un appel d'outil (voir `prime_diffs`), envoyés
+    /// après son `tool_execution_end`.
+    ToolFileChanges {
+        active_session_id: String,
+        tool_call_id: String,
+        file_changes: Vec<FileChange>,
+    },
 }
 
 impl PrimeEventPayload {
@@ -455,6 +474,26 @@ pub async fn session_config(
     })
 }
 
+/// Le dossier de travail du worker de la session : le `cwd` du `Create`
+/// (pa-daemon/src/supervisor/worker_lifecycle.rs:136-145), dans lequel le
+/// superviseur lance le worker (pa-daemon/src/supervisor/supervision.rs:416-449)
+/// et que `get_connection_state` renvoie (pa-daemon/src/worker/summary.rs:77).
+pub async fn session_cwd(client: &DaemonClient, active_session_id: &str) -> Result<PathBuf> {
+    let state = client
+        .request_ok(DaemonCommand::GetConnectionState {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    state
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("prime session {active_session_id} reported no cwd"))
+}
+
 /// Change le modèle de la session ; le worker l'enregistre aussi comme défaut
 /// des sessions suivantes (pa-daemon/src/model_switch.rs:123-126).
 pub async fn set_model(
@@ -517,12 +556,29 @@ fn spawn_event_relay(
             tokio::select! {
                 event = events.recv() => {
                     let Some(event) = event else { break };
-                    if let Some(payload) = PrimeEventPayload::from_client_event(event) {
-                        let _ = app.emit(PRIME_EVENT_NAME, payload);
+                    let Some(payload) = PrimeEventPayload::from_client_event(event) else {
+                        continue;
+                    };
+                    // L'événement part d'abord : les photos du projet se font
+                    // ensuite, dans la tâche de la session.
+                    let _ = app.emit(PRIME_EVENT_NAME, &payload);
+                    let state = app.state::<PrimeState>();
+                    match &payload {
+                        PrimeEventPayload::SessionEvent { active_session_id, event } => {
+                            state.with_diffs(|diffs| diffs.observe(active_session_id, event));
+                        }
+                        PrimeEventPayload::SessionClosed { active_session_id, .. } => {
+                            state.with_diffs(|diffs| diffs.forget(active_session_id));
+                        }
+                        PrimeEventPayload::Disconnected { .. } => {
+                            state.with_diffs(PrimeDiffs::clear);
+                        }
+                        PrimeEventPayload::ToolFileChanges { .. } => {}
                     }
                 }
                 changed = reader_dead.changed() => {
                     if changed.is_err() || *reader_dead.borrow() {
+                        app.state::<PrimeState>().with_diffs(PrimeDiffs::clear);
                         let _ = app.emit(
                             PRIME_EVENT_NAME,
                             PrimeEventPayload::Disconnected {
@@ -584,6 +640,31 @@ pub async fn prime_create_session(
         .await
         .map_err(error_text)?;
     state.track(&active_session_id);
+    // La racine des photos est le dossier de travail du worker, relu auprès
+    // de lui, pas le répertoire courant de l'IDE.
+    match session_cwd(&client, &active_session_id).await {
+        Ok(root) => {
+            let sink_app = app.clone();
+            let sink_session = active_session_id.clone();
+            state.with_diffs(|diffs| {
+                diffs.track(
+                    &active_session_id,
+                    root,
+                    Arc::new(move |tool_call_id, file_changes| {
+                        let _ = sink_app.emit(
+                            PRIME_EVENT_NAME,
+                            PrimeEventPayload::ToolFileChanges {
+                                active_session_id: sink_session.clone(),
+                                tool_call_id,
+                                file_changes,
+                            },
+                        );
+                    }),
+                );
+            });
+        }
+        Err(error) => tracing::warn!(error = %error, "prime tool diffs disabled for this session"),
+    }
     Ok(active_session_id)
 }
 
@@ -678,6 +759,24 @@ pub async fn prime_close_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_file_changes_payload_is_camel_case() {
+        let payload = PrimeEventPayload::ToolFileChanges {
+            active_session_id: "s1".into(),
+            tool_call_id: "call-1".into(),
+            file_changes: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(payload).unwrap(),
+            json!({
+                "kind": "toolFileChanges",
+                "activeSessionId": "s1",
+                "toolCallId": "call-1",
+                "fileChanges": [],
+            })
+        );
+    }
 
     #[test]
     fn event_payload_is_camel_case_for_the_webview() {
