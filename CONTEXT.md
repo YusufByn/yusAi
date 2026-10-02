@@ -342,14 +342,22 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   D'où la décision de ranger nous-mêmes. `appendSystemPrompt` est, lui,
   rejoué à la relance d'un worker tué (`Create` durable,
   `pa-daemon/src/supervisor/worker_lifecycle.rs:235-252`).
-  La requête `Refine` passe par le superviseur avec sa limite courte de
-  30 s (`pa-daemon/src/supervisor/routing.rs:648-661`) ; au-delà, le client
-  reçoit « Session worker timed out » mais le worker poursuit la refine.
-  Notre file relit alors le fil (`GetMessages`) jusqu'à la nouvelle ligne
-  `refinement_outcome`, dans la limite de 10 min (test e2e
-  `a_refine_outliving_the_supervisor_route_still_lands`, `delayMs` du moteur
-  faux). Une refine qui échoue après ces 30 s ne laisse aucune trace
-  (`pa-daemon/src/session_custom.rs:298-306`) : la file attend la limite.
+  Par le superviseur, la requête `Refine` a la limite courte de 30 s
+  (`pa-daemon/src/supervisor/routing.rs:648-661`) ; au-delà, le client
+  reçoit « Session worker timed out » mais le worker poursuit la refine, et
+  une refine qui échoue ensuite ne laisse aucune trace
+  (`pa-daemon/src/session_custom.rs:298-306`). Notre file ouvre donc sa
+  propre connexion et passe directement au worker (`upgrade_direct`,
+  `pa-tui/src/daemon_client.rs:872`) : vraie réponse, réussie ou non, quelle
+  que soit la durée, et erreur immédiate si le worker meurt (tests e2e
+  `refines_longer_than_the_supervisor_route_get_their_answer`,
+  `a_worker_killed_during_a_refine_frees_the_queue_at_once`, `delayMs` du
+  moteur faux). Si le lien direct est refusé, repli par le superviseur puis
+  relecture du fil (`GetMessages`) jusqu'à la nouvelle ligne
+  `refinement_outcome`, dans la limite de 10 min.
+  Une refine d'une autre conversation peut voir nos `yl_…` amorcés : son
+  import ignore les edits sur des leçons qui ne s'appliquent pas à sa
+  conversation (`LessonTarget::Elsewhere`).
   Une mise à jour sans titre est refusée par Prime
   (`pa-core/src/refinement/planner.rs:223-225`).
   Limite restante de notre file de refines : l'auto-refine de Prime (après

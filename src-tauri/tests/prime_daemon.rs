@@ -1656,8 +1656,14 @@ async fn scripted_thread(
     (client, session)
 }
 
+/// Arrête le daemon d'un fil scripté et supprime son dossier, une fois
+/// sortis le daemon et ses workers (qui écrivent encore en s'arrêtant).
 #[cfg(unix)]
-async fn stop_scripted_thread(client: pa_tui::daemon_client::DaemonClient, session: &str) {
+async fn stop_scripted_thread(
+    client: pa_tui::daemon_client::DaemonClient,
+    session: &str,
+    root: &std::path::Path,
+) {
     sinew_desktop_lib::prime_session::kill_session(&client, session)
         .await
         .expect("session killed");
@@ -1669,6 +1675,17 @@ async fn stop_scripted_thread(client: pa_tui::daemon_client::DaemonClient, sessi
         })
         .await;
     client.close();
+    for _ in 0..100 {
+        let running = std::process::Command::new("pgrep")
+            .args(["-f", &root.to_string_lossy()])
+            .output()
+            .is_ok_and(|output| !output.stdout.is_empty());
+        if !running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// File des refines : nos leçons sont amorcées dans le harness local, le
@@ -1753,6 +1770,7 @@ async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
     // planifierait pendant ce temps.
     let (client, session) =
         scripted_thread(&root, &workspace, &[(first, 2_000), (second, 0)]).await;
+    let socket_path = root.join("daemon.sock");
     let thread = ThreadContext {
         conversation_id: "conv-queue".to_string(),
         workspace_id: workspace_id.clone(),
@@ -1761,7 +1779,7 @@ async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
 
     let (one, two) = tokio::join!(
         run_refine(
-            &client,
+            &socket_path,
             store.clone(),
             agent_dir.clone(),
             &session,
@@ -1771,7 +1789,7 @@ async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
         async {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             run_refine(
-                &client,
+                &socket_path,
                 store.clone(),
                 agent_dir.clone(),
                 &session,
@@ -1824,16 +1842,35 @@ async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
     assert!(state.last_refined_at_ms.is_some());
     assert!(!state.pending);
 
-    stop_scripted_thread(client, &session).await;
-    let _ = std::fs::remove_dir_all(&root);
+    stop_scripted_thread(client, &session, &root).await;
 }
 
-/// Le superviseur coupe la requête `Refine` au bout de 30 s
-/// (pa-daemon/src/supervisor/routing.rs:648-661) mais le worker poursuit :
-/// la file retrouve la refine dans le fil et l'importe quand même.
+/// Une leçon de projet, pour vérifier qu'elle quitte le harness après une
+/// refine ratée.
+#[cfg(unix)]
+fn project_lesson(store: &sinew_app::store::AppStore, workspace: &std::path::Path) {
+    use sinew_app::store::{InsertLessonOutcome, LessonKind, LessonLevel, LessonOrigin, NewLesson};
+    let new = NewLesson {
+        level: LessonLevel::Project,
+        workspace_id: Some(workspace.to_string_lossy().into_owned()),
+        project_type: None,
+        kind: LessonKind::Memory,
+        title: "Tests".to_string(),
+        content: "Lancer cargo test.".to_string(),
+    };
+    assert!(matches!(
+        store.insert_lesson(&new, &LessonOrigin::user()).unwrap(),
+        InsertLessonOutcome::Created(_)
+    ));
+}
+
+/// Le superviseur coupe une requête `Refine` au bout de 30 s
+/// (pa-daemon/src/supervisor/routing.rs:648-661) alors que le worker
+/// poursuit : la file parle directement au worker et reçoit la vraie
+/// réponse, réussie ou non, sans attendre de limite.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refine_outliving_the_supervisor_route_still_lands() {
+async fn refines_longer_than_the_supervisor_route_get_their_answer() {
     use sinew_app::store::{AppStore, LessonScope};
     use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
     use sinew_desktop_lib::prime_refine::run_refine;
@@ -1843,6 +1880,7 @@ async fn a_refine_outliving_the_supervisor_route_still_lands() {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    project_lesson(&store, &workspace);
     let slow = serde_json::json!({
         "summary": "slow",
         "rationale": "trajectory evidence",
@@ -1850,26 +1888,32 @@ async fn a_refine_outliving_the_supervisor_route_still_lands() {
         "edits": [{ "action": "create", "kind": "memory", "id": "yusai-slow",
                     "title": "Lent", "content": "Une refine qui prend son temps." }],
     });
-    let (client, session) = scripted_thread(&root, &workspace, &[(slow, 33_000)]).await;
+    // Après la refine lente, une refine dont le plan est illisible : elle
+    // échoue après plus de 30 s.
+    let broken = serde_json::json!("pas un plan");
+    let (client, session) =
+        scripted_thread(&root, &workspace, &[(slow, 33_000), (broken, 31_000)]).await;
+    let socket_path = root.join("daemon.sock");
     let thread = ThreadContext {
         conversation_id: "conv-queue".to_string(),
         workspace_id: workspace.to_string_lossy().into_owned(),
     };
+    let refine = || {
+        run_refine(
+            &socket_path,
+            store.clone(),
+            agent_dir.clone(),
+            &session,
+            thread.clone(),
+            None,
+        )
+    };
 
     let started = std::time::Instant::now();
-    let run = run_refine(
-        &client,
-        store.clone(),
-        agent_dir.clone(),
-        &session,
-        thread.clone(),
-        None,
-    )
-    .await
-    .expect("refine lands after the route timeout");
+    let run = refine().await.expect("refine lands after 30 s");
     assert!(
-        started.elapsed() >= std::time::Duration::from_secs(30),
-        "the route timeout was exercised"
+        started.elapsed() >= std::time::Duration::from_secs(33),
+        "the slow plan was used"
     );
     let report = run.report.expect("imported by the queue");
     assert_eq!(report.created.len(), 1, "report: {report:?}");
@@ -1877,19 +1921,122 @@ async fn a_refine_outliving_the_supervisor_route_still_lands() {
         workspace_id: thread.workspace_id.clone(),
         project_type: None,
     };
-    assert_eq!(
-        store.applicable_lessons(&scope).unwrap()[0].content,
-        "Une refine qui prend son temps."
+    assert!(store
+        .applicable_lessons(&scope)
+        .unwrap()
+        .iter()
+        .any(|lesson| lesson.content == "Une refine qui prend son temps."));
+    let local_file = refine_harness_file(&agent_dir, false);
+    assert!(harness_entry_ids(&local_file, "memory").is_empty());
+    let refined_at = store.refine_state("conv-queue").unwrap().last_refined_at_ms;
+    assert!(refined_at.is_some());
+
+    let started = std::time::Instant::now();
+    let error = refine().await.expect_err("an unreadable plan fails");
+    let elapsed = started.elapsed();
+    // Borne large : la file est commune aux tests du processus.
+    assert!(
+        elapsed >= std::time::Duration::from_secs(31)
+            && elapsed < std::time::Duration::from_secs(120),
+        "the failure arrives with the refine, not at the 10 min limit: {elapsed:?}"
     );
-    assert!(harness_entry_ids(&refine_harness_file(&agent_dir, false), "memory").is_empty());
+    assert!(
+        !error.to_string().contains("timed out"),
+        "Prime's own failure: {error:#}"
+    );
+    assert!(harness_entry_ids(&local_file, "memory").is_empty());
+    assert_eq!(
+        store.refine_state("conv-queue").unwrap().last_refined_at_ms,
+        refined_at
+    );
+
+    stop_scripted_thread(client, &session, &root).await;
+}
+
+/// Un worker tué pendant la refine (le superviseur le relance aussitôt,
+/// sans la refine) libère la file tout de suite.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_killed_during_a_refine_frees_the_queue_at_once() {
+    use sinew_app::store::AppStore;
+    use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
+    use sinew_desktop_lib::prime_refine::run_refine;
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    project_lesson(&store, &workspace);
+    let plan = serde_json::json!({
+        "summary": "never",
+        "rationale": "trajectory evidence",
+        "expectedOutcome": "reused",
+        "edits": [],
+    });
+    let (client, session) = scripted_thread(&root, &workspace, &[(plan, 60_000)]).await;
+    let socket_path = root.join("daemon.sock");
+    let thread = ThreadContext {
+        conversation_id: "conv-queue".to_string(),
+        workspace_id: workspace.to_string_lossy().into_owned(),
+    };
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket_path);
+    let worker_pid = std::fs::read_dir(&descriptor_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| {
+            serde_json::from_str::<pa_types::daemon::DaemonWorkerDescriptor>(&text).ok()
+        })
+        .find(|descriptor| descriptor.root_active_session_id == session)
+        .expect("worker descriptor")
+        .pid;
+    let local_file = refine_harness_file(&agent_dir, false);
+
+    let refine = tokio::spawn({
+        let (socket_path, store, agent_dir, session) = (
+            socket_path.clone(),
+            store.clone(),
+            agent_dir.clone(),
+            session.clone(),
+        );
+        async move { run_refine(&socket_path, store, agent_dir, &session, thread, None).await }
+    });
+    // La refine est partie : nos leçons sont dans le harness. La file est
+    // commune au processus : elle peut d'abord attendre les refines des
+    // autres tests.
+    let mut seeded = false;
+    for _ in 0..4_000 {
+        if !harness_entry_ids(&local_file, "memory").is_empty() {
+            seeded = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(seeded, "lessons seeded");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &worker_pid.to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(killed.success());
+    let killed_at = std::time::Instant::now();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), refine)
+        .await
+        .expect("the queue is freed long before the plan's 60 s")
+        .unwrap();
+    assert!(outcome.is_err(), "outcome: {outcome:?}");
+    assert!(killed_at.elapsed() < std::time::Duration::from_secs(20));
+    assert!(harness_entry_ids(&local_file, "memory").is_empty());
     assert!(store
         .refine_state("conv-queue")
         .unwrap()
         .last_refined_at_ms
-        .is_some());
+        .is_none());
 
-    stop_scripted_thread(client, &session).await;
-    let _ = std::fs::remove_dir_all(&root);
+    stop_scripted_thread(client, &session, &root).await;
 }
 
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).

@@ -7,7 +7,7 @@
 //! 2. amorcer les leçons qui s'appliquent à la conversation (projet, type
 //!    du projet, global), pour que le planificateur de Prime puisse les
 //!    modifier ou les supprimer ;
-//! 3. envoyer `Refine` au worker ;
+//! 3. envoyer `Refine` au worker, sur une connexion à part ;
 //! 4. importer la refine dans le magasin (une seule fois par
 //!    `refinementId` : le relais a pu le faire avant nous) ;
 //! 5. retirer nos entrées `yl_…` du harness, même si la refine a échoué ;
@@ -15,19 +15,24 @@
 //!    ne touche pas l'état de refine de la conversation : c'est à
 //!    l'appelant de décider (par exemple `pending = 1`).
 //!
-//! Le superviseur coupe la requête `Refine` au bout de 30 s
+//! Le superviseur coupe une requête `Refine` au bout de 30 s
 //! (pa-daemon/src/supervisor/routing.rs:648-661), alors que le worker
-//! poursuit la refine. Dans ce cas, on relit les messages du fil jusqu'à y
-//! trouver la nouvelle ligne `refinement_outcome`, dans la limite de
-//! 10 min. Une refine qui échoue après ces 30 s ne laisse aucune trace
-//! (pa-daemon/src/session_custom.rs:298-306) : la file attend alors la
-//! limite.
+//! poursuit la refine. La connexion de la refine passe donc directement au
+//! worker (`upgrade_direct`, pa-tui/src/daemon_client.rs:872, comme le TUI
+//! de Prime) : la réponse arrive quand la refine finit, réussie ou non, et
+//! la mort du worker coupe le lien, donc la requête, tout de suite. Si le
+//! lien direct est refusé, la requête passe par le superviseur ; après ses
+//! 30 s, on relit les messages du fil jusqu'à y trouver la nouvelle ligne
+//! `refinement_outcome`, dans la limite de 10 min. Sur ce chemin de repli,
+//! une session fermée libère la file au relevé suivant, mais une refine
+//! qui échoue ne laisse aucune trace (pa-daemon/src/session_custom.rs:298-306)
+//! et la file attend la limite.
 //!
 //! Hors de cette file : l'auto-refine de Prime et `refine.run()` appelé par
 //! le modèle (limite notée dans CONTEXT.md).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -63,7 +68,7 @@ const OUTCOME_POLL: Duration = Duration::from_secs(2);
 
 /// Lance une refine locale de la conversation, à son tour dans la file.
 pub async fn run_refine(
-    client: &DaemonClient,
+    socket_path: &Path,
     store: AppStore,
     agent_dir: PathBuf,
     active_session_id: &str,
@@ -84,7 +89,7 @@ pub async fn run_refine(
     });
 
     let refined = refine_and_import(
-        client,
+        socket_path,
         &store,
         &agent_dir,
         active_session_id,
@@ -109,13 +114,44 @@ pub async fn run_refine(
 }
 
 async fn refine_and_import(
-    client: &DaemonClient,
+    socket_path: &Path,
     store: &AppStore,
-    agent_dir: &std::path::Path,
+    agent_dir: &Path,
     active_session_id: &str,
     thread: &ThreadContext,
     instructions: Option<String>,
 ) -> Result<(String, Option<ImportReport>)> {
+    // Une connexion à part : le lien direct ne sert qu'à cette session, et
+    // le client de l'app garde son relais d'événements intact.
+    let (client, _events) = DaemonClient::connect(socket_path).await?;
+    let refined = refine_on(
+        &client,
+        store,
+        agent_dir,
+        active_session_id,
+        thread,
+        instructions,
+    )
+    .await;
+    client.close();
+    refined
+}
+
+async fn refine_on(
+    client: &DaemonClient,
+    store: &AppStore,
+    agent_dir: &Path,
+    active_session_id: &str,
+    thread: &ThreadContext,
+    instructions: Option<String>,
+) -> Result<(String, Option<ImportReport>)> {
+    let direct = client
+        .upgrade_direct(active_session_id)
+        .await
+        .unwrap_or(false);
+    if !direct {
+        tracing::info!("prime refine goes through the supervisor route");
+    }
     // Les refines déjà dans le fil, pour reconnaître la nouvelle si la
     // réponse se perd.
     let before = outcome_ids(client, active_session_id)
