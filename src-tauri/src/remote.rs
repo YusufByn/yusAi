@@ -728,6 +728,7 @@ impl RemoteRuntime {
             }
             RemotePhoneCommand::DeleteConversation { conversation_id } => {
                 let bootstrap = conversations::delete_conversation(
+                    app.clone(),
                     state,
                     ConversationInput {
                         workspace_path: workspace_path.clone(),

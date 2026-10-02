@@ -21,6 +21,22 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   session Prime par conversation yusAi, démarrée quand le panneau s'affiche.
   Protocole natif (`DaemonClient` + `DaemonCommand`), événements relayés en
   `prime-event`. Rendu : texte de l'assistant et appels d'outils.
+- **Fils persistants** : chaque conversation a son fichier de session Prime,
+  `<agent_dir>/yusai-threads/<conversationId>.jsonl` (`thread_path`), hors de
+  `sessions/` que le superviseur archive (déplace) après 30 jours / 200
+  fichiers (`pa-daemon/src/session_archive.rs:1-17`). `open_thread` fait
+  `Create` avec `session_path` : le worker rouvre le fichier avec son modèle
+  et son niveau (`pa-daemon/src/worker/create.rs:208-299`), que les
+  sélecteurs relisent après l'ouverture ; l'historique vient du
+  `snapshot.messages` de l'attach et se convertit en messages et cartes
+  (`src/lib/primeHistory.ts`). Un fichier déjà tenu (`SessionAlreadyActive`)
+  est rattaché à sa session. Le `Kill` de sortie marque le fichier
+  `archived` sans le déplacer ; la réouverture le remet `active`. Les
+  orphelins sont tués avant toute ouverture (ils tiendraient le verrou du
+  fichier). Une session fermée par le daemon (mise en veille après 90 min
+  d'inactivité, `pa-core/src/settings/manager.rs:16`) est rouverte depuis
+  son fichier. Supprimer une conversation tue le worker du fil puis appelle
+  `delete_saved_session` (`delete_thread`).
 - **Appels d'outils** : `tool_execution_start` / `_update` / `_end`
   (`pa-daemon/src/worker/turn.rs:905-932`) affichés avec `ToolCard`, repliés
   par défaut, sortie tronquée à 200 lignes / 20 000 caractères avec « Show
@@ -81,6 +97,11 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `outputLimit` opt-in dans `ToolCard`, sans effet sur Sinew), `e29ff53`
   (test e2e). Vérifié dans un banc d'essai navigateur (IPC simulé), pas
   encore dans l'app avec un vrai modèle.
+- **Fils persistants** : `26d148e` (Rust : fichier par conversation,
+  réouverture, rattachement, nettoyage des orphelins attendu ; test e2e),
+  `7c6ac74` (front : historique restauré, sélecteurs relus, réouverture après
+  fermeture), commit suivant (suppression du fil avec la conversation, test
+  e2e). Vérifié par les tests et le banc d'essai, pas encore dans l'app.
 
 ## Tests
 
@@ -116,6 +137,20 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   flux (`on_stream` abandonné, `pa-core/src/session_engine/runtime_wiring.rs:318-321`) :
   en pratique seuls les messages de démarrage du noyau (`"starting"`)
   arrivent pendant l'exécution, la sortie arrive au `tool_execution_end`.
+- **Verrou de session et chemin canonique** : le dossier du fichier doit
+  exister avant le `Create`, sinon le verrou retient un chemin non canonique
+  et refuse ensuite d'écrire (« session lease does not own append target »,
+  `pa-daemon/src/lease.rs:78-87, 392-396` ; lien `/var` -> `/private/var`).
+- **Suppression = Corbeille** : `delete_saved_session` passe par
+  `/usr/bin/trash` quand il existe (macOS 26 l'a), le fichier part donc à la
+  Corbeille (`pa-daemon/src/saved_session_commands.rs:116-138`). Le test e2e
+  retire de la Corbeille le fichier qu'il y envoie.
+- **Diffs perdus au redémarrage** (limite acceptée) : les fichiers modifiés
+  viennent de nos photos, pas du fichier de session ; après un redémarrage
+  les cartes restaurées n'ont plus leurs diffs, et une cellule `edit`
+  reprend sa première ligne comme titre.
+- **Test qui panique = daemon orphelin** : un test e2e en échec n'atteint
+  pas son `Shutdown` ; vérifier `pgrep -fl yusai-prime-test` après un échec.
 - Prime se présente avec une version Claude Code figée dans vendor
   (`claude-cli/2.1.281`) : un modèle qui exige plus récent serait refusé.
 
@@ -131,7 +166,7 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
    (`pa-types/src/daemon/command.rs:676`, usage dans
    `pa-daemon/src/acp/daemon.rs:705-730`), sans patch vendor. Les outils
    interactifs (question, todo) demandent en plus un relais vers l'UI.
-3. Persister les fils Prime (aujourd'hui `no_session: true`, perdus au
-   redémarrage).
-4. Rendu réflexion / sous-agents ; renommer « Sinew » en « yusAi ».
-5. Fermer une seule fenêtre ne tue pas ses sessions avant la sortie de l'app.
+3. Rendu réflexion / sous-agents ; renommer « Sinew » en « yusAi ».
+4. Fermer une seule fenêtre ne tue pas ses sessions avant la sortie de l'app.
+   Inversement, deux fenêtres sur la même conversation partagent la session :
+   en fermer une la tue, l'autre la rouvre depuis le fichier.

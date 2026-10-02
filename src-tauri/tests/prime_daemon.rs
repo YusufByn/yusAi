@@ -669,6 +669,98 @@ async fn threads_reopen_from_their_file() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Suppression d'une conversation : le worker qui tient le fil est tué,
+/// puis `delete_saved_session` retire le fichier, hors de `sessions/`.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_thread_kills_its_worker_and_removes_the_file() {
+    use sinew_desktop_lib::prime_session::{delete_thread, open_thread, thread_path};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+
+    let (client, _events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    // Nom unique : sous macOS, Prime envoie le fichier à la Corbeille.
+    let stem = format!(
+        "yusai-prime-test-thread-{}",
+        root.file_name().unwrap().to_string_lossy()
+    );
+    let path = thread_path(&agent_dir, &stem).unwrap();
+    let opened = open_thread(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        }),
+        &path,
+    )
+    .await
+    .expect("thread opened");
+    assert!(path.is_file());
+
+    let killed = delete_thread(&client, &path).await.expect("thread deleted");
+    assert_eq!(killed, vec![opened.active_session_id.clone()]);
+    assert!(!path.exists(), "the thread file is gone");
+    let listed = client
+        .request_ok(pa_types::daemon::DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("list");
+    assert!(
+        !listed.to_string().contains(&opened.active_session_id),
+        "the session is no longer listed: {listed}"
+    );
+    // Rien à faire sur un fil déjà supprimé.
+    assert!(delete_thread(&client, &path)
+        .await
+        .expect("noop")
+        .is_empty());
+
+    // Retire de la Corbeille le fichier que ce test y a envoyé.
+    if let Some(home) = std::env::var_os("HOME") {
+        if let Ok(entries) = std::fs::read_dir(PathBuf::from(home).join(".Trash")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&stem) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cycle `ClientOwned` (pa-daemon/src/supervisor/sessions.rs:621-638) : une
 /// déconnexion sans `Kill` ne fait qu'un `detach`
 /// (pa-daemon/src/supervisor/clients.rs:354-373) et le worker continue de

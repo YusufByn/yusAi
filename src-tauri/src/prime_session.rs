@@ -322,6 +322,61 @@ pub async fn open_thread(
     }
 }
 
+/// Supprime un fil : `Kill` des workers qui tiennent son fichier (relevés
+/// par `List`), puis `delete_saved_session`, qui accepte un chemin hors de
+/// `sessions/` (pa-daemon/src/saved_session_commands.rs:553-707) mais
+/// refuse une session encore active. Sous macOS, Prime envoie le fichier à
+/// la Corbeille par `trash` quand la commande existe, sinon le supprime
+/// (saved_session_commands.rs:116-138). Un fichier encore présent après
+/// coup est supprimé ici. Renvoie les sessions tuées.
+pub async fn delete_thread(client: &DaemonClient, session_path: &Path) -> Result<Vec<String>> {
+    let target = pa_daemon::lease::canonical_session_path(session_path);
+    let listed = client
+        .request_ok(DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: Some(true),
+            rest: Map::default(),
+        })
+        .await?;
+    let holders: Vec<String> = listed
+        .get("sessions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|session| {
+            session
+                .get("sessionFile")
+                .and_then(Value::as_str)
+                .is_some_and(|file| {
+                    pa_daemon::lease::canonical_session_path(Path::new(file)) == target
+                })
+        })
+        .filter_map(|session| session.get("activeSessionId").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
+    for active_session_id in &holders {
+        kill_session(client, active_session_id).await?;
+    }
+    if session_path.exists() {
+        client
+            .request_ok(DaemonCommand::DeleteSavedSession {
+                id: None,
+                active_session_id: None,
+                session_path: session_path.to_string_lossy().into_owned(),
+                rest: Map::default(),
+            })
+            .await?;
+    }
+    if session_path.exists() {
+        tokio::fs::remove_file(session_path).await?;
+    }
+    Ok(holders)
+}
+
 /// Envoie un prompt sans attendre la fin du tour : la réponse arrive par les
 /// événements. `followUp` + `queueIfBusy` comme l'ACP
 /// (pa-daemon/src/acp/daemon.rs:793-815) : un prompt pendant un tour est mis
@@ -848,6 +903,21 @@ pub async fn prime_set_thinking_level(
     session_config(&client, &active_session_id)
         .await
         .map_err(error_text)
+}
+
+/// Supprime le fil Prime d'une conversation yusAi supprimée. Sans fichier,
+/// rien à faire : le daemon n'est pas lancé pour ça.
+pub async fn delete_conversation_thread(app: &AppHandle, conversation_id: &str) -> Result<()> {
+    let session_path = thread_path(&crate::prime::agent_dir(), conversation_id)?;
+    if !session_path.exists() {
+        return Ok(());
+    }
+    let state = app.state::<PrimeState>();
+    let client = connected_client(app, &state).await?;
+    for active_session_id in delete_thread(&client, &session_path).await? {
+        state.untrack(&active_session_id);
+    }
+    Ok(())
 }
 
 /// Ferme une session : sans client connecté, il n'y a rien à fermer (un

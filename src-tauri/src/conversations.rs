@@ -75,6 +75,7 @@ pub(super) async fn rename_conversation(
 
 #[tauri::command]
 pub(super) async fn delete_conversation(
+    app: AppHandle,
     state: State<'_, DesktopState>,
     input: ConversationInput,
 ) -> std::result::Result<WorkspaceBootstrap, String> {
@@ -91,6 +92,12 @@ pub(super) async fn delete_conversation(
         .store
         .delete_conversation(&workspace_id, &input.conversation_id)
         .map_err(error_to_string)?;
+    // Le fil Prime de la conversation part avec elle.
+    if let Err(error) =
+        crate::prime_session::delete_conversation_thread(&app, &input.conversation_id).await
+    {
+        tracing::warn!(error = %error, "prime thread delete failed");
+    }
     state
         .store
         .bootstrap_workspace(&workspace_root, &state.default_model, &state.system_prompt)
