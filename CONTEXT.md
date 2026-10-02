@@ -174,8 +174,17 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   historique (`catch_up_refinements`). Import unique par `refinementId` ;
   une refine globale ajoute une proposition de montée ; après un import
   réussi, les entrées créées par la refine quittent le harness de Prime
-  (local : `yusai-threads/harness/`, global : `agent_dir`). Les leçons ne
-  sont pas encore réinjectées (commit 6 du plan).
+  (local : `yusai-threads/harness/`, global : `agent_dir`). Une opération
+  qui échoue garde son entrée dans le harness et est notée avec la refine
+  (`ImportedRefinement::failures`, sqlite v11). Garde globale : après chaque
+  cellule, les écritures directes du modèle dans `<agent_dir>/harness/`
+  (`rlm.harness.*(…, global_=True)`, que Prime réinjecte partout)
+  deviennent des leçons projet de la conversation de la cellule, proposées
+  pour le global, puis quittent le fichier (`import_global_harness_writes`,
+  test e2e avec vrai noyau). Limites : deux cellules finies au même moment
+  dans deux conversations, la première arrivée prend les entrées ; une
+  session qui démarre entre l'écriture et la garde voit l'entrée dans son
+  digest. Les leçons ne sont pas encore réinjectées (commit 6 du plan).
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

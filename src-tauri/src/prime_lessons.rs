@@ -311,9 +311,40 @@ pub fn import_refinement_outcome(
         skipped: import.skipped.clone(),
         ..ImportReport::default()
     };
-    let mut touched: Vec<(&'static str, String)> = Vec::new();
-    let mut to_promote: Vec<String> = Vec::new();
-    for op in import.ops {
+    let touched = apply_ops(store, thread, import.ops, &origin, global, &mut report);
+    store.mark_refinement_imported(
+        &report.refinement_id,
+        Some(&thread.conversation_id),
+        &report.failed,
+    )?;
+
+    let harness = refine_harness_file(agent_dir, global);
+    match remove_harness_entries(&harness, &touched) {
+        Ok(removed) => report.removed_entries = removed,
+        Err(error) => tracing::warn!(
+            error = %error,
+            file = %harness.display(),
+            "imported prime refine entries stay in the harness"
+        ),
+    }
+    Ok(Some(report))
+}
+
+/// Applique des opérations au magasin pour une conversation. Les créations
+/// arrivent au niveau projet ; avec `promote`, chaque leçon créée (ou déjà
+/// présente) reçoit une proposition de montée vers global. Les échecs vont
+/// dans `report.failed`. Renvoie les entrées du harness (`kind`, `id`) des
+/// créations réussies, les seules à retirer du harness.
+fn apply_ops(
+    store: &AppStore,
+    thread: &ThreadContext,
+    ops: Vec<LessonOp>,
+    origin: &LessonOrigin,
+    promote: bool,
+    report: &mut ImportReport,
+) -> Vec<(&'static str, String)> {
+    let mut touched = Vec::new();
+    for op in ops {
         match op {
             LessonOp::Create {
                 entry_id,
@@ -329,30 +360,44 @@ pub fn import_refinement_outcome(
                     title,
                     content,
                 };
-                match store.insert_lesson(&lesson, &origin) {
+                let lesson_id = match store.insert_lesson(&lesson, origin) {
                     Ok(InsertLessonOutcome::Created(created)) => {
-                        touched.push((harness_kind(kind), entry_id));
-                        to_promote.push(created.id.clone());
-                        report.created.push(created.id);
+                        report.created.push(created.id.clone());
+                        created.id
                     }
                     Ok(InsertLessonOutcome::Duplicate { existing_id }) => {
-                        touched.push((harness_kind(kind), entry_id));
-                        to_promote.push(existing_id.clone());
-                        report.duplicates.push(existing_id);
+                        report.duplicates.push(existing_id.clone());
+                        existing_id
                     }
                     // L'entrée reste dans le harness : elle n'est pas chez nous.
-                    Err(error) => report.failed.push(format!("create {entry_id}: {error:#}")),
+                    Err(error) => {
+                        report.failed.push(format!("create {entry_id}: {error:#}"));
+                        continue;
+                    }
+                };
+                if promote {
+                    match propose_global(store, &lesson_id, origin) {
+                        Ok(Some(proposal)) => report.proposals.push(proposal),
+                        Ok(None) => {}
+                        Err(error) => {
+                            report
+                                .failed
+                                .push(format!("promote {lesson_id}: {error:#}"));
+                            continue;
+                        }
+                    }
                 }
+                touched.push((harness_kind(kind), entry_id));
             }
             LessonOp::Update {
                 lesson_id,
                 title,
                 content,
-            } => match store.update_lesson(&lesson_id, &title, &content, &origin) {
+            } => match store.update_lesson(&lesson_id, &title, &content, origin) {
                 Ok(_) => report.updated.push(lesson_id),
                 Err(error) => report.failed.push(format!("update {lesson_id}: {error:#}")),
             },
-            LessonOp::Archive { lesson_id } => match store.archive_lesson(&lesson_id, &origin) {
+            LessonOp::Archive { lesson_id } => match store.archive_lesson(&lesson_id, origin) {
                 Ok(_) => report.archived.push(lesson_id),
                 Err(error) => report
                     .failed
@@ -376,30 +421,126 @@ pub fn import_refinement_outcome(
             },
         }
     }
-    if global {
-        for lesson_id in to_promote {
-            match propose_global(store, &lesson_id, &origin) {
-                Ok(Some(proposal)) => report.proposals.push(proposal),
-                Ok(None) => {}
-                Err(error) => report
-                    .failed
-                    .push(format!("promote {lesson_id}: {error:#}")),
+    touched
+}
+
+/// Le harness global que lisent le noyau (`rlm.harness.*(…, global_=True)`,
+/// prime-agent-runtime/src/rlm/harness.py:153-166) et le digest du prompt
+/// de toutes les sessions (pa-core/src/session_engine/engine.rs:548).
+pub fn global_harness_file(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("harness").join(HARNESS_STATE_FILE)
+}
+
+/// Garde contre les écritures globales directes du modèle : chaque entrée
+/// du harness global devient une leçon de niveau projet de la conversation
+/// donnée (celle dont une cellule vient de finir), avec une proposition de
+/// montée vers global ; une entrée `skill` devient une proposition de
+/// skill. Une entrée ne quitte le fichier qu'une fois importée sans échec :
+/// sinon Prime la réinjecterait dans toutes les sessions, sans validation.
+///
+/// L'import est noté comme une refine (`harness-global-<ms>`, avec ses
+/// échecs). `None` si aucune entrée n'a été importée, proposée ou n'a
+/// échoué.
+pub fn import_global_harness_writes(
+    store: &AppStore,
+    agent_dir: &Path,
+    thread: &ThreadContext,
+) -> Result<Option<ImportReport>> {
+    let _guard = IMPORT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let file = global_harness_file(agent_dir);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
+    };
+    let state: Value =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", file.display()))?;
+    let mut entries: Vec<(&'static str, String, Value)> = Vec::new();
+    for kind in ["memory", "prompt", "subagent", "skill"] {
+        if let Some(records) = state
+            .get("entries")
+            .and_then(|entries| entries.get(kind))
+            .and_then(Value::as_object)
+        {
+            for (id, entry) in records {
+                entries.push((kind, id.clone(), entry.clone()));
             }
         }
     }
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let refinement_id = format!(
+        "harness-global-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis())
+    );
+    let origin = LessonOrigin {
+        actor: "harness:global".to_string(),
+        conversation_id: Some(thread.conversation_id.clone()),
+        refinement_id: Some(refinement_id.clone()),
+    };
+    let mut report = ImportReport {
+        refinement_id: refinement_id.clone(),
+        ..ImportReport::default()
+    };
+    let mut touched = Vec::new();
+    for (kind, id, entry) in entries {
+        // Une entrée = une création appliquée, convertie comme une edit de
+        // refine.
+        let details = json!({
+            "refinementId": refinement_id,
+            "summary": "written by the model to Prime's global harness",
+            "edits": [{
+                "action": "create",
+                "kind": kind,
+                "id": id,
+                "reference": entry.get("reference").cloned().unwrap_or(Value::Null),
+                "arguments": entry.get("arguments").cloned().unwrap_or(Value::Null),
+                "after": entry,
+                "applied": true,
+            }],
+        });
+        let import = refinement_ops(&details, |_| None)?;
+        report.skipped.extend(import.skipped);
+        let failures = report.failed.len();
+        let is_skill = import.ops.iter().any(|op| {
+            matches!(
+                op,
+                LessonOp::Propose {
+                    kind: ProposalKind::Skill,
+                    ..
+                }
+            )
+        });
+        let created = apply_ops(store, thread, import.ops, &origin, true, &mut report);
+        if report.failed.len() == failures {
+            touched.extend(created);
+            if is_skill {
+                touched.push(("skill", id));
+            }
+        }
+    }
+    let nothing_done = report.created.is_empty()
+        && report.duplicates.is_empty()
+        && report.proposals.is_empty()
+        && report.failed.is_empty();
+    if nothing_done {
+        // Seulement des entrées écartées (vides, inconnues) : pas de trace.
+        return Ok(None);
+    }
     store.mark_refinement_imported(
-        &report.refinement_id,
+        &refinement_id,
         Some(&thread.conversation_id),
         &report.failed,
     )?;
-
-    let harness = refine_harness_file(agent_dir, global);
-    match remove_harness_entries(&harness, &touched) {
+    match remove_harness_entries(&file, &touched) {
         Ok(removed) => report.removed_entries = removed,
         Err(error) => tracing::warn!(
             error = %error,
-            file = %harness.display(),
-            "imported prime refine entries stay in the harness"
+            file = %file.display(),
+            "imported global harness entries stay in the file"
         ),
     }
     Ok(Some(report))
@@ -946,6 +1087,127 @@ mod tests {
                 .unwrap()
                 .failures,
             report.failed
+        );
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn global_harness_writes_become_project_lessons_proposed_for_global() {
+        let (store, agent_dir) = import_fixture(&[]);
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        // Déjà là au niveau projet : doublon, mais proposé quand même.
+        let InsertLessonOutcome::Created(existing) = store
+            .insert_lesson(
+                &NewLesson {
+                    level: LessonLevel::Project,
+                    workspace_id: Some("/work/a".to_string()),
+                    project_type: None,
+                    kind: LessonKind::Memory,
+                    title: "Tests".to_string(),
+                    content: "Lancer cargo test.".to_string(),
+                },
+                &LessonOrigin::user(),
+            )
+            .unwrap()
+        else {
+            panic!("existing lesson");
+        };
+        let file = global_harness_file(&agent_dir);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut skill = entry("fmt", "skill", "Format", "Formater le code.");
+        skill["reference"] = json!({ "type": "python", "import": "fmt", "callable": "run" });
+        std::fs::write(
+            &file,
+            json!({
+                "schema": 1,
+                "entries": {
+                    "memory": {
+                        "langue": entry("langue", "memory", "Langue", "Répondre en français."),
+                        "tests": entry("tests", "memory", "Tests", "Lancer cargo test."),
+                    },
+                    "skill": { "fmt": skill },
+                    "subagent": { "vide": entry("vide", "subagent", "Vide", "  ") },
+                },
+                "refinements": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = import_global_harness_writes(&store, &agent_dir, &thread)
+            .unwrap()
+            .expect("entries imported");
+        assert_eq!(report.created.len(), 1, "report: {report:?}");
+        assert_eq!(report.duplicates, vec![existing.id.clone()]);
+        assert!(report.failed.is_empty(), "report: {report:?}");
+        assert_eq!(report.removed_entries, 3, "report: {report:?}");
+        let created = store.lesson(&report.created[0]).unwrap().unwrap();
+        assert_eq!(created.level, LessonLevel::Project);
+        assert_eq!(created.workspace_id.as_deref(), Some("/work/a"));
+        assert_eq!(created.content, "Répondre en français.");
+        assert_eq!(
+            store.lesson_events(&created.id).unwrap()[0].actor,
+            "harness:global"
+        );
+
+        let proposals = store.pending_lesson_proposals().unwrap();
+        let promoted: Vec<&str> = proposals
+            .iter()
+            .filter(|proposal| proposal.kind == ProposalKind::Promote)
+            .filter(|proposal| proposal.target_level == Some(LessonLevel::Global))
+            .filter_map(|proposal| proposal.lesson_id.as_deref())
+            .collect();
+        assert_eq!(promoted.len(), 2);
+        assert!(promoted.contains(&created.id.as_str()));
+        assert!(promoted.contains(&existing.id.as_str()));
+        assert_eq!(
+            proposals
+                .iter()
+                .filter(|proposal| proposal.kind == ProposalKind::Skill)
+                .count(),
+            1
+        );
+
+        // Ne reste que l'entrée vide, jamais importée ; un second passage
+        // ne fait rien et ne laisse pas de trace.
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(state["entries"]["memory"].as_object().unwrap().is_empty());
+        assert!(state["entries"]["skill"].as_object().unwrap().is_empty());
+        assert!(state["entries"]["subagent"]["vide"].is_object());
+        assert_eq!(
+            import_global_harness_writes(&store, &agent_dir, &thread).unwrap(),
+            None
+        );
+        assert!(store
+            .imported_refinement(&report.refinement_id)
+            .unwrap()
+            .is_some());
+        // Une écriture à nouveau : pas de seconde proposition identique.
+        let mut state = state;
+        state["entries"]["memory"]["langue"] =
+            entry("langue", "memory", "Langue", "Répondre en français.");
+        std::fs::write(&file, state.to_string()).unwrap();
+        let again = import_global_harness_writes(&store, &agent_dir, &thread)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.duplicates, vec![created.id.clone()]);
+        assert!(again.proposals.is_empty(), "report: {again:?}");
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn no_global_harness_file_means_nothing_to_guard() {
+        let (store, agent_dir) = import_fixture(&[]);
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        assert_eq!(
+            import_global_harness_writes(&store, &agent_dir, &thread).unwrap(),
+            None
         );
         let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }

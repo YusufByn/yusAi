@@ -1457,6 +1457,150 @@ async fn refinements_become_lessons_once_and_leave_the_harness() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Garde globale, avec un vrai noyau (sauté sans `uv`) : une cellule
+/// `rlm.harness.create_memory(…, global_=True)` écrit dans
+/// `<agent_dir>/harness/harness_state.json`, que Prime réinjecte dans toutes
+/// les sessions (pa-core/src/session_engine/engine.rs:548). La garde en fait
+/// une leçon de la conversation, proposée pour le global, et la retire du
+/// fichier.
+#[tokio::test(flavor = "multi_thread")]
+async fn model_global_harness_writes_become_proposed_project_lessons() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::{AppStore, LessonLevel, LessonScope, ProposalKind};
+    use sinew_desktop_lib::prime::ensure_daemon_running_with_kernel_venv;
+    use sinew_desktop_lib::prime_lessons::{
+        global_harness_file, import_global_harness_writes, ThreadContext,
+    };
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+
+    if !uv_available() {
+        eprintln!("uv not found; skipping the live-kernel global harness e2e");
+        return;
+    }
+    let kernel_venv = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prime-kernel-venv");
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [
+            { "content": [{
+                "type": "toolCall",
+                "name": "ipython",
+                "arguments": { "code": "rlm.harness.create_memory(\"Langue\", \"Répondre en français.\", global_=True)" },
+            }] },
+            { "text": "noté" },
+        ] })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) =
+        ensure_daemon_running_with_kernel_venv(&exe, &socket_path, &agent_dir, &kernel_venv)
+            .await
+            .expect("daemon starts");
+    let opened = open_thread(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        }),
+        &thread_path(&agent_dir, "conv-global").unwrap(),
+    )
+    .await
+    .expect("thread opened");
+    let session = opened.active_session_id.clone();
+    prompt(&client, &session, "retiens que je parle français")
+        .await
+        .expect("prompt admitted");
+    let mut cell_ended = false;
+    // La première construction du venv peut prendre quelques minutes.
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "tool_execution_end" {
+                    assert_ne!(event["isError"], true, "cell failed: {event}");
+                    cell_ended = true;
+                }
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        turn.is_ok() && cell_ended,
+        "the cell ran and the turn ended"
+    );
+
+    let file = global_harness_file(&agent_dir);
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).expect("global harness written"))
+            .unwrap();
+    assert_eq!(
+        written["entries"]["memory"]
+            .as_object()
+            .map(|entries| entries.len()),
+        Some(1),
+        "global harness: {written}"
+    );
+
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let thread = ThreadContext {
+        conversation_id: "conv-global".to_string(),
+        workspace_id: workspace.to_string_lossy().into_owned(),
+    };
+    let report = import_global_harness_writes(&store, &agent_dir, &thread)
+        .unwrap()
+        .expect("global write imported");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    assert_eq!(report.removed_entries, 1, "report: {report:?}");
+    let lessons = store
+        .applicable_lessons(&LessonScope {
+            workspace_id: thread.workspace_id.clone(),
+            project_type: None,
+        })
+        .unwrap();
+    assert_eq!(lessons.len(), 1);
+    assert_eq!(lessons[0].level, LessonLevel::Project);
+    assert_eq!(lessons[0].content, "Répondre en français.");
+    let proposals = store.pending_lesson_proposals().unwrap();
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].kind, ProposalKind::Promote);
+    assert_eq!(proposals[0].target_level, Some(LessonLevel::Global));
+    assert_eq!(proposals[0].lesson_id.as_ref(), Some(&lessons[0].id));
+    let left: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(left["entries"]["memory"].as_object().unwrap().is_empty());
+    assert_eq!(
+        import_global_harness_writes(&store, &agent_dir, &thread).unwrap(),
+        None
+    );
+
+    kill_session(&client, &session)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
 fn uv_available() -> bool {
     let on_path = std::env::var_os("PATH")

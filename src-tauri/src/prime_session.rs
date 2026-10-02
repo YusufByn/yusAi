@@ -30,7 +30,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::prime_diffs::PrimeDiffs;
 use crate::prime_lessons::{
-    import_refinement_outcome, import_thread_outcomes, refinement_outcome_details, ThreadContext,
+    import_global_harness_writes, import_refinement_outcome, import_thread_outcomes,
+    refinement_outcome_details, ThreadContext,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, watch, Mutex};
 
@@ -844,6 +845,9 @@ fn spawn_event_relay(
                     match &payload {
                         PrimeEventPayload::SessionEvent { active_session_id, event } => {
                             state.with_diffs(|diffs| diffs.observe(active_session_id, event));
+                            if event["type"] == "tool_execution_end" {
+                                guard_global_harness(&app, &state, active_session_id);
+                            }
                             if event["type"] == "message_end" {
                                 if let Some(details) = refinement_outcome_details(&event["message"]) {
                                     import_live_refinement(&app, &state, active_session_id, details);
@@ -898,6 +902,30 @@ fn import_live_refinement(
             Ok(Some(report)) => tracing::info!(?report, "prime refine imported"),
             Ok(None) => {}
             Err(error) => tracing::warn!(error = %error, "prime refine import failed"),
+        }
+    });
+}
+
+/// Après chaque cellule, en tâche de fond : les écritures directes du modèle
+/// dans le harness global de Prime (`rlm.harness.*(…, global_=True)`)
+/// deviennent des leçons de cette conversation, proposées pour le global.
+/// Deux cellules finies au même moment dans deux conversations : la
+/// première arrivée prend les entrées (limite notée dans CONTEXT.md).
+fn guard_global_harness(app: &AppHandle, state: &PrimeState, active_session_id: &str) {
+    let Some(thread) = state.thread(active_session_id) else {
+        return;
+    };
+    let Some(store) = app
+        .try_state::<crate::DesktopState>()
+        .map(|desktop| desktop.store.clone())
+    else {
+        return;
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        match import_global_harness_writes(&store, &crate::prime::agent_dir(), &thread) {
+            Ok(Some(report)) => tracing::info!(?report, "prime global harness writes imported"),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = %error, "prime global harness guard failed"),
         }
     });
 }
