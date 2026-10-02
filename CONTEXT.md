@@ -120,6 +120,10 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 - **Type de projet** : sélecteur dans l'en-tête du chat Prime, prérempli par
   une suggestion tirée des fichiers du projet ; types en noms libres ; choix
   retenu par projet.
+- **Déclencheur des refines** : refine locale automatique à la « fermeture »
+  d'une conversation, plus un bouton « Retenir » qui la force à la demande.
+  L'auto-refine de Prime seule est trop rare : elle ne part qu'après une
+  compaction (`pa-daemon/src/compact_autorefine.rs:6-25`).
 
 ## Fait récemment (commits)
 
