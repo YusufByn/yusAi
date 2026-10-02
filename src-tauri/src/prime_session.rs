@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use pa_tui::daemon_client::{DaemonClient, DaemonClientEvent};
-use pa_types::daemon::{DaemonCommand, PromptInput, StreamingBehavior};
+use pa_types::daemon::{DaemonCommand, DaemonErrorInfo, PromptInput, StreamingBehavior};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sinew_app::tool_run::FileChange;
@@ -159,42 +159,77 @@ pub async fn create_session(client: &DaemonClient, config: Value) -> Result<Stri
     create_session_with_metadata(client, config, ide_runtime_metadata()).await
 }
 
-/// Crée une session sans fichier persistant (comme l'ACP daemon-attached,
-/// pa-daemon/src/acp/daemon.rs:545-560) et s'y attache pour recevoir ses
-/// événements (daemon.rs:584-595). Renvoie l'`activeSessionId`.
-pub async fn create_session_with_metadata(
-    client: &DaemonClient,
+/// Dossier des fils Prime des conversations yusAi, hors de `sessions/` :
+/// le superviseur y déplace les vieux fichiers vers `sessions-archive/`
+/// (pa-daemon/src/session_archive.rs:1-17, 184-215), et un `Create` sur un
+/// chemin disparu ouvrirait une session vide (pa-daemon/src/worker/create.rs:300-328).
+const THREADS_DIR: &str = "yusai-threads";
+
+/// Le fichier de session Prime d'une conversation yusAi.
+pub fn thread_path(agent_dir: &Path, conversation_id: &str) -> Result<PathBuf> {
+    let valid = !conversation_id.is_empty()
+        && conversation_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err(anyhow!("invalid conversation id: {conversation_id:?}"));
+    }
+    Ok(agent_dir
+        .join(THREADS_DIR)
+        .join(format!("{conversation_id}.jsonl")))
+}
+
+/// Une session attachée et son historique : le `snapshot.messages` de
+/// l'attach (pa-daemon/src/worker/connection.rs:860-894).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedSession {
+    pub active_session_id: String,
+    pub messages: Vec<Value>,
+}
+
+/// La commande `Create` : en mémoire sans `session_path` (comme l'ACP
+/// daemon-attached, pa-daemon/src/acp/daemon.rs:537-560), sinon sur ce
+/// fichier, rouvert s'il existe (pa-daemon/src/worker/create.rs:208-328).
+fn create_command(
     config: Value,
     runtime_metadata: Value,
-) -> Result<String> {
-    let summary = client
-        .request_ok(DaemonCommand::Create {
-            id: None,
-            session_path: None,
-            continue_recent: None,
-            no_session: Some(true),
-            name: None,
-            config: Some(config),
-            // Coupe la télémétrie de session du worker, qui ne lit pas
-            // l'env (pa-daemon/src/agent_engine/lifecycle.rs:1075) ; le flag
-            // suit le worker jusqu'à ses relances (descriptor.rs:113-117).
-            telemetry_disabled: Some(true),
-            runtime_metadata: Some(runtime_metadata),
-            lifecycle: None,
-            env: None,
-            launch_env: None,
-            rest: Map::default(),
-        })
-        .await?;
-    let active_session_id = summary
+    session_path: Option<&Path>,
+) -> DaemonCommand {
+    DaemonCommand::Create {
+        id: None,
+        session_path: session_path.map(|path| path.to_string_lossy().into_owned()),
+        continue_recent: None,
+        no_session: session_path.is_none().then_some(true),
+        name: None,
+        config: Some(config),
+        // Coupe la télémétrie de session du worker, qui ne lit pas
+        // l'env (pa-daemon/src/agent_engine/lifecycle.rs:1075) ; le flag
+        // suit le worker jusqu'à ses relances (descriptor.rs:113-117).
+        telemetry_disabled: Some(true),
+        runtime_metadata: Some(runtime_metadata),
+        lifecycle: None,
+        env: None,
+        launch_env: None,
+        rest: Map::default(),
+    }
+}
+
+fn active_session_id_of(summary: &Value) -> Result<String> {
+    summary
         .get("activeSessionId")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("create response carries no activeSessionId: {summary}"))?
-        .to_string();
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("create response carries no activeSessionId: {summary}"))
+}
+
+/// S'attache à une session pour recevoir ses événements
+/// (pa-daemon/src/acp/daemon.rs:584-595) ; renvoie son historique.
+async fn attach(client: &DaemonClient, active_session_id: &str) -> Result<Vec<Value>> {
     let attached = client
         .request_ok(DaemonCommand::Attach {
             id: None,
-            active_session_id: active_session_id.clone(),
+            active_session_id: active_session_id.to_string(),
             client_id: None,
             capabilities: None,
             resume_cursor: None,
@@ -204,12 +239,87 @@ pub async fn create_session_with_metadata(
             launch_env: None,
             rest: Map::default(),
         })
-        .await;
-    if let Err(error) = attached {
+        .await?;
+    Ok(attached
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("messages"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Crée une session sans fichier persistant et s'y attache. Renvoie
+/// l'`activeSessionId`.
+pub async fn create_session_with_metadata(
+    client: &DaemonClient,
+    config: Value,
+    runtime_metadata: Value,
+) -> Result<String> {
+    let summary = client
+        .request_ok(create_command(config, runtime_metadata, None))
+        .await?;
+    let active_session_id = active_session_id_of(&summary)?;
+    if let Err(error) = attach(client, &active_session_id).await {
         let _ = kill_session(client, &active_session_id).await;
         return Err(error);
     }
     Ok(active_session_id)
+}
+
+/// Ouvre le fil d'une conversation depuis son fichier : le worker le
+/// rouvre avec son modèle et son niveau de réflexion
+/// (pa-daemon/src/worker/create.rs:226-280), ou le crée. Un fichier déjà
+/// tenu par un worker vivant (autre fenêtre) est refusé avec
+/// `SessionAlreadyActive` (pa-daemon/src/supervisor/worker_lifecycle.rs:384-391) :
+/// on s'attache alors à cette session.
+pub async fn open_thread(
+    client: &DaemonClient,
+    config: Value,
+    session_path: &Path,
+) -> Result<OpenedSession> {
+    // Le dossier existe avant le verrou du worker : sinon le verrou retient
+    // le chemin non canonique (pa-daemon/src/lease.rs:78-87) et refuse
+    // ensuite d'écrire dans le fichier créé, dont le chemin canonique diffère
+    // (lien `/var` -> `/private/var` sous macOS, lease.rs:392-396).
+    if let Some(dir) = session_path.parent() {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+    let response = client
+        .request(create_command(
+            config,
+            ide_runtime_metadata(),
+            Some(session_path),
+        ))
+        .await?;
+    let (active_session_id, created) = if response.success {
+        let summary = response.data.unwrap_or(Value::Null);
+        (active_session_id_of(&summary)?, true)
+    } else {
+        match response.error_info {
+            Some(DaemonErrorInfo::SessionAlreadyActive {
+                active_session_id: Some(active_session_id),
+                ..
+            }) => (active_session_id, false),
+            _ => {
+                return Err(anyhow!(
+                    "create failed: {}",
+                    response.error.unwrap_or_default()
+                ))
+            }
+        }
+    };
+    match attach(client, &active_session_id).await {
+        Ok(messages) => Ok(OpenedSession {
+            active_session_id,
+            messages,
+        }),
+        Err(error) => {
+            if created {
+                let _ = kill_session(client, &active_session_id).await;
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Envoie un prompt sans attendre la fin du tour : la réponse arrive par les
@@ -605,17 +715,16 @@ async fn connected_client(app: &AppHandle, state: &PrimeState) -> Result<DaemonC
     let (client, events) = crate::prime::ensure_daemon_running(&socket_path).await?;
     spawn_event_relay(app.clone(), events, client.reader_dead());
     *slot = Some(client.clone());
-    // Chaque nouvelle connexion tue les sessions d'IDE disparus.
-    let reaper = client.clone();
-    tauri::async_runtime::spawn(async move {
-        match reap_orphaned_sessions(&reaper, &crate::prime::agent_dir(), &socket_path).await {
-            Ok(reaped) if !reaped.is_empty() => {
-                tracing::info!(count = reaped.len(), "reaped orphaned prime sessions");
-            }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(error = %error, "prime orphan cleanup failed"),
+    // Chaque nouvelle connexion tue les sessions d'IDE disparus, avant toute
+    // ouverture : un orphelin tient le verrou de son fichier de session, et
+    // le `Create` qui le rouvre serait refusé ou rattaché à lui.
+    match reap_orphaned_sessions(&client, &crate::prime::agent_dir(), &socket_path).await {
+        Ok(reaped) if !reaped.is_empty() => {
+            tracing::info!(count = reaped.len(), "reaped orphaned prime sessions");
         }
-    });
+        Ok(_) => {}
+        Err(error) => tracing::warn!(error = %error, "prime orphan cleanup failed"),
+    }
     Ok(client)
 }
 

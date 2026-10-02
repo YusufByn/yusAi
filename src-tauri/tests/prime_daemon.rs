@@ -496,6 +496,179 @@ async fn tool_file_changes_follow_each_turn() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Fils persistants : une conversation rouvre son fichier de session après
+/// un `Kill` (la fermeture de l'IDE), avec son historique et son niveau de
+/// réflexion, même si une autre session a changé le défaut global entre-temps
+/// (pa-daemon/src/model_switch.rs:221-228). Le fichier vit hors de
+/// `sessions/`, et un fichier déjà tenu est rattaché à sa session.
+#[tokio::test(flavor = "multi_thread")]
+async fn threads_reopen_from_their_file() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_desktop_lib::prime_session::{
+        kill_session, open_thread, prompt, session_config, set_thinking_level, thread_path,
+    };
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "engine": "faux",
+            "reasoning": true,
+            "responses": [{ "text": "bonjour depuis Prime" }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let config = serde_json::json!({
+        "cwd": workspace.to_string_lossy(),
+        "script": script.to_string_lossy(),
+    });
+
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    assert!(thread_path(&agent_dir, "../escape").is_err());
+    let first_path = thread_path(&agent_dir, "conv-1").unwrap();
+    let other_path = thread_path(&agent_dir, "conv-2").unwrap();
+
+    let first = open_thread(&client, config.clone(), &first_path)
+        .await
+        .expect("thread created");
+    assert!(first.messages.is_empty());
+    assert!(first_path.is_file(), "the thread file is written");
+    assert!(!first_path.starts_with(agent_dir.join("sessions")));
+
+    // Un second ouvreur du même fichier rejoint la session qui le tient.
+    let again = open_thread(&client, config.clone(), &first_path)
+        .await
+        .expect("held thread joined");
+    assert_eq!(again.active_session_id, first.active_session_id);
+
+    prompt(&client, &first.active_session_id, "salut")
+        .await
+        .expect("prompt admitted");
+    let mut seen_types = Vec::new();
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            let DaemonClientEvent::SessionEvent { event, .. } = event else {
+                continue;
+            };
+            let kind = event["type"].as_str().unwrap_or_default().to_string();
+            let done = kind == "agent_end";
+            seen_types.push(kind);
+            if done {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(turn.is_ok(), "turn ended; events seen: {seen_types:?}");
+
+    let levels = session_config(&client, &first.active_session_id)
+        .await
+        .expect("session config")
+        .available_thinking_levels;
+    assert!(
+        levels.iter().any(|level| level == "high") && levels.iter().any(|level| level == "low"),
+        "reasoning faux model levels: {levels:?}"
+    );
+    set_thinking_level(&client, &first.active_session_id, "high")
+        .await
+        .expect("thinking level set");
+    // Une autre conversation change le défaut global après coup.
+    let other = open_thread(&client, config.clone(), &other_path)
+        .await
+        .expect("other thread created");
+    set_thinking_level(&client, &other.active_session_id, "low")
+        .await
+        .expect("thinking level set");
+
+    // Fermeture de l'IDE : Kill des deux sessions.
+    kill_session(&client, &first.active_session_id)
+        .await
+        .expect("first killed");
+    kill_session(&client, &other.active_session_id)
+        .await
+        .expect("other killed");
+
+    let reopened = open_thread(&client, config.clone(), &first_path)
+        .await
+        .expect("thread reopened from its file");
+    assert_ne!(reopened.active_session_id, first.active_session_id);
+    let texts: Vec<(String, String)> = reopened
+        .messages
+        .iter()
+        .map(|message| {
+            let role = message["role"].as_str().unwrap_or_default().to_string();
+            let text = match &message["content"] {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Array(blocks) => blocks
+                    .iter()
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            };
+            (role, text)
+        })
+        .filter(|(role, _)| role == "user" || role == "assistant")
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            ("user".to_string(), "salut".to_string()),
+            ("assistant".to_string(), "bonjour depuis Prime".to_string()),
+        ],
+        "messages: {:?}",
+        reopened.messages
+    );
+    let restored = session_config(&client, &reopened.active_session_id)
+        .await
+        .expect("reopened config");
+    assert_eq!(restored.thinking_level.as_deref(), Some("high"));
+    // Le défaut global, lui, est passé à `low` : c'est le fichier qui a parlé.
+    let fresh = open_thread(
+        &client,
+        config.clone(),
+        &thread_path(&agent_dir, "conv-3").unwrap(),
+    )
+    .await
+    .expect("fresh thread created");
+    let fresh_config = session_config(&client, &fresh.active_session_id)
+        .await
+        .expect("fresh config");
+    assert_eq!(fresh_config.thinking_level.as_deref(), Some("low"));
+    kill_session(&client, &fresh.active_session_id)
+        .await
+        .expect("fresh killed");
+
+    kill_session(&client, &reopened.active_session_id)
+        .await
+        .expect("reopened killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cycle `ClientOwned` (pa-daemon/src/supervisor/sessions.rs:621-638) : une
 /// déconnexion sans `Kill` ne fait qu'un `detach`
 /// (pa-daemon/src/supervisor/clients.rs:354-373) et le worker continue de
