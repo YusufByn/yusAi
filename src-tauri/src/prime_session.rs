@@ -29,6 +29,7 @@ use sinew_app::tool_run::FileChange;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::prime_diffs::PrimeDiffs;
+use crate::prime_guidance::{with_guidance, Guidance};
 use crate::prime_lessons::{
     import_global_harness_writes, import_refinement_outcome, import_thread_outcomes,
     refinement_outcome_details, ThreadContext,
@@ -880,6 +881,37 @@ fn spawn_event_relay(
     });
 }
 
+/// Les leçons et consignes de yusAi pour une session du projet. Sans
+/// elles (magasin illisible), la session s'ouvre quand même.
+async fn thread_guidance(app: &AppHandle, workspace_path: &str) -> Option<Guidance> {
+    let store = app
+        .try_state::<crate::DesktopState>()
+        .map(|desktop| desktop.store.clone())?;
+    let workspace_path = workspace_path.to_string();
+    let computed = tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_guidance::thread_guidance(&store, &crate::prime::data_dir(), &workspace_path)
+    })
+    .await;
+    match computed {
+        Ok(Ok(guidance)) => {
+            tracing::info!(
+                injected = guidance.injected.len(),
+                left_out = guidance.left_out.len(),
+                "prime lessons injected"
+            );
+            Some(guidance)
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "prime lessons not injected");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "prime lessons not injected");
+            None
+        }
+    }
+}
+
 /// Importe en tâche de fond une refine reçue en direct dans le relais.
 fn import_live_refinement(
     app: &AppHandle,
@@ -992,7 +1024,11 @@ pub async fn prime_create_session(
     // La connexion Anthropic de yusAi, recopiée avant que le worker ne
     // résolve son modèle.
     crate::prime_auth::ensure_anthropic_sync(&crate::prime::agent_dir()).await;
-    let opened = open_thread(&client, create_config(&workspace_path), &session_path)
+    let config = match thread_guidance(&app, &workspace_path).await {
+        Some(guidance) => with_guidance(create_config(&workspace_path), &guidance),
+        None => create_config(&workspace_path),
+    };
+    let opened = open_thread(&client, config, &session_path)
         .await
         .map_err(error_text)?;
     let active_session_id = opened.active_session_id.clone();

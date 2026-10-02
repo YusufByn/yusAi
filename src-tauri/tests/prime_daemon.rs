@@ -2039,6 +2039,136 @@ async fn a_worker_killed_during_a_refine_frees_the_queue_at_once() {
     stop_scripted_thread(client, &session, &root).await;
 }
 
+/// Les leçons du magasin arrivent dans le prompt système par
+/// `appendSystemPrompt` : consignes, une puce par leçon, puce de
+/// dépassement au-delà de 4 000 caractères. Le texte est figé au `Create` :
+/// une leçon ajoutée ensuite n'arrive qu'à la réouverture du fil.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn lessons_reach_the_system_prompt_when_a_thread_opens() {
+    use sinew_app::store::{
+        AppStore, InsertLessonOutcome, LessonKind, LessonLevel, LessonOrigin, NewLesson,
+    };
+    use sinew_desktop_lib::prime_guidance::{thread_guidance, with_guidance};
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, thread_path};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_id = workspace.to_string_lossy().into_owned();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let insert = |level: LessonLevel, title: &str, content: &str| {
+        let new = NewLesson {
+            level,
+            workspace_id: Some(workspace_id.clone()),
+            project_type: None,
+            kind: LessonKind::Memory,
+            title: title.to_string(),
+            content: content.to_string(),
+        };
+        assert!(matches!(
+            store.insert_lesson(&new, &LessonOrigin::user()).unwrap(),
+            InsertLessonOutcome::Created(_)
+        ));
+    };
+    insert(LessonLevel::Global, "Langue", "Répondre en français.");
+    for index in 0..15 {
+        insert(
+            LessonLevel::Project,
+            &format!("Règle {index:02}"),
+            &format!("{index:02} {}", "détail ".repeat(45)),
+        );
+    }
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, _events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-guidance").unwrap();
+    let base = serde_json::json!({
+        "cwd": workspace.to_string_lossy(),
+        "script": script.to_string_lossy(),
+    });
+    let system_prompt = |session: String| {
+        let client = &client;
+        async move {
+            client
+                .request_ok(pa_types::daemon::DaemonCommand::GetSystemPrompt {
+                    id: None,
+                    active_session_id: session,
+                    rest: serde_json::Map::default(),
+                })
+                .await
+                .expect("get_system_prompt")["systemPrompt"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        }
+    };
+
+    let guidance = thread_guidance(&store, &root, &workspace_id).unwrap();
+    assert!(!guidance.left_out.is_empty(), "guidance: {guidance:?}");
+    let opened = open_thread(&client, with_guidance(base.clone(), &guidance), &path)
+        .await
+        .expect("thread opened");
+    let prompt = system_prompt(opened.active_session_id.clone()).await;
+    let section = &prompt[prompt
+        .find("# Additional Guidance")
+        .expect("guidance section")..];
+    assert!(section.contains("\n- Consignes de yusAi : n'écris jamais dans le harness global"));
+    assert!(section.contains(&format!("{}", root.join("prime-skills/projects").display())));
+    // La leçon la plus récente d'abord, coupée à 300 caractères.
+    assert!(section.contains("\n- [projet · fait] Règle 14 : 14 détail"));
+    assert!(section.contains("…\n"));
+    assert!(section.contains(&format!(
+        "\n- {} autres leçons de yusAi ne sont pas injectées (limite de taille).",
+        guidance.left_out.len()
+    )));
+    for line in &guidance.lines {
+        assert!(section.contains(&format!("- {line}")), "missing: {line}");
+    }
+    assert!(
+        !section.contains("Répondre en français."),
+        "the global lesson is left out"
+    );
+
+    // Une leçon ajoutée en cours de route : absente jusqu'à la réouverture.
+    insert(LessonLevel::Project, "Nouvelle", "Toujours relire le diff.");
+    assert!(!system_prompt(opened.active_session_id.clone())
+        .await
+        .contains("Toujours relire le diff."));
+    kill_session(&client, &opened.active_session_id)
+        .await
+        .expect("session killed");
+    let guidance = thread_guidance(&store, &root, &workspace_id).unwrap();
+    let reopened = open_thread(&client, with_guidance(base, &guidance), &path)
+        .await
+        .expect("thread reopened");
+    assert!(system_prompt(reopened.active_session_id.clone())
+        .await
+        .contains("\n- [projet · fait] Nouvelle : Toujours relire le diff."));
+
+    kill_session(&client, &reopened.active_session_id)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
 fn uv_available() -> bool {
     let on_path = std::env::var_os("PATH")

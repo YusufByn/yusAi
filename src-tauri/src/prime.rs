@@ -129,7 +129,7 @@ fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 /// Dossier de données local de yusAi (le même que `AppStore::open_default`).
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     directories::ProjectDirs::from("dev", "hyrak", "sinew")
         .map(|dirs| dirs.data_local_dir().to_path_buf())
         .unwrap_or_else(|| std::env::temp_dir().join("sinew"))

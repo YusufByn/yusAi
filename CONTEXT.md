@@ -192,7 +192,14 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   import, retrait de nos `yl_…` même en cas d'échec, puis `mark_refined`
   si la refine a réussi (un échec ne touche pas `pending` : à l'appelant de
   décider). Pas encore d'appelant : « Retenir » (commit 7) et la fermeture
-  (commit 8). Les leçons ne sont pas encore réinjectées (commit 6 du plan).
+  (commit 8). Injection (`src-tauri/src/prime_guidance.rs`) : à chaque
+  ouverture d'un fil, `appendSystemPrompt` porte une puce de consignes
+  (pas d'écriture dans le harness global ; skills du projet dans
+  `<données>/prime-skills/projects/<hash du chemin>/`, que `config.skills`
+  ne charge qu'au commit 11), puis une puce par leçon
+  (`[projet · fait] Titre : contenu`, 300 caractères au plus), 4 000 au
+  total, et une puce qui compte les leçons restées dehors. Figé au
+  `Create` : une leçon nouvelle n'arrive qu'à la réouverture du fil.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
