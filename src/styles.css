@@ -6315,6 +6315,30 @@ textarea {
   color: var(--text-0);
   -webkit-text-fill-color: var(--text-0);
 }
+.prime-agent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 9px;
+  border-left: 2px solid var(--line-strong);
+}
+.prime-agent-row__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.prime-agent-row__name {
+  color: var(--text-1);
+  font-weight: 500;
+}
+.prime-agent-row__notice {
+  color: var(--text-3);
+}
+.prime-agent-row[data-kind="notice"] {
+  border-left-color: var(--text-3);
+}
 .prime-chat__error {
   color: var(--danger);
   font-size: var(--fs-sm);

@@ -1,7 +1,7 @@
 // Run with `npm test` (Node runs the TypeScript directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bashCalls, primeBashTitle } from "../src/lib/primeBash.ts";
+import { bashCalls, primeBashTitle, spawnCalls } from "../src/lib/primeBash.ts";
 
 const PROJECT = "/Users/me/Desktop/yusAi";
 
@@ -99,4 +99,27 @@ test("a non-literal command is counted but not shown", () => {
   assert.deepEqual(bashCalls(code), [null, "pwd"]);
   assert.deepEqual(primeBashTitle(code, PROJECT), { command: "pwd", more: 1 });
   assert.equal(primeBashTitle("await bash(cmd)", PROJECT), null);
+});
+
+test("spawn names: literal, variable, f-string, several calls", () => {
+  assert.deepEqual(spawnCalls("handle = await rlm.spawn('sub-task', name='worker')"), ["worker"]);
+  assert.deepEqual(
+    spawnCalls('await rlm.spawn(\n    "relis " + path,\n    model="anthropic/x",\n    name="reviewer",\n)'),
+    ["reviewer"],
+  );
+  assert.deepEqual(spawnCalls("await rlm.spawn(task, name=agent_name)"), [null]);
+  assert.deepEqual(spawnCalls('await rlm.spawn(task, name=f"worker-{i}")'), [null]);
+  assert.deepEqual(spawnCalls('await rlm.spawn(task, name=f"worker")'), ["worker"]);
+  assert.deepEqual(
+    spawnCalls("a = await rlm.spawn('x', name='a')\nb = await rlm.spawn('y', name='b')"),
+    ["a", "b"],
+  );
+});
+
+test("spawn: nested names, comments, strings and other callees are ignored", () => {
+  assert.deepEqual(spawnCalls("await rlm.spawn(fmt(name='inner'), name='outer')"), ["outer"]);
+  assert.deepEqual(spawnCalls("# await rlm.spawn('x', name='a')"), []);
+  assert.deepEqual(spawnCalls("print(\"rlm.spawn('x', name='a')\")"), []);
+  assert.deepEqual(spawnCalls("other.spawn('x', name='a')\nspawn('x', name='b')"), []);
+  assert.deepEqual(spawnCalls("await rlm.spawn('x', name='a') == 1"), ["a"]);
 });

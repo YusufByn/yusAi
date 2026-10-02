@@ -8,6 +8,7 @@ function convert(history: unknown[]) {
   return historyToMessages(history, {
     nextId: () => id++,
     bashTitle: (code) => (code.includes("bash(") ? { command: "ls", more: 0 } : null),
+    spawnNames: (code) => (code.includes("rlm.spawn(") ? ["kid"] : []),
   });
 }
 
@@ -44,6 +45,7 @@ test("prompts, text and a completed tool call", () => {
       summary: "print(bash('ls'))",
       argsPretty: "print(bash('ls'))",
       bash: { command: "ls", more: 0 },
+      spawns: [],
       status: "done",
       isError: false,
       output: "README.md",
@@ -116,5 +118,47 @@ test("string content, custom rows and unknown roles", () => {
   assert.deepEqual(items, [
     { id: 1, role: "user", text: "salut" },
     { id: 2, role: "assistant", text: "bonjour" },
+  ]);
+});
+
+test("sub-agent spawns, replies and abnormal ends", () => {
+  const items = convert([
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "c1", name: "ipython", arguments: { code: "await rlm.spawn('t', name='kid')" } },
+      ],
+    },
+    { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "ok" }], isError: false },
+    {
+      role: "custom",
+      customType: "agent_message",
+      display: true,
+      content: "Agent-to-agent message received. ...",
+      details: {
+        message: "fini du kid",
+        from: { sessionName: "kid", runtimeKind: "subagent" },
+        fromRelationship: "child",
+      },
+    },
+    {
+      role: "custom",
+      customType: "rlm_child_terminal_notice",
+      content: "[child-exited: no-reply child:kid]",
+      details: { kind: "completed_without_reply", sessionName: "kid" },
+    },
+    {
+      role: "custom",
+      customType: "rlm_child_failure",
+      content: "[child-failed child:bob]",
+      details: { sessionName: "bob", error: "boom" },
+    },
+    { role: "custom", customType: "refinement_notice", content: "..." },
+  ]);
+  assert.equal(items[0].role === "tool" && items[0].spawns.join(), "kid");
+  assert.deepEqual(items.slice(1), [
+    { id: 2, role: "agent", kind: "message", name: "kid", text: "fini du kid" },
+    { id: 3, role: "agent", kind: "notice", name: "kid", text: "Finished without replying" },
+    { id: 4, role: "agent", kind: "notice", name: "bob", text: "Failed: boom" },
   ]);
 });

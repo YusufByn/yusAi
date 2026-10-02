@@ -645,6 +645,53 @@ pub async fn session_config(
     })
 }
 
+/// Un sous-agent de la session, pour l'état affiché sur sa carte.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimeSubAgent {
+    pub session_name: String,
+    /// `running`, `done`, `error` ou `cancelled`
+    /// (pa-daemon/src/rlm_children.rs:215-229).
+    pub status: String,
+    pub answer_preview: Option<String>,
+}
+
+/// Les sous-agents de la session (`get_rlm_children`,
+/// pa-daemon/src/state_getters.rs:38-64) : les enfants ne poussent rien au
+/// parent, leur état se lit à la demande.
+pub async fn rlm_children(
+    client: &DaemonClient,
+    active_session_id: &str,
+) -> Result<Vec<PrimeSubAgent>> {
+    let data = client
+        .request_ok(DaemonCommand::GetRlmChildren {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    Ok(data
+        .get("children")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|child| {
+            Some(PrimeSubAgent {
+                session_name: child.get("sessionName")?.as_str()?.to_string(),
+                status: child
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running")
+                    .to_string(),
+                answer_preview: child
+                    .get("answerPreview")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect())
+}
+
 /// Le dossier de travail du worker de la session : le `cwd` du `Create`
 /// (pa-daemon/src/supervisor/worker_lifecycle.rs:136-145), dans lequel le
 /// superviseur lance le worker (pa-daemon/src/supervisor/supervision.rs:416-449)
@@ -863,6 +910,18 @@ pub async fn prime_abort(
 ) -> Result<(), String> {
     let client = connected_client(&app, &state).await.map_err(error_text)?;
     abort(&client, &active_session_id).await.map_err(error_text)
+}
+
+#[tauri::command]
+pub async fn prime_rlm_children(
+    app: AppHandle,
+    state: State<'_, PrimeState>,
+    active_session_id: String,
+) -> Result<Vec<PrimeSubAgent>, String> {
+    let client = connected_client(&app, &state).await.map_err(error_text)?;
+    rlm_children(&client, &active_session_id)
+        .await
+        .map_err(error_text)
 }
 
 #[tauri::command]

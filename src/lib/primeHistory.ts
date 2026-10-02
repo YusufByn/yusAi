@@ -7,7 +7,24 @@ import type { PrimeBashTitle } from "./primeBash";
 import type { ToolCardProps } from "../components/chat/ToolCard";
 import type { FileChange, ToolResultImage } from "../types";
 
-export type PrimeMessage = PrimeTextMessage | PrimeThinking | PrimeToolCall;
+export type PrimeMessage =
+  | PrimeTextMessage
+  | PrimeThinking
+  | PrimeToolCall
+  | PrimeAgentMessage;
+
+// A sub-agent's row in its parent's thread: its reply (`agent_message`,
+// pa-core/src/session_engine/agent_messaging.rs:303-326) or the notice of an
+// abnormal end (`rlm_child_terminal_notice` / `rlm_child_failure`,
+// pa-core/src/session_engine/rlm_notices.rs:41-118).
+export type PrimeAgentMessage = {
+  id: number;
+  role: "agent";
+  kind: "message" | "notice";
+  // The sender's `sessionName` (the `name=` of its spawn), when known.
+  name: string | null;
+  text: string;
+};
 
 // The model's reasoning, summarized by the provider: live from the
 // `thinking_delta` stream events, restored from `thinking` content blocks.
@@ -38,6 +55,9 @@ export type PrimeToolCall = {
   argsPretty?: string;
   // The cell's shell command, when it calls bash.
   bash: PrimeBashTitle | null;
+  // The `name=` of each `rlm.spawn(...)` in the cell (null when not a
+  // literal); empty when it spawns nothing.
+  spawns: (string | null)[];
   // Kernel boot stage shown as the title while the call runs.
   note?: string;
   output?: string;
@@ -136,6 +156,7 @@ export function historyToMessages(
   options: {
     nextId: () => number;
     bashTitle: (code: string) => PrimeBashTitle | null;
+    spawnNames: (code: string) => (string | null)[];
   },
 ): PrimeMessage[] {
   const items: PrimeMessage[] = [];
@@ -180,6 +201,7 @@ export function historyToMessages(
             summary: toolSummary(name, record.arguments),
             argsPretty: toolArgsPretty(record.arguments),
             bash: code === undefined ? null : options.bashTitle(code),
+            spawns: code === undefined ? [] : options.spawnNames(code),
             status: "error",
             isError: true,
             output: "Interrupted",
@@ -190,6 +212,9 @@ export function historyToMessages(
       if (message.stopReason === "error" && typeof message.errorMessage === "string") {
         items.push({ id: options.nextId(), role: "error", text: message.errorMessage });
       }
+    } else if (message.role === "custom") {
+      const row = agentRow(message, options.nextId);
+      if (row) items.push(row);
     } else if (message.role === "toolResult" && typeof message.toolCallId === "string") {
       const index = toolIndex.get(message.toolCallId);
       const call = index === undefined ? undefined : items[index];
@@ -206,6 +231,57 @@ export function historyToMessages(
     }
   }
   return items;
+}
+
+// A sub-agent row from a `custom` message, live (`message_start`) or
+// restored; null for any other custom row.
+export function agentRow(
+  message: Record<string, unknown>,
+  nextId: () => number,
+): PrimeAgentMessage | null {
+  const details =
+    message.details && typeof message.details === "object"
+      ? (message.details as Record<string, unknown>)
+      : {};
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  if (message.customType === "agent_message") {
+    const from =
+      details.from && typeof details.from === "object"
+        ? (details.from as Record<string, unknown>)
+        : {};
+    return {
+      id: nextId(),
+      role: "agent",
+      kind: "message",
+      name: text(from.sessionName) || null,
+      text: text(details.message) || messageText(message.content),
+    };
+  }
+  if (message.customType === "rlm_child_terminal_notice") {
+    const reason =
+      details.kind === "cancelled"
+        ? `Cancelled${text(details.reason) ? `: ${text(details.reason)}` : ""}`
+        : details.kind === "completed_without_reply"
+          ? "Finished without replying"
+          : messageText(message.content);
+    return {
+      id: nextId(),
+      role: "agent",
+      kind: "notice",
+      name: text(details.sessionName) || null,
+      text: reason,
+    };
+  }
+  if (message.customType === "rlm_child_failure") {
+    return {
+      id: nextId(),
+      role: "agent",
+      kind: "notice",
+      name: text(details.sessionName) || null,
+      text: `Failed${text(details.error) ? `: ${text(details.error)}` : ""}`,
+    };
+  }
+  return null;
 }
 
 function messageText(content: unknown): string {

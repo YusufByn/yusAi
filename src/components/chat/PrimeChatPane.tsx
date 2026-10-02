@@ -2,8 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { listen } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
-import { primeBashTitle } from "../../lib/primeBash";
+import { primeBashTitle, spawnCalls } from "../../lib/primeBash";
 import {
+  agentRow,
   historyToMessages,
   toolArgsPretty,
   toolCode,
@@ -21,7 +22,7 @@ import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
 import type { PrimeEventPayload, PrimeModelOption, PrimeSessionConfig } from "../../types";
 import { AIThinkingBlock } from "./AIThinkingBlock";
 import { Markdown } from "./Markdown";
-import { ToolCard, type ToolOutputLimit } from "./ToolCard";
+import { AiAgentGlyph, ToolCard, type ToolOutputLimit } from "./ToolCard";
 
 // Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
 // one pane per yusAi conversation), opened the first time the pane is shown
@@ -31,6 +32,15 @@ import { ToolCard, type ToolOutputLimit } from "./ToolCard";
 // sub-agents are out of scope for this milestone.
 
 type PrimeStatus = "idle" | "starting" | "streaming";
+
+// How often a pane on screen refreshes its sub-agents' status while one runs.
+const SUB_AGENT_POLL_MS = 2000;
+
+// `get_rlm_children` statuses (pa-daemon/src/rlm_children.rs:215-229).
+function subAgentStatusLabel(status: string): string {
+  if (status === "error") return "failed";
+  return status;
+}
 
 // Tool output beyond this renders behind "Show all": a cell can print
 // megabytes of stdout, and every streamed chunk re-renders the card.
@@ -58,6 +68,8 @@ export function PrimeChatPane({
   const [text, setText] = useState("");
   const [config, setConfig] = useState<PrimeSessionConfig | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
+  // Spawned sub-agents' status by name, from `get_rlm_children`.
+  const [subAgentStatus, setSubAgentStatus] = useState<Record<string, string>>({});
   // Bumped when the daemon closes the session (idle passivation, another
   // window): a pane on screen reopens its thread from the file.
   const [closedCount, setClosedCount] = useState(0);
@@ -243,6 +255,12 @@ export function PrimeChatPane({
           break;
         case "message_start":
           if (message?.role === "assistant") streamingIdRef.current = null;
+          // Custom rows arrive as a start + end pair; the start adds the row
+          // (pa-tui/src/snapshot/decoder.rs:262-266).
+          if (message?.role === "custom") {
+            const row = agentRow(message as Record<string, unknown>, () => nextIdRef.current++);
+            if (row) setMessages((current) => [...current, row]);
+          }
           break;
         case "message_update": {
           const stream = event.assistantMessageEvent as
@@ -283,6 +301,7 @@ export function PrimeChatPane({
               summary: toolSummary(name, event.args),
               argsPretty: toolArgsPretty(event.args),
               bash: code === undefined ? null : primeBashTitle(code, workspacePath),
+              spawns: code === undefined ? [] : spawnCalls(code),
               status: "running",
               isError: false,
             },
@@ -379,6 +398,7 @@ export function PrimeChatPane({
           historyToMessages(opened.messages, {
             nextId: () => nextIdRef.current++,
             bashTitle: (code) => primeBashTitle(code, workspacePath),
+            spawnNames: spawnCalls,
           }),
         );
         // Read after the open: the worker has restored the file's model and
@@ -400,6 +420,38 @@ export function PrimeChatPane({
       if (!unmountedRef.current) pushMessage("error", String(err));
     });
   }, [active, ensureSession, pushMessage, closedCount]);
+
+  // Sub-agents run in their own sessions and push nothing to the parent
+  // (pa-daemon/src/state_getters.rs:38-64): poll while one may be running.
+  const hasSpawns = messages.some((message) => message.role === "tool" && message.spawns.length > 0);
+  const subAgentRunning = Object.values(subAgentStatus).some((value) => value === "running");
+  useEffect(() => {
+    const sessionId = sessionIdRef.current;
+    if (!active || !hasSpawns || !sessionId) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const children = await api.primeRlmChildren(sessionId);
+        if (stopped) return;
+        setSubAgentStatus(
+          Object.fromEntries(children.map((child) => [child.sessionName, child.status])),
+        );
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    void poll();
+    if (status === "idle" && !subAgentRunning) {
+      return () => {
+        stopped = true;
+      };
+    }
+    const timer = window.setInterval(() => void poll(), SUB_AGENT_POLL_MS);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [active, hasSpawns, subAgentRunning, status, config]);
 
   useLayoutEffect(() => {
     const body = bodyRef.current;
@@ -514,9 +566,31 @@ export function PrimeChatPane({
                     images={message.images}
                     fileChanges={message.fileChanges}
                     outputLimit={TOOL_OUTPUT_LIMIT}
-                    displayTitle={primeToolTitle(message)}
+                    displayTitle={primeToolTitle(message, (name) => {
+                      const value = subAgentStatus[name];
+                      return value ? subAgentStatusLabel(value) : undefined;
+                    })}
                     onOpenFile={onOpenFile}
                   />
+                </div>
+              ) : message.role === "agent" ? (
+                <div key={message.id} className="msg" data-role="assistant">
+                  <div className="prime-agent-row" data-kind={message.kind}>
+                    <div className="prime-agent-row__head">
+                      <AiAgentGlyph />
+                      <span className="prime-agent-row__name">
+                        {message.name ? `@${message.name}` : "Sub-agent"}
+                      </span>
+                      {message.kind === "notice" && (
+                        <span className="prime-agent-row__notice">{message.text}</span>
+                      )}
+                    </div>
+                    {message.kind === "message" && (
+                      <div className="msg__body">
+                        <Markdown text={message.text} onOpenFile={onOpenFile} />
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : message.role === "thinking" ? (
                 <div key={message.id} className="msg" data-role="assistant">

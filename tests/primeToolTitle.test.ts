@@ -65,3 +65,22 @@ test("the kernel boot note wins while the call starts", () => {
     undefined,
   );
 });
+
+test("a spawn cell shows the agent, its status and the other spawns", () => {
+  const status = (name: string) => (name === "kid" ? "running" : undefined);
+  assert.deepEqual(primeToolTitle({ bash: null, spawns: ["kid"] }, status), {
+    glyph: "agent",
+    main: "Agent · kid",
+    meta: "running",
+  });
+  assert.deepEqual(primeToolTitle({ bash: null, spawns: ["kid", null] }, status), {
+    glyph: "agent",
+    main: "Agent · kid",
+    meta: "running · +1",
+  });
+  assert.deepEqual(primeToolTitle({ bash: { command: "ls", more: 0 }, spawns: [null] }), {
+    glyph: "agent",
+    main: "Agent",
+    meta: undefined,
+  });
+});

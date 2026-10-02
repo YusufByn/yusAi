@@ -852,6 +852,14 @@ export type PrimeEventPayload =
 
 // Modèle et niveau de réflexion d'une session Prime (prime_session_config).
 export type PrimeModelOption = { provider: string; id: string; name: string };
+// Un sous-agent d'une session Prime (`get_rlm_children`).
+export type PrimeSubAgent = {
+  sessionName: string;
+  // running | done | error | cancelled
+  status: string;
+  answerPreview?: string | null;
+};
+
 // Une session Prime ouverte et son historique (messages du fichier).
 export type PrimeOpenedSession = {
   activeSessionId: string;

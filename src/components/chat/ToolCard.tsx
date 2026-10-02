@@ -58,9 +58,9 @@ export type ToolCardProps = {
   // its head and a "Show all" toggle, so a huge stdout stays cheap to render.
   outputLimit?: ToolOutputLimit;
   // Opt-in title for a tool whose name does not tell what it did (Prime's
-  // ipython cells): the bash or edit glyph, the command or path as title,
-  // and a meta such as "+2" for the rest.
-  displayTitle?: { glyph: "terminal" | "edit"; main: string; meta?: string };
+  // ipython cells): the bash, edit or agent glyph, the command, path or
+  // sub-agent as title, and a meta such as "+2" for the rest.
+  displayTitle?: { glyph: "terminal" | "edit" | "agent"; main: string; meta?: string };
 };
 
 export type ToolOutputLimit = { chars: number; lines: number };
@@ -1385,6 +1385,8 @@ export function ToolCard({
               <TerminalGlyph />
             ) : isGlob || isGrep ? (
               <AsteriskGlyph />
+            ) : displayTitle?.glyph === "agent" ? (
+              <AiAgentGlyph />
             ) : isEditFile || isWriteFile || displayTitle?.glyph === "edit" ? (
               <Icon icon="solar:pen-new-square-linear" width={12} height={12} />
             ) : isWebSearch ? (

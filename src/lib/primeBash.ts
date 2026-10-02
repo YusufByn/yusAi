@@ -1,5 +1,5 @@
-// Shell commands in a Prime `ipython` cell. Prime's model only has the
-// ipython tool and runs shell commands through the kernel helper
+// Shell commands and sub-agent spawns in a Prime `ipython` cell. Prime's
+// model only has the ipython tool and runs shell commands through the kernel helper
 // `bash(command: str)` (vendor/prime-agent/prime-agent-runtime/src/rlm/bash.py:954),
 // so `r = await bash("ls")` is a shell call and its card shows the command.
 // Kept free of imports so `node --test` can load it as is.
@@ -61,6 +61,100 @@ export function bashCalls(code: string): (string | null)[] {
     index++;
   }
   return calls;
+}
+
+// Every `rlm.spawn(...)` call in order: the sub-agent's `name=` when it is a
+// string literal, else null. The model is told to write
+// `handle = await rlm.spawn('task', name='worker')`
+// (vendor/prime-agent/crates/pa-core/src/prompts/layers/core.md:33), but a
+// name can also come from a variable or an f-string with fields.
+export function spawnCalls(code: string): (string | null)[] {
+  const calls: (string | null)[] = [];
+  let index = 0;
+  while (index < code.length) {
+    const char = code[index];
+    if (char === "#") {
+      const end = code.indexOf("\n", index);
+      index = end < 0 ? code.length : end;
+      continue;
+    }
+    if (!isIdentifierChar(code[index - 1] ?? "")) {
+      const literal = readStringLiteral(code, index);
+      if (literal) {
+        index = literal.end;
+        continue;
+      }
+    }
+    if (isIdentifierStart(char) && !isIdentifierChar(code[index - 1] ?? "")) {
+      let end = index + 1;
+      while (end < code.length && isIdentifierChar(code[end])) end++;
+      if (code.slice(index, end) === "spawn" && identifierBeforeDot(code, index) === "rlm") {
+        const cursor = skipSpace(code, end);
+        if (code[cursor] === "(") calls.push(spawnName(code, cursor + 1));
+      }
+      index = end;
+      continue;
+    }
+    index++;
+  }
+  return calls;
+}
+
+// The identifier before `.<name>` at `index`, if any (`rlm` in `rlm.spawn`).
+function identifierBeforeDot(code: string, index: number): string | null {
+  let cursor = index - 1;
+  while (cursor >= 0 && /\s/.test(code[cursor])) cursor--;
+  if (code[cursor] !== ".") return null;
+  cursor--;
+  while (cursor >= 0 && /\s/.test(code[cursor])) cursor--;
+  const end = cursor + 1;
+  while (cursor >= 0 && isIdentifierChar(code[cursor])) cursor--;
+  return end > cursor + 1 ? code.slice(cursor + 1, end) : null;
+}
+
+// The literal `name=` argument of the call whose arguments start at
+// `start`, read at the call's top level; null when absent or not a plain
+// literal (f-string fields included).
+function spawnName(code: string, start: number): string | null {
+  let depth = 0;
+  let index = start;
+  while (index < code.length) {
+    const char = code[index];
+    if (char === "#") {
+      const end = code.indexOf("\n", index);
+      index = end < 0 ? code.length : end;
+      continue;
+    }
+    if (!isIdentifierChar(code[index - 1] ?? "")) {
+      const literal = readStringLiteral(code, index);
+      if (literal) {
+        index = literal.end;
+        continue;
+      }
+    }
+    if (char === "(" || char === "[" || char === "{") depth++;
+    else if (char === ")" || char === "]" || char === "}") {
+      if (depth === 0) return null;
+      depth--;
+    } else if (
+      depth === 0 &&
+      code.startsWith("name", index) &&
+      !isIdentifierChar(code[index - 1] ?? "") &&
+      !isIdentifierChar(code[index + 4] ?? "")
+    ) {
+      const keyword = /^name\s*=(?!=)\s*/.exec(code.slice(index));
+      if (keyword) {
+        const valueStart = index + keyword[0].length;
+        const prefix = /^[rRuUfFbB]{0,2}/.exec(code.slice(valueStart))?.[0] ?? "";
+        const literal = readStringLiteral(code, valueStart);
+        if (!literal || literal.value === null) return null;
+        if (/[fF]/.test(prefix) && literal.value.includes("{")) return null;
+        return literal.value;
+      }
+    }
+    index++;
+  }
+  return null;
 }
 
 // Drops a leading `cd <project> &&` (Prime prefixes commands with the

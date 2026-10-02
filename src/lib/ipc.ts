@@ -32,6 +32,7 @@ import type {
   OpenRouterProviderStatus,
   PlanControl,
   PrimeOpenedSession,
+  PrimeSubAgent,
   PrimeSessionConfig,
   QuestionAnswer,
   SavedConversation,
@@ -763,6 +764,10 @@ export const api = {
   },
   primeCloseSession(activeSessionId: string) {
     return invoke<void>("prime_close_session", { activeSessionId });
+  },
+  // Les sous-agents de la session et leur état (`get_rlm_children`).
+  primeRlmChildren(activeSessionId: string) {
+    return invoke<PrimeSubAgent[]>("prime_rlm_children", { activeSessionId });
   },
   primeSessionConfig(activeSessionId: string) {
     return invoke<PrimeSessionConfig>("prime_session_config", { activeSessionId });

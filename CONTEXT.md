@@ -31,6 +31,16 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   ignorés, sans durée). Anthropic renvoie une réflexion résumée
   (`display: "summarized"`, `pa-ai/src/providers/anthropic/params.rs:107-128`),
   rien au niveau `off`.
+- **Sous-agents (vus depuis le parent)** : une cellule `rlm.spawn(…)` est
+  titrée « Agent · nom » (« Agent » si `name=` n'est pas un littéral) avec
+  l'état de l'enfant (`get_rlm_children`, interrogé toutes les 2 s tant
+  qu'un enfant tourne, `prime_rlm_children`) ; les lignes `custom`
+  `agent_message` (réponse de l'enfant, `details.from.sessionName`),
+  `rlm_child_terminal_notice` et `rlm_child_failure` s'affichent en direct
+  et à la restauration. Les enfants ne portent pas le marquage yusAi mais
+  meurent avec leur parent (`Kill` : `pa-daemon/src/worker/commands.rs:659` ;
+  mort du worker : `pa-daemon/src/supervisor_parent_death.rs`), donc aussi
+  au nettoyage des orphelins ; test e2e avec vrai noyau.
 - **Fils persistants** : chaque conversation a son fichier de session Prime,
   `<agent_dir>/yusai-threads/<conversationId>.jsonl` (`thread_path`), hors de
   `sessions/` que le superviseur archive (déplace) après 30 jours / 200
@@ -167,6 +177,26 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   (`pa-daemon/src/streaming.rs:118-127`). Ouvrir un bloc au premier delta,
   le fermer sur `*_end`. Les deltas d'un même type s'additionnent sans
   perte (`streaming.rs:1-20`).
+- **Parent sans fichier = pas d'enfant** : un parent en mémoire ne peut pas
+  inscrire son enfant au registre RLM (« invalid spawn »), l'enfant est
+  arrêté aussitôt. Les fils yusAi ont un fichier, ce n'est un piège que
+  pour les tests.
+- **Télémétrie des enfants** : Prime crée les enfants sans
+  `telemetryDisabled` (`pa-daemon/src/rlm_children/lifecycle.rs:124-127`) et
+  le worker ignore `PRIME_AGENT_TELEMETRY` (`pa-daemon/src/agent_engine/lifecycle.rs:1071-1085`) :
+  un enfant crée `telemetry.json` (identifiant d'installation). Aucun
+  événement n'est enregistré et rien ne part sans point d'envoi configuré
+  (`pa-core/src/session_engine/telemetry.rs:1117-1129`). Inévitable sans
+  patch vendor.
+- **`uv` et le PATH** : le venv du noyau se construit avec `uv`, cherché dans
+  le PATH ou `~/.local/bin` (`pa-core/src/kernel/bootstrap/venv/uv.rs:85-101`).
+  En dev (lancé du terminal) il est trouvé ; une app empaquetée lancée du
+  Finder a un PATH minimal et ne trouverait pas un `uv` Homebrew. À traiter
+  au packaging.
+- **Tests e2e en parallèle** : `scratch_dir` doit rester unique (compteur
+  atomique) ; deux tests au même dossier partagent socket et daemon. Le test
+  sous-agents garde son venv dans `CARGO_TARGET_TMPDIR` (première
+  construction : quelques minutes) et se saute sans `uv`.
 - **Test qui panique = daemon orphelin** : un test e2e en échec n'atteint
   pas son `Shutdown` ; vérifier `pgrep -fl yusai-prime-test` après un échec.
 - Prime se présente avec une version Claude Code figée dans vendor
@@ -184,19 +214,11 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
    (`pa-types/src/daemon/command.rs:676`, usage dans
    `pa-daemon/src/acp/daemon.rs:705-730`), sans patch vendor. Les outils
    interactifs (question, todo) demandent en plus un relais vers l'UI.
-3. **Sous-agents (étape B)**, vus depuis le parent : carte de lancement
-   « Agent · nom » en reconnaissant `rlm.spawn(…, name="x")` dans la cellule
-   (titre « Agent » générique si le nom n'est pas un littéral) ; lignes
-   `custom` `agent_message` (`pa-core/src/session_engine/agent_messaging.rs:303-326`)
-   et `rlm_child_terminal_notice` (`pa-core/src/session_engine/rlm_notices.rs:41-86`)
-   en direct et dans l'historique ; état des enfants par `get_rlm_children`
-   (`pa-daemon/src/state_getters.rs:38-64`) tant qu'un enfant tourne.
-   À vérifier d'abord : que les sessions enfants (leur propre worker) sont
-   couvertes par le nettoyage des orphelins (marquage `runtimeMetadata.yusai`
-   absent chez elles ? tuées en cascade avec le parent ?), la forme exacte
-   de l'appel écrit par le modèle, et comment `details.from` désigne
-   l'enfant. Étape C plus tard : vue détaillée d'un enfant (Attach à sa
-   session, ses appels d'outils).
+3. **Sous-agents, étape C** : vue détaillée d'un enfant (Attach à sa
+   session, son fil et ses appels d'outils, Detach à la fermeture). Les
+   enfants meurent avec le parent : après un redémarrage, il faudrait
+   rouvrir leur fichier (`<agent_dir>/session-artifacts/<session du
+   parent>/<enfant>/`, `pa-daemon/src/rlm_children.rs:869-882`).
    Renommer « Sinew » en « yusAi ».
 4. Fermer une seule fenêtre ne tue pas ses sessions avant la sortie de l'app.
    Inversement, deux fenêtres sur la même conversation partagent la session :
