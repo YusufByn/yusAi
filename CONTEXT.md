@@ -56,9 +56,9 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   est rattaché à sa session. Le `Kill` de sortie marque le fichier
   `archived` sans le déplacer ; la réouverture le remet `active`. Les
   orphelins sont tués avant toute ouverture (ils tiendraient le verrou du
-  fichier). Une session fermée par le daemon (mise en veille après 90 min
-  d'inactivité, `pa-core/src/settings/manager.rs:16`) est rouverte depuis
-  son fichier. Supprimer une conversation tue le worker du fil puis appelle
+  fichier). Une session fermée par un `Kill` (`sessionClosed`) est rouverte
+  depuis son fichier. La mise en veille de Prime (90 min) ne touche pas nos
+  fils tant que yusAi tourne : voir Pièges, « Mise en veille ». Supprimer une conversation tue le worker du fil puis appelle
   `delete_saved_session` (`delete_thread`).
 - **Appels d'outils** : `tool_execution_start` / `_update` / `_end`
   (`pa-daemon/src/worker/turn.rs:905-932`) affichés avec `ToolCard`, repliés
@@ -126,6 +126,29 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   d'une conversation, plus un bouton « Retenir » qui la force à la demande.
   L'auto-refine de Prime seule est trop rare : elle ne part qu'après une
   compaction (`pa-daemon/src/compact_autorefine.rs:6-25`).
+- **Fermeture d'une conversation** (2026-10-02, délai choisi par Claude à la
+  demande de Yusuf) : 10 min sans affichage dans aucune fenêtre ET au moins
+  3 nouveaux tours utilisateur depuis la dernière refine ; ou mise en veille
+  du worker (90 min) ET au moins 1 nouveau tour. Après Cmd+Q, `pending = 1` ;
+  la refine part au prochain démarrage de l'app, en arrière-plan, une à la
+  fois (pas à la réouverture de la conversation).
+- **Plan de la couche yusAi validé** (2026-10-02, détails tranchés par
+  Claude à la demande de Yusuf) :
+  - écritures globales du modèle (`rlm.harness.*(…, global_=True)`) :
+    importées en niveau projet, plus une proposition de montée vers global ;
+  - harness local partagé (`yusai-threads/harness/`) : on y amorce nos
+    leçons avant une refine et on ne retire ensuite que nos entrées `yl_…`,
+    sans vider le fichier ;
+  - la garde contre les écritures globales vient juste après la capture des
+    refines (commit 4 du plan) ;
+  - consigne `skill-creator` dans `appendSystemPrompt` (où créer une skill) ;
+  - projet identifié par son chemin (`workspace_id`) : limite acceptée, un
+    dossier déplacé perd ses leçons et son type ;
+  - injection limitée à 300 caractères par leçon et 4 000 au total.
+  - Ordre des commits : 1 magasin (migration v10) ; 2 conversion des edits ;
+    3 capture et rattrapage ; 4 garde globale ; 5 amorçage et file des
+    refines ; 6 injection ; 7 « Retenir » ; 8 fermeture ; 9 type de projet ;
+    10 validation ; 11 skills par niveau.
 
 ## Fait récemment (commits)
 
@@ -278,6 +301,26 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   D'où la décision de ranger nous-mêmes. `appendSystemPrompt` est, lui,
   rejoué à la relance d'un worker tué (`Create` durable,
   `pa-daemon/src/supervisor/worker_lifecycle.rs:235-252`).
+  Limite restante de notre file de refines : l'auto-refine de Prime (après
+  compaction) et `refine.run()` appelé par le modèle passent hors de notre
+  file. Ils peuvent lire les entrées `yl_…` amorcées pour une refine d'un
+  autre projet en cours, ou écrire dans le fichier partagé en même temps.
+- **Mise en veille des workers (idle passivation)** : vérifié par une
+  expérience (veille réglée à 1 min, moteur faux), le 2026-10-02.
+  - Elle n'arrive que si aucun client n'est attaché
+    (`pa-daemon/src/worker/turn.rs:358-366`). Notre client fait `Attach` à
+    l'ouverture et jamais `Detach` : tant que yusAi tourne, nos fils ne sont
+    jamais mis en veille (session encore `live` après 80 s).
+  - Après un `Detach`, la mise en veille arrive. Le client ne reçoit aucun
+    `session_closed` (le `Shutdown` n'en émet pas ; seul `Kill` le fait,
+    `pa-daemon/src/worker/commands.rs:738`) ; juste un `HeartbeatsChanged`.
+    La session disparaît de `List`.
+  - `Refine` ne réveille pas un worker en veille : seuls les prompts,
+    `Attach`, `Reattach`, `WaitForIdle` le font
+    (`pa-daemon/src/supervisor/routing.rs:422-441`). Et même `Attach`
+    échoue sur nos fils (« Unknown active session ») : le réveil ne retrouve
+    pas un fichier hors de `sessions/`. Pour refiner, il faut rouvrir le fil
+    (`open_thread`, nouveau worker, nouvel id).
 - Prime se présente avec une version Claude Code figée dans vendor
   (`claude-cli/2.1.281`) : un modèle qui exige plus récent serait refusé.
 
