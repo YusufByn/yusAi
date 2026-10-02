@@ -18,7 +18,9 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `~/.prime/agent/kernel-venv`, partagé avec une installation séparée de
   Prime : la première cellule le construit avec `uv` (un peu plus lente).
 - **Daemon paresseux** : lancé à la première session Prime
-  (`ensure_daemon_running`, calqué sur pa-cli).
+  (`ensure_daemon_running`, calqué sur pa-cli). Exception acceptée par
+  Yusuf (2026-10-02) : lancé dès le démarrage s'il y a des refines à faire
+  (voir « Couche de rétention »).
 - **Chat Prime** (`src-tauri/src/prime_session.rs`, `src/components/chat/PrimeChatPane.tsx`) :
   bascule Sinew / Prime dans l'en-tête du chat (Sinew par défaut), une
   session Prime par conversation yusAi, démarrée quand le panneau s'affiche.
@@ -219,10 +221,12 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `closing_refines_then_puts_the_worker_to_sleep_and_the_thread_reopens`. Cmd+Q
   (`on_exit`) : les conversations ouvertes qui ont de nouveaux tours passent
   à `pending = 1` (`defer_refine_if_unrefined`) ; au démarrage suivant
-  (`refine_pending_at_startup`), une à une en arrière-plan : refine sur la
+  (`refine_pending_at_startup`), ces conversations et toute conversation
+  qui a un tour non retenu (`refines_due_at_start` : couvre Ctrl+C et les
+  plantages, sans `on_exit`) passent une à une en arrière-plan : refine sur la
   session de l'UI si elle a déjà rouvert la conversation, sinon fil rouvert,
   refiné puis tué (sauf si l'UI l'a rejoint entre-temps). Conversation, projet
-  ou fil introuvable : attente levée ; refine ratée : attente gardée, nouvel
+  ou fil introuvable : état de refine oublié ; refine ratée : attente gardée, nouvel
   essai à chaque démarrage. Test e2e `deferred_refines_run_at_the_next_start`.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :

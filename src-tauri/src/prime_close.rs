@@ -13,8 +13,9 @@
 //!   nouveau tour.
 //!
 //! - Cmd+Q : les conversations ouvertes qui ont de nouveaux tours passent à
-//!   `pending = 1` ; au démarrage suivant, leurs refines partent en
-//!   arrière-plan, une à la fois ([`refine_pending`]).
+//!   `pending = 1` ; au démarrage suivant, ces refines et celles de toute
+//!   conversation qui a un tour non retenu (sortie sans `on_exit` : Ctrl+C,
+//!   plantage) partent en arrière-plan, une à la fois ([`refine_pending`]).
 //!
 //! [`CloseTracker`] suit l'affichage (par conversation et par fenêtre) et
 //! l'activité (par session) ; [`close_action`] décide, sans effet ;
@@ -336,7 +337,7 @@ pub async fn close_conversation(
 #[derive(Debug)]
 pub enum PendingOutcome {
     /// Plus rien à refiner (conversation supprimée, projet ou fil
-    /// introuvable) : l'attente est levée.
+    /// introuvable) : son état de refine est oublié.
     Dropped(&'static str),
     /// Refine faite (l'attente est levée) ; `killed` : le worker ouvert pour
     /// elle a été tué.
@@ -366,10 +367,9 @@ pub async fn refine_pending(
     let drop_pending = |reason: &'static str| {
         let (store, conversation_id) = (store.clone(), conversation_id.to_string());
         async move {
-            let cleared = tokio::task::spawn_blocking(move || {
-                store.set_refine_pending(&conversation_id, false)
-            })
-            .await;
+            let cleared =
+                tokio::task::spawn_blocking(move || store.forget_refine_state(&conversation_id))
+                    .await;
             if !matches!(cleared, Ok(Ok(()))) {
                 tracing::warn!("prime pending refine not cleared");
             }

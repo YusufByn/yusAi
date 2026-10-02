@@ -2603,7 +2603,8 @@ async fn closing_refines_then_puts_the_worker_to_sleep_and_the_thread_reopens() 
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Refines mises en attente à la sortie (Cmd+Q), reprises au démarrage :
+/// Refines reprises au démarrage, qu'elles aient été mises en attente à la
+/// sortie (Cmd+Q) ou non (Ctrl+C, plantage : un tour non retenu suffit) :
 /// fil rouvert, refiné puis tué ; refine sur la session que l'UI a déjà
 /// ouverte, sans la tuer ; conversation disparue, attente levée ; refine
 /// ratée, attente gardée.
@@ -2649,7 +2650,8 @@ async fn deferred_refines_run_at_the_next_start() {
     let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
         .await
         .expect("daemon starts");
-    // Une conversation avec un tour, puis Cmd+Q : `pending = 1`, worker tué.
+    // Une conversation avec un tour, puis Ctrl+C : ni `on_exit` ni attente,
+    // mais le tour non retenu suffit au démarrage suivant.
     let path = thread_path(&agent_dir, "conv-deferred").unwrap();
     let opened = open_thread(
         &client,
@@ -2674,10 +2676,11 @@ async fn deferred_refines_run_at_the_next_start() {
     assert!(turn.is_ok(), "turn ended");
     tokio::spawn(async move { while events.recv().await.is_some() {} });
     store.note_user_turn("conv-deferred").unwrap();
-    assert!(store.defer_refine_if_unrefined("conv-deferred").unwrap());
     kill_session(&client, &opened.active_session_id)
         .await
-        .expect("killed at exit");
+        .expect("worker gone with the IDE");
+    assert!(store.pending_refines().unwrap().is_empty());
+    assert_eq!(store.refines_due_at_start().unwrap(), vec!["conv-deferred"]);
     let deferred = |workspace: Option<String>, open: Option<String>, config: serde_json::Value| {
         let (client, socket_path, store, agent_dir) = (
             &client,
@@ -2717,7 +2720,7 @@ async fn deferred_refines_run_at_the_next_start() {
         store.lesson_events(&report.created[0]).unwrap()[0].actor,
         "refine:close"
     );
-    assert!(store.pending_refines().unwrap().is_empty());
+    assert!(store.refines_due_at_start().unwrap().is_empty());
     assert_eq!(last_session_state(&path).as_deref(), Some("archived"));
 
     // L'UI a déjà rouvert la conversation : refine sur sa session, gardée.
@@ -2740,7 +2743,7 @@ async fn deferred_refines_run_at_the_next_start() {
         matches!(outcome, PendingOutcome::Refined { killed: false, .. }),
         "outcome: {outcome:?}"
     );
-    assert!(store.pending_refines().unwrap().is_empty());
+    assert!(store.refines_due_at_start().unwrap().is_empty());
     assert_ne!(last_session_state(&path).as_deref(), Some("archived"));
     kill_session(&client, &ui.active_session_id)
         .await
@@ -2760,14 +2763,16 @@ async fn deferred_refines_run_at_the_next_start() {
         "outcome: {outcome:?}"
     );
     assert_eq!(store.pending_refines().unwrap(), vec!["conv-deferred"]);
+    assert_eq!(store.refines_due_at_start().unwrap(), vec!["conv-deferred"]);
 
-    // Conversation sans projet (supprimée) : attente levée, rien d'ouvert.
+    // Conversation sans projet (supprimée) : état oublié, rien d'ouvert, et
+    // plus rien à faire au démarrage suivant.
     let outcome = deferred(None, None, serde_json::Value::Null).await;
     assert!(
         matches!(outcome, PendingOutcome::Dropped(_)),
         "outcome: {outcome:?}"
     );
-    assert!(store.pending_refines().unwrap().is_empty());
+    assert!(store.refines_due_at_start().unwrap().is_empty());
 
     let _ = client
         .request_ok(pa_types::daemon::DaemonCommand::Shutdown {

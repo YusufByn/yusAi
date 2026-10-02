@@ -647,9 +647,10 @@ pub fn on_exit(app: &AppHandle) {
     }
 }
 
-/// Démarrage de l'IDE : les refines mises en attente à la dernière sortie
-/// partent en arrière-plan, une à la fois (voir `prime_close`). Rien à
-/// faire, rien n'est lancé.
+/// Démarrage de l'IDE : les refines mises en attente à la dernière sortie,
+/// et celles des conversations qui ont un tour non retenu (sortie par
+/// Ctrl+C ou plantage, sans `on_exit`), partent en arrière-plan, une à la
+/// fois (voir `prime_close`). Rien à faire, rien n'est lancé.
 pub fn refine_pending_at_startup(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let Some(store) = app
@@ -660,7 +661,7 @@ pub fn refine_pending_at_startup(app: AppHandle) {
         };
         let pending = {
             let store = store.clone();
-            tauri::async_runtime::spawn_blocking(move || store.pending_refines()).await
+            tauri::async_runtime::spawn_blocking(move || store.refines_due_at_start()).await
         };
         let pending = match pending {
             Ok(Ok(pending)) if !pending.is_empty() => pending,

@@ -1191,6 +1191,36 @@ impl AppStore {
         Ok(changed > 0)
     }
 
+    /// Les refines à faire au démarrage : celles mises en attente, et toute
+    /// conversation qui a au moins un tour non retenu (sortie sans
+    /// `on_exit` : Ctrl+C en dev, plantage).
+    pub fn refines_due_at_start(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut statement = conn
+            .prepare(
+                "select conversation_id from prime_refine_state
+                 where pending = 1 or user_turns_since_refine > 0
+                 order by conversation_id",
+            )
+            .context("unable to prepare due refine query")?;
+        let rows = statement
+            .query_map([], |row| row.get(0))
+            .context("unable to query due refines")?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .context("unable to read due refines")
+    }
+
+    /// Oublie l'état de refine d'une conversation qui n'existe plus.
+    pub fn forget_refine_state(&self, conversation_id: &str) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute(
+            "delete from prime_refine_state where conversation_id = ?1",
+            params![conversation_id],
+        )
+        .context("unable to forget refine state")?;
+        Ok(())
+    }
+
     /// Les conversations dont la refine attend le prochain démarrage.
     pub fn pending_refines(&self) -> Result<Vec<String>> {
         let conn = self.connection()?;
@@ -1622,6 +1652,29 @@ mod tests {
         assert!(store.defer_refine_if_unrefined("conv-1").unwrap());
         assert!(!store.defer_refine_if_unrefined("conv-2").unwrap());
         assert_eq!(store.pending_refines().unwrap(), vec!["conv-1"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unrefined_turns_are_due_at_start_even_without_a_clean_exit() {
+        let (store, path) = temp_store();
+        // Un tour, puis Ctrl+C : pas d'`on_exit`, pas d'attente.
+        store.note_user_turn("conv-crash").unwrap();
+        // Refinée depuis son dernier tour : rien à faire.
+        store.note_user_turn("conv-done").unwrap();
+        store.mark_refined("conv-done").unwrap();
+        // Mise en attente (refine ratée), compteur déjà remis à zéro.
+        store.set_refine_pending("conv-failed", true).unwrap();
+        assert_eq!(
+            store.refines_due_at_start().unwrap(),
+            vec!["conv-crash", "conv-failed"]
+        );
+        store.forget_refine_state("conv-crash").unwrap();
+        assert_eq!(
+            store.refine_state("conv-crash").unwrap(),
+            RefineState::default()
+        );
+        assert_eq!(store.refines_due_at_start().unwrap(), vec!["conv-failed"]);
         let _ = std::fs::remove_file(path);
     }
 }
