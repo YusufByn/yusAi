@@ -13,11 +13,13 @@ import {
   toolSummary,
   type PrimeMessage,
   type PrimeTextMessage,
+  type PrimeThinking,
   type PrimeToolCall,
 } from "../../lib/primeHistory";
 import { primeToolTitle } from "../../lib/primeToolTitle";
 import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
 import type { PrimeEventPayload, PrimeModelOption, PrimeSessionConfig } from "../../types";
+import { AIThinkingBlock } from "./AIThinkingBlock";
 import { Markdown } from "./Markdown";
 import { ToolCard, type ToolOutputLimit } from "./ToolCard";
 
@@ -66,6 +68,8 @@ export function PrimeChatPane({
   const nextIdRef = useRef(1);
   // The assistant message currently receiving text deltas.
   const streamingIdRef = useRef<number | null>(null);
+  // The thinking block currently receiving reasoning deltas.
+  const thinkingIdRef = useRef<number | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
   const pushMessage = useCallback((role: PrimeTextMessage["role"], value: string) => {
@@ -92,6 +96,58 @@ export function PrimeChatPane({
     },
     [pushMessage],
   );
+
+  // Reasoning streams as `thinking_delta` updates. The `thinking_start` frame
+  // never reaches clients (the worker's coalescer replaces a delta-less frame
+  // by the next delta, pa-daemon/src/streaming.rs:118-127), so the block
+  // opens on its first delta and closes on `thinking_end`.
+  const appendThinking = useCallback((delta: string) => {
+    // Text after the reasoning starts a new bubble.
+    streamingIdRef.current = null;
+    let id = thinkingIdRef.current;
+    if (id === null) {
+      id = nextIdRef.current++;
+      thinkingIdRef.current = id;
+      const block: PrimeThinking = {
+        id,
+        role: "thinking",
+        text: delta,
+        streaming: true,
+        startedAt: Date.now(),
+      };
+      setMessages((current) => [...current, block]);
+      return;
+    }
+    const target = id;
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === target && message.role === "thinking"
+          ? { ...message, text: message.text + delta }
+          : message,
+      ),
+    );
+  }, []);
+
+  // Closes the streaming block: on `thinking_end`, or when the message, the
+  // turn or the session ends without one (an abort).
+  const settleThinking = useCallback(() => {
+    const target = thinkingIdRef.current;
+    if (target === null) return;
+    thinkingIdRef.current = null;
+    const now = Date.now();
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === target && message.role === "thinking"
+          ? {
+              ...message,
+              streaming: false,
+              durationMs:
+                message.startedAt === undefined ? undefined : now - message.startedAt,
+            }
+          : message,
+      ),
+    );
+  }, []);
 
   // Updates the newest card for the call (Prime's TUI does the same,
   // pa-tui/src/session_ui/apply.rs:1038-1041).
@@ -141,6 +197,7 @@ export function PrimeChatPane({
         if (!sessionId) return;
         sessionIdRef.current = null;
         streamingIdRef.current = null;
+        settleThinking();
         setStatus("idle");
         setConfig(null);
         settleRunningToolCalls();
@@ -151,6 +208,7 @@ export function PrimeChatPane({
       if (payload.kind === "sessionClosed") {
         sessionIdRef.current = null;
         streamingIdRef.current = null;
+        settleThinking();
         setStatus("idle");
         setConfig(null);
         settleRunningToolCalls();
@@ -174,6 +232,7 @@ export function PrimeChatPane({
           break;
         case "agent_end":
           streamingIdRef.current = null;
+          settleThinking();
           setStatus("idle");
           settleRunningToolCalls();
           // A turn can fail over to another model or clamp the level.
@@ -189,7 +248,13 @@ export function PrimeChatPane({
           const stream = event.assistantMessageEvent as
             | { type?: string; delta?: string }
             | undefined;
-          if (message?.role === "assistant" && stream?.type === "text_delta" && stream.delta) {
+          if (message?.role !== "assistant") break;
+          if (stream?.type === "thinking_delta" && stream.delta) {
+            appendThinking(stream.delta);
+          } else if (stream?.type === "thinking_end") {
+            settleThinking();
+          } else if (stream?.type === "text_delta" && stream.delta) {
+            settleThinking();
             appendAssistantText(stream.delta);
           }
           break;
@@ -197,6 +262,7 @@ export function PrimeChatPane({
         case "message_end":
           if (message?.role !== "assistant") break;
           streamingIdRef.current = null;
+          settleThinking();
           if (message.stopReason === "error" && message.errorMessage) {
             pushMessage("error", message.errorMessage);
           }
@@ -269,7 +335,15 @@ export function PrimeChatPane({
       cancelled = true;
       unlisten?.();
     };
-  }, [appendAssistantText, pushMessage, settleRunningToolCalls, updateToolCall, workspacePath]);
+  }, [
+    appendAssistantText,
+    appendThinking,
+    pushMessage,
+    settleRunningToolCalls,
+    settleThinking,
+    updateToolCall,
+    workspacePath,
+  ]);
 
   // The session dies with the pane (conversation deleted or workspace
   // changed, see Workspace.tsx); one still being created closes on arrival.
@@ -300,6 +374,7 @@ export function PrimeChatPane({
         sessionIdRef.current = sessionId;
         // The file is the source of truth: its thread replaces the pane's.
         streamingIdRef.current = null;
+        thinkingIdRef.current = null;
         setMessages(
           historyToMessages(opened.messages, {
             nextId: () => nextIdRef.current++,
@@ -440,6 +515,15 @@ export function PrimeChatPane({
                     fileChanges={message.fileChanges}
                     outputLimit={TOOL_OUTPUT_LIMIT}
                     displayTitle={primeToolTitle(message)}
+                    onOpenFile={onOpenFile}
+                  />
+                </div>
+              ) : message.role === "thinking" ? (
+                <div key={message.id} className="msg" data-role="assistant">
+                  <AIThinkingBlock
+                    content={message.text}
+                    isStreaming={message.streaming}
+                    durationMs={message.durationMs}
                     onOpenFile={onOpenFile}
                   />
                 </div>

@@ -21,6 +21,13 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   session Prime par conversation yusAi, démarrée quand le panneau s'affiche.
   Protocole natif (`DaemonClient` + `DaemonCommand`), événements relayés en
   `prime-event`. Rendu : texte de l'assistant et appels d'outils.
+- **Réflexion** : les `thinking_delta` des `message_update` remplissent un
+  bloc `AIThinkingBlock` (ouvert pendant le flux, replié ensuite avec sa
+  durée), fermé par `thinking_end` ou la fin du message / tour / session ;
+  les blocs `thinking` de l'historique sont restaurés (vides et `redacted`
+  ignorés, sans durée). Anthropic renvoie une réflexion résumée
+  (`display: "summarized"`, `pa-ai/src/providers/anthropic/params.rs:107-128`),
+  rien au niveau `off`.
 - **Fils persistants** : chaque conversation a son fichier de session Prime,
   `<agent_dir>/yusai-threads/<conversationId>.jsonl` (`thread_path`), hors de
   `sessions/` que le superviseur archive (déplace) après 30 jours / 200
@@ -152,6 +159,11 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   viennent de nos photos, pas du fichier de session ; après un redémarrage
   les cartes restaurées n'ont plus leurs diffs, et une cellule `edit`
   reprend sa première ligne comme titre.
+- **`*_start` n'arrive jamais au client** : le coalesceur du worker remplace
+  une trame sans delta (`thinking_start`, `text_start`) par le delta suivant
+  (`pa-daemon/src/streaming.rs:118-127`). Ouvrir un bloc au premier delta,
+  le fermer sur `*_end`. Les deltas d'un même type s'additionnent sans
+  perte (`streaming.rs:1-20`).
 - **Test qui panique = daemon orphelin** : un test e2e en échec n'atteint
   pas son `Shutdown` ; vérifier `pgrep -fl yusai-prime-test` après un échec.
 - Prime se présente avec une version Claude Code figée dans vendor
@@ -169,7 +181,20 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
    (`pa-types/src/daemon/command.rs:676`, usage dans
    `pa-daemon/src/acp/daemon.rs:705-730`), sans patch vendor. Les outils
    interactifs (question, todo) demandent en plus un relais vers l'UI.
-3. Rendu réflexion / sous-agents ; renommer « Sinew » en « yusAi ».
+3. **Sous-agents (étape B)**, vus depuis le parent : carte de lancement
+   « Agent · nom » en reconnaissant `rlm.spawn(…, name="x")` dans la cellule
+   (titre « Agent » générique si le nom n'est pas un littéral) ; lignes
+   `custom` `agent_message` (`pa-core/src/session_engine/agent_messaging.rs:303-326`)
+   et `rlm_child_terminal_notice` (`pa-core/src/session_engine/rlm_notices.rs:41-86`)
+   en direct et dans l'historique ; état des enfants par `get_rlm_children`
+   (`pa-daemon/src/state_getters.rs:38-64`) tant qu'un enfant tourne.
+   À vérifier d'abord : que les sessions enfants (leur propre worker) sont
+   couvertes par le nettoyage des orphelins (marquage `runtimeMetadata.yusai`
+   absent chez elles ? tuées en cascade avec le parent ?), la forme exacte
+   de l'appel écrit par le modèle, et comment `details.from` désigne
+   l'enfant. Étape C plus tard : vue détaillée d'un enfant (Attach à sa
+   session, ses appels d'outils).
+   Renommer « Sinew » en « yusAi ».
 4. Fermer une seule fenêtre ne tue pas ses sessions avant la sortie de l'app.
    Inversement, deux fenêtres sur la même conversation partagent la session :
    en fermer une la tue, l'autre la rouvre depuis le fichier.

@@ -34,9 +34,10 @@ test("prompts, text and a completed tool call", () => {
   ]);
   assert.deepEqual(items, [
     { id: 1, role: "user", text: "liste les fichiers" },
-    { id: 2, role: "assistant", text: "Je regarde." },
+    { id: 2, role: "thinking", text: "hmm", streaming: false },
+    { id: 3, role: "assistant", text: "Je regarde." },
     {
-      id: 3,
+      id: 4,
       role: "tool",
       toolCallId: "c1",
       name: "ipython",
@@ -48,7 +49,27 @@ test("prompts, text and a completed tool call", () => {
       output: "README.md",
       images: undefined,
     },
-    { id: 4, role: "assistant", text: "Un fichier." },
+    { id: 5, role: "assistant", text: "Un fichier." },
+  ]);
+});
+
+test("thinking keeps its place; empty and redacted blocks are skipped", () => {
+  const items = convert([
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Avant." },
+        { type: "thinking", thinking: "  " },
+        { type: "thinking", thinking: "", thinkingSignature: "sig", redacted: true },
+        { type: "thinking", thinking: "Je pèse." },
+        { type: "text", text: "Après." },
+      ],
+    },
+  ]);
+  assert.deepEqual(items, [
+    { id: 1, role: "assistant", text: "Avant." },
+    { id: 2, role: "thinking", text: "Je pèse.", streaming: false },
+    { id: 3, role: "assistant", text: "Après." },
   ]);
 });
 

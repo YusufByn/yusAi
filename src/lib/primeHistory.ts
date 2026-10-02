@@ -7,7 +7,19 @@ import type { PrimeBashTitle } from "./primeBash";
 import type { ToolCardProps } from "../components/chat/ToolCard";
 import type { FileChange, ToolResultImage } from "../types";
 
-export type PrimeMessage = PrimeTextMessage | PrimeToolCall;
+export type PrimeMessage = PrimeTextMessage | PrimeThinking | PrimeToolCall;
+
+// The model's reasoning, summarized by the provider: live from the
+// `thinking_delta` stream events, restored from `thinking` content blocks.
+export type PrimeThinking = {
+  id: number;
+  role: "thinking";
+  text: string;
+  streaming: boolean;
+  // Client-side clock while streaming; restored blocks have no duration.
+  startedAt?: number;
+  durationMs?: number;
+};
 
 export type PrimeTextMessage = {
   id: number;
@@ -113,10 +125,11 @@ export function toolResultImages(result: unknown): ToolResultImage[] {
   return images;
 }
 
-// The saved thread as chat items, in order: user prompts, assistant text,
-// assistant errors, and one tool card per `toolCall` block completed by its
-// `toolResult` message. A call without a result (the turn was cut short)
-// shows as interrupted. Thinking, custom rows and other roles are skipped.
+// The saved thread as chat items, in order: user prompts, thinking, assistant
+// text, assistant errors, and one tool card per `toolCall` block completed by
+// its `toolResult` message. A call without a result (the turn was cut short)
+// shows as interrupted. Empty or redacted thinking, custom rows and other
+// roles are skipped.
 // Changed files are not in the session file: restored cards have none.
 export function historyToMessages(
   history: unknown[],
@@ -147,6 +160,13 @@ export function historyToMessages(
         const record = block as Record<string, unknown>;
         if (record.type === "text" && typeof record.text === "string") {
           text += record.text;
+        } else if (record.type === "thinking") {
+          // `{type, thinking, thinkingSignature?, redacted?}`
+          // (pa-agent/src/types.rs:77-91).
+          const thinking = typeof record.thinking === "string" ? record.thinking : "";
+          if (record.redacted === true || !thinking.trim()) continue;
+          flushText();
+          items.push({ id: options.nextId(), role: "thinking", text: thinking, streaming: false });
         } else if (record.type === "toolCall" && typeof record.id === "string") {
           flushText();
           const name = typeof record.name === "string" ? record.name : "tool";
