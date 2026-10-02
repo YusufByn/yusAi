@@ -106,6 +106,7 @@ mod platform;
 pub mod prime;
 pub mod prime_auth;
 pub mod prime_diffs;
+pub mod prime_lessons;
 pub mod prime_session;
 mod providers;
 mod remote;
