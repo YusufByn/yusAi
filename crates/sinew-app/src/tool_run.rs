@@ -127,8 +127,9 @@ impl ToolRunResult {
     }
 }
 
+/// Text files of a workspace at one instant (bash tool, Prime tool calls).
 #[derive(Debug, Clone)]
-pub(crate) struct WorkspaceSnapshot {
+pub struct WorkspaceSnapshot {
     entries: HashMap<String, SnapshotEntry>,
 }
 
@@ -181,7 +182,7 @@ pub struct TurnFileState {
     pub unavailable_reason: Option<String>,
 }
 
-pub(crate) fn snapshot_workspace(root: &Path) -> WorkspaceSnapshot {
+pub fn snapshot_workspace(root: &Path) -> WorkspaceSnapshot {
     let mut entries = HashMap::new();
     let mut consumed_bytes = 0usize;
 
@@ -394,7 +395,7 @@ pub fn snapshot_workspace_for_checkpoint(root: &Path) -> TurnSnapshot {
     TurnSnapshot { entries }
 }
 
-pub(crate) fn diff_snapshots(
+pub fn diff_snapshots(
     before: WorkspaceSnapshot,
     after: WorkspaceSnapshot,
 ) -> Vec<FileChange> {
