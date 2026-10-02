@@ -216,7 +216,14 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   refine s'il y a un tour, puis `Kill` (sauf si la conversation a repris
   entre-temps). Refine ratée → `pending = 1`, et pas de nouvel essai de
   fermeture courte avant un prompt. Test e2e
-  `closing_refines_then_puts_the_worker_to_sleep_and_the_thread_reopens`.
+  `closing_refines_then_puts_the_worker_to_sleep_and_the_thread_reopens`. Cmd+Q
+  (`on_exit`) : les conversations ouvertes qui ont de nouveaux tours passent
+  à `pending = 1` (`defer_refine_if_unrefined`) ; au démarrage suivant
+  (`refine_pending_at_startup`), une à une en arrière-plan : refine sur la
+  session de l'UI si elle a déjà rouvert la conversation, sinon fil rouvert,
+  refiné puis tué (sauf si l'UI l'a rejoint entre-temps). Conversation, projet
+  ou fil introuvable : attente levée ; refine ratée : attente gardée, nouvel
+  essai à chaque démarrage. Test e2e `deferred_refines_run_at_the_next_start`.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

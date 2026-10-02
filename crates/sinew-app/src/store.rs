@@ -1531,6 +1531,18 @@ impl AppStore {
         Ok(())
     }
 
+    /// Le projet (`workspace_id`) d'une conversation, quel qu'il soit.
+    pub fn conversation_workspace_id(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "select workspace_id from conversations where id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("unable to load conversation workspace")
+    }
+
     pub fn load_conversation_model_by_id(&self, id: &str) -> Result<Option<ModelRef>> {
         let conn = self.connection()?;
         conn.query_row(
@@ -1994,6 +2006,28 @@ mod tests {
 
         assert_eq!(resolved.title, "Original request");
         assert!(resolved.initialized);
+    }
+
+    #[test]
+    fn a_conversation_knows_its_workspace() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "sinew-store-workspace-test-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let store = AppStore { path: path.clone() };
+        let result = (|| -> Result<()> {
+            store.migrate()?;
+            let model = ModelRef::new("test", "model");
+            let conversation = store.create_conversation("/work/a", &model, "system")?;
+            assert_eq!(
+                store.conversation_workspace_id(&conversation.id)?.as_deref(),
+                Some("/work/a")
+            );
+            assert_eq!(store.conversation_workspace_id("missing")?, None);
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(path);
+        result
     }
 
     #[test]

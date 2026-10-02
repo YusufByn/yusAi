@@ -28,7 +28,9 @@ use serde_json::{json, Map, Value};
 use sinew_app::tool_run::FileChange;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::prime_close::{close_action, close_conversation, CloseTracker, SCAN_EVERY};
+use crate::prime_close::{
+    close_action, close_conversation, refine_pending, CloseTracker, PendingOutcome, SCAN_EVERY,
+};
 use crate::prime_diffs::PrimeDiffs;
 use crate::prime_guidance::{with_guidance, Guidance};
 use crate::prime_lessons::{
@@ -65,6 +67,16 @@ impl PrimeState {
             .lock()
             .ok()
             .and_then(|sessions| sessions.get(active_session_id).cloned())
+    }
+
+    /// La session que l'UI a ouverte pour une conversation.
+    fn session_of(&self, conversation_id: &str) -> Option<String> {
+        self.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .iter()
+                .find(|(_, thread)| thread.conversation_id == conversation_id)
+                .map(|(id, _)| id.clone())
+        })
     }
 
     fn untrack(&self, active_session_id: &str) {
@@ -597,11 +609,25 @@ pub fn on_exit(app: &AppHandle) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<PrimeState>();
-        let sessions: Vec<String> = state
+        let (sessions, conversations): (Vec<String>, Vec<String>) = state
             .sessions
             .lock()
-            .map(|mut sessions| sessions.drain().map(|(id, _)| id).collect())
+            .map(|mut sessions| {
+                sessions
+                    .drain()
+                    .map(|(id, thread)| (id, thread.conversation_id))
+                    .unzip()
+            })
             .unwrap_or_default();
+        // Pas de refine à la sortie : celles des conversations qui ont de
+        // nouveaux tours partent au prochain démarrage.
+        if let Some(desktop) = app.try_state::<crate::DesktopState>() {
+            for conversation_id in &conversations {
+                if let Err(error) = desktop.store.defer_refine_if_unrefined(conversation_id) {
+                    tracing::warn!(error = %error, "prime refine not deferred");
+                }
+            }
+        }
         let client = state.client.lock().await.clone();
         if let Some(client) = client.filter(|client| !*client.reader_dead().borrow()) {
             match close_ide_sessions(&client, &sessions).await {
@@ -619,6 +645,87 @@ pub fn on_exit(app: &AppHandle) {
     if done_rx.recv_timeout(EXIT_CLEANUP_TIMEOUT).is_err() {
         tracing::warn!("prime exit cleanup timed out");
     }
+}
+
+/// Démarrage de l'IDE : les refines mises en attente à la dernière sortie
+/// partent en arrière-plan, une à la fois (voir `prime_close`). Rien à
+/// faire, rien n'est lancé.
+pub fn refine_pending_at_startup(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let Some(store) = app
+            .try_state::<crate::DesktopState>()
+            .map(|desktop| desktop.store.clone())
+        else {
+            return;
+        };
+        let pending = {
+            let store = store.clone();
+            tauri::async_runtime::spawn_blocking(move || store.pending_refines()).await
+        };
+        let pending = match pending {
+            Ok(Ok(pending)) if !pending.is_empty() => pending,
+            Ok(Ok(_)) => return,
+            _ => {
+                tracing::warn!("prime pending refines unreadable");
+                return;
+            }
+        };
+        let state = app.state::<PrimeState>();
+        let client = match connected_client(&app, &state).await {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(error = %error, "prime pending refines wait for the next start");
+                return;
+            }
+        };
+        crate::prime_auth::ensure_anthropic_sync(&crate::prime::agent_dir()).await;
+        for conversation_id in pending {
+            let workspace_id = {
+                let (store, conversation_id) = (store.clone(), conversation_id.clone());
+                tauri::async_runtime::spawn_blocking(move || {
+                    store.conversation_workspace_id(&conversation_id)
+                })
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+            };
+            let guidance_store = store.clone();
+            let watched = app.clone();
+            let outcome = refine_pending(
+                &client,
+                &crate::prime::daemon_socket_path(),
+                store.clone(),
+                crate::prime::agent_dir(),
+                &conversation_id,
+                workspace_id,
+                state.session_of(&conversation_id),
+                |workspace| match crate::prime_guidance::thread_guidance(
+                    &guidance_store,
+                    &crate::prime::data_dir(),
+                    workspace,
+                ) {
+                    Ok(guidance) => with_guidance(create_config(workspace), &guidance),
+                    Err(_) => create_config(workspace),
+                },
+                move |active_session_id| {
+                    watched
+                        .state::<PrimeState>()
+                        .thread(active_session_id)
+                        .is_some()
+                },
+            )
+            .await;
+            match outcome {
+                PendingOutcome::Failed { error, .. } => {
+                    tracing::warn!(error = %error, conversation = %conversation_id, "prime pending refine failed");
+                }
+                outcome => {
+                    tracing::info!(?outcome, conversation = %conversation_id, "prime pending refine done");
+                }
+            }
+        }
+    });
 }
 
 /// Démarrage de l'IDE : si un daemon yusAi tourne déjà (resté d'un crash),

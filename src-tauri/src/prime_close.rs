@@ -12,9 +12,13 @@
 //!   prochain démarrage) et la fermeture courte ne réessaie pas avant un
 //!   nouveau tour.
 //!
+//! - Cmd+Q : les conversations ouvertes qui ont de nouveaux tours passent à
+//!   `pending = 1` ; au démarrage suivant, leurs refines partent en
+//!   arrière-plan, une à la fois ([`refine_pending`]).
+//!
 //! [`CloseTracker`] suit l'affichage (par conversation et par fenêtre) et
 //! l'activité (par session) ; [`close_action`] décide, sans effet ;
-//! [`close_conversation`] agit.
+//! [`close_conversation`] et [`refine_pending`] agissent.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,7 +28,7 @@ use std::time::{Duration, Instant};
 use pa_tui::daemon_client::DaemonClient;
 use sinew_app::store::AppStore;
 
-use crate::prime_lessons::ThreadContext;
+use crate::prime_lessons::{import_thread_outcomes, ThreadContext};
 use crate::prime_refine::{run_refine, RefineOrigin, RefineRun};
 
 /// Fermeture courte : non affichée depuis…
@@ -326,6 +330,109 @@ pub async fn close_conversation(
             }
         };
     CloseOutcome { refine, killed }
+}
+
+/// Ce qu'une refine en attente a donné au démarrage.
+#[derive(Debug)]
+pub enum PendingOutcome {
+    /// Plus rien à refiner (conversation supprimée, projet ou fil
+    /// introuvable) : l'attente est levée.
+    Dropped(&'static str),
+    /// Refine faite (l'attente est levée) ; `killed` : le worker ouvert pour
+    /// elle a été tué.
+    Refined { run: Box<RefineRun>, killed: bool },
+    /// Refine ratée : `pending` reste à 1, nouvel essai au démarrage
+    /// suivant.
+    Failed { error: anyhow::Error, killed: bool },
+}
+
+/// La refine d'une conversation mise en attente à la sortie. Si l'UI a déjà
+/// une session pour elle (`open_session`), la refine s'y fait ; sinon le
+/// fil est rouvert depuis son fichier (config du `Create` donnée par
+/// `config`), refiné, puis son worker tué, sauf si l'UI l'a pris entre-temps
+/// (`taken_by_ui`, la réouverture d'un fichier tenu rejoint sa session).
+#[allow(clippy::too_many_arguments)]
+pub async fn refine_pending(
+    client: &DaemonClient,
+    socket_path: &Path,
+    store: AppStore,
+    agent_dir: PathBuf,
+    conversation_id: &str,
+    workspace_id: Option<String>,
+    open_session: Option<String>,
+    config: impl FnOnce(&str) -> serde_json::Value,
+    taken_by_ui: impl Fn(&str) -> bool,
+) -> PendingOutcome {
+    let drop_pending = |reason: &'static str| {
+        let (store, conversation_id) = (store.clone(), conversation_id.to_string());
+        async move {
+            let cleared = tokio::task::spawn_blocking(move || {
+                store.set_refine_pending(&conversation_id, false)
+            })
+            .await;
+            if !matches!(cleared, Ok(Ok(()))) {
+                tracing::warn!("prime pending refine not cleared");
+            }
+            PendingOutcome::Dropped(reason)
+        }
+    };
+    let Some(workspace_id) = workspace_id.filter(|workspace| Path::new(workspace).is_dir()) else {
+        return drop_pending("conversation or project gone").await;
+    };
+    let path = match crate::prime_session::thread_path(&agent_dir, conversation_id) {
+        Ok(path) if path.is_file() => path,
+        _ => return drop_pending("no thread file").await,
+    };
+    let thread = ThreadContext {
+        conversation_id: conversation_id.to_string(),
+        workspace_id: workspace_id.clone(),
+    };
+    let (active_session_id, opened_here) = match open_session {
+        Some(active_session_id) => (active_session_id, false),
+        None => {
+            match crate::prime_session::open_thread(client, config(&workspace_id), &path).await {
+                Ok(opened) => {
+                    // Les refines du fil faites quand rien n'écoutait.
+                    let (store, agent_dir, thread) =
+                        (store.clone(), agent_dir.clone(), thread.clone());
+                    let messages = opened.messages.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        import_thread_outcomes(&store, &agent_dir, &thread, &messages)
+                    })
+                    .await;
+                    (opened.active_session_id, true)
+                }
+                Err(error) => {
+                    return PendingOutcome::Failed {
+                        error,
+                        killed: false,
+                    }
+                }
+            }
+        }
+    };
+    let refined = run_refine(
+        socket_path,
+        store,
+        agent_dir,
+        &active_session_id,
+        thread,
+        RefineOrigin::Close,
+        None,
+    )
+    .await;
+    let killed = opened_here
+        && !taken_by_ui(&active_session_id)
+        && crate::prime_session::kill_session(client, &active_session_id)
+            .await
+            .is_ok();
+    match refined {
+        Ok(run) => PendingOutcome::Refined {
+            run: Box::new(run),
+            killed,
+        },
+        Err(error) => PendingOutcome::Failed { error, killed },
+    }
 }
 
 #[cfg(test)]

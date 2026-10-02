@@ -250,6 +250,7 @@ pub fn run() {
             start_remote_if_enabled(app.handle());
             prime_session::reap_orphans_at_startup(app.handle().clone());
             prime_session::start_close_timer(app.handle().clone());
+            prime_session::refine_pending_at_startup(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match event {

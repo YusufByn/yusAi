@@ -2603,6 +2603,183 @@ async fn closing_refines_then_puts_the_worker_to_sleep_and_the_thread_reopens() 
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Refines mises en attente à la sortie (Cmd+Q), reprises au démarrage :
+/// fil rouvert, refiné puis tué ; refine sur la session que l'UI a déjà
+/// ouverte, sans la tuer ; conversation disparue, attente levée ; refine
+/// ratée, attente gardée.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn deferred_refines_run_at_the_next_start() {
+    let _alone = REFINE_TESTS.lock().await;
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::AppStore;
+    use sinew_desktop_lib::prime_close::{refine_pending, PendingOutcome};
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_id = workspace.to_string_lossy().into_owned();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    // Un script par worker : chacun lit le sien depuis le début.
+    let script = |name: &str, responses: Vec<serde_json::Value>| {
+        let path = root.join(format!("{name}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({ "engine": "faux", "responses": responses }).to_string(),
+        )
+        .unwrap();
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": path.to_string_lossy(),
+        })
+    };
+    let plan = |content: &str| {
+        serde_json::json!({ "text": serde_json::json!({
+            "summary": content,
+            "rationale": "trajectory evidence",
+            "expectedOutcome": "reused",
+            "edits": [{ "action": "create", "kind": "memory", "id": "yusai-deferred",
+                        "title": "Reprise", "content": content }],
+        }).to_string() })
+    };
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    // Une conversation avec un tour, puis Cmd+Q : `pending = 1`, worker tué.
+    let path = thread_path(&agent_dir, "conv-deferred").unwrap();
+    let opened = open_thread(
+        &client,
+        script("first", vec![serde_json::json!({ "text": "ok" })]),
+        &path,
+    )
+    .await
+    .expect("thread opened");
+    prompt(&client, &opened.active_session_id, "salut")
+        .await
+        .expect("prompt admitted");
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(turn.is_ok(), "turn ended");
+    tokio::spawn(async move { while events.recv().await.is_some() {} });
+    store.note_user_turn("conv-deferred").unwrap();
+    assert!(store.defer_refine_if_unrefined("conv-deferred").unwrap());
+    kill_session(&client, &opened.active_session_id)
+        .await
+        .expect("killed at exit");
+    let deferred = |workspace: Option<String>, open: Option<String>, config: serde_json::Value| {
+        let (client, socket_path, store, agent_dir) = (
+            &client,
+            socket_path.clone(),
+            store.clone(),
+            agent_dir.clone(),
+        );
+        async move {
+            refine_pending(
+                client,
+                &socket_path,
+                store,
+                agent_dir,
+                "conv-deferred",
+                workspace,
+                open,
+                |_| config,
+                |_| false,
+            )
+            .await
+        }
+    };
+
+    // Démarrage : fil rouvert, refiné, worker tué.
+    let outcome = deferred(
+        Some(workspace_id.clone()),
+        None,
+        script("restart", vec![plan("Reprise au démarrage.")]),
+    )
+    .await;
+    let PendingOutcome::Refined { run, killed } = outcome else {
+        panic!("outcome: {outcome:?}");
+    };
+    assert!(killed);
+    let report = run.report.expect("imported");
+    assert_eq!(
+        store.lesson_events(&report.created[0]).unwrap()[0].actor,
+        "refine:close"
+    );
+    assert!(store.pending_refines().unwrap().is_empty());
+    assert_eq!(last_session_state(&path).as_deref(), Some("archived"));
+
+    // L'UI a déjà rouvert la conversation : refine sur sa session, gardée.
+    let ui = open_thread(
+        &client,
+        script("ui", vec![plan("Reprise dans l'UI.")]),
+        &path,
+    )
+    .await
+    .expect("ui opens the thread");
+    store.note_user_turn("conv-deferred").unwrap();
+    store.defer_refine_if_unrefined("conv-deferred").unwrap();
+    let outcome = deferred(
+        Some(workspace_id.clone()),
+        Some(ui.active_session_id.clone()),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert!(
+        matches!(outcome, PendingOutcome::Refined { killed: false, .. }),
+        "outcome: {outcome:?}"
+    );
+    assert!(store.pending_refines().unwrap().is_empty());
+    assert_ne!(last_session_state(&path).as_deref(), Some("archived"));
+    kill_session(&client, &ui.active_session_id)
+        .await
+        .expect("ui session killed");
+
+    // Refine ratée : worker tué quand même, attente gardée.
+    store.note_user_turn("conv-deferred").unwrap();
+    store.defer_refine_if_unrefined("conv-deferred").unwrap();
+    let outcome = deferred(
+        Some(workspace_id.clone()),
+        None,
+        script("broken", vec![serde_json::json!({ "text": "pas un plan" })]),
+    )
+    .await;
+    assert!(
+        matches!(outcome, PendingOutcome::Failed { killed: true, .. }),
+        "outcome: {outcome:?}"
+    );
+    assert_eq!(store.pending_refines().unwrap(), vec!["conv-deferred"]);
+
+    // Conversation sans projet (supprimée) : attente levée, rien d'ouvert.
+    let outcome = deferred(None, None, serde_json::Value::Null).await;
+    assert!(
+        matches!(outcome, PendingOutcome::Dropped(_)),
+        "outcome: {outcome:?}"
+    );
+    assert!(store.pending_refines().unwrap().is_empty());
+
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
 fn uv_available() -> bool {
     let on_path = std::env::var_os("PATH")

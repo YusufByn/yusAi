@@ -1177,6 +1177,20 @@ impl AppStore {
         Ok(())
     }
 
+    /// À la sortie (Cmd+Q) : la refine d'une conversation qui a de nouveaux
+    /// tours attend le prochain démarrage. Vrai si elle est mise en attente.
+    pub fn defer_refine_if_unrefined(&self, conversation_id: &str) -> Result<bool> {
+        let conn = self.connection()?;
+        let changed = conn
+            .execute(
+                "update prime_refine_state set pending = 1
+                 where conversation_id = ?1 and user_turns_since_refine > 0",
+                params![conversation_id],
+            )
+            .context("unable to defer refine")?;
+        Ok(changed > 0)
+    }
+
     /// Les conversations dont la refine attend le prochain démarrage.
     pub fn pending_refines(&self) -> Result<Vec<String>> {
         let conn = self.connection()?;
@@ -1595,6 +1609,19 @@ mod tests {
         assert!(!state.pending);
         assert!(state.last_refined_at_ms.is_some());
         assert_eq!(store.pending_refines().unwrap(), vec!["conv-2"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn only_conversations_with_new_turns_wait_for_the_next_start() {
+        let (store, path) = temp_store();
+        assert!(!store.defer_refine_if_unrefined("never-seen").unwrap());
+        store.note_user_turn("conv-1").unwrap();
+        store.note_user_turn("conv-2").unwrap();
+        store.mark_refined("conv-2").unwrap();
+        assert!(store.defer_refine_if_unrefined("conv-1").unwrap());
+        assert!(!store.defer_refine_if_unrefined("conv-2").unwrap());
+        assert_eq!(store.pending_refines().unwrap(), vec!["conv-1"]);
         let _ = std::fs::remove_file(path);
     }
 }
