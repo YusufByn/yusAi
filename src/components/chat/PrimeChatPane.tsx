@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
 import { primeBashTitle, type PrimeBashTitle } from "../../lib/primeBash";
+import { primeToolTitle } from "../../lib/primeToolTitle";
 import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
 import type {
   FileChange,
@@ -434,14 +435,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
                     images={message.images}
                     fileChanges={message.fileChanges}
                     outputLimit={TOOL_OUTPUT_LIMIT}
-                    shellTitle={
-                      message.bash && !message.note
-                        ? {
-                            command: message.bash.command,
-                            meta: message.bash.more > 0 ? `+${message.bash.more}` : undefined,
-                          }
-                        : undefined
-                    }
+                    displayTitle={primeToolTitle(message)}
                     onOpenFile={onOpenFile}
                   />
                 </div>

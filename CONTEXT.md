@@ -28,8 +28,10 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   et edit tournent dans le noyau Python
   (`pa-daemon/src/agent_engine/lifecycle.rs:1126-1128`). Titre de la carte :
   la commande quand la cellule appelle `bash(...)` (icône terminal, sans
-  `cd <projet> &&`, « +N » s'il y a d'autres appels ; `src/lib/primeBash.ts`),
-  sinon la première ligne de la cellule.
+  `cd <projet> &&`, « +N » s'il y a d'autres appels ; `src/lib/primeBash.ts`) ;
+  sinon, une fois les fichiers modifiés reçus, le chemin du premier (icône
+  edit, « +N » ; `src/lib/primeToolTitle.ts`) ; sinon la première ligne de la
+  cellule.
 - **Fichiers modifiés par un appel** (`src-tauri/src/prime_diffs.rs`) : le
   noyau Prime perd les diffs d'`edit` avant le résultat
   (`pa-core/src/session_engine/runtime_wiring.rs:342-367` ne recopie pas
@@ -119,8 +121,7 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 
 ## Suite (par priorité)
 
-1. **Affiner les cartes d'outils** : titre des cellules `edit` (aujourd'hui
-   leur première ligne, souvent `old = …`) ; si Prime corrige un jour la perte
+1. **Affiner les cartes d'outils** : si Prime corrige un jour la perte
    des diffs (`details.diffs`, que son TUI lit déjà,
    `pa-tui/src/tool_card/ipython_details.rs:100-104`), les utiliser à la place
    des photos.
