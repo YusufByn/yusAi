@@ -54,7 +54,12 @@ export type ToolCardProps = {
   teamCompletionByTeam?: Record<string, boolean>;
   activeTeamNames?: ReadonlySet<string>;
   subAgentName?: string;
+  // Opt-in cap on the rendered output (the Prime chat): longer output shows
+  // its head and a "Show all" toggle, so a huge stdout stays cheap to render.
+  outputLimit?: ToolOutputLimit;
 };
+
+export type ToolOutputLimit = { chars: number; lines: number };
 
 export type ToolCardTeamAgent = {
   name: string;
@@ -493,6 +498,30 @@ function CleanContextCard({
       )}
     </div>
   );
+}
+
+// The head of `output` within `limit`, or null when it already fits.
+function truncateOutput(
+  output: string,
+  limit: ToolOutputLimit,
+): { head: string; hiddenLines: number } | null {
+  let end = Math.min(output.length, limit.chars);
+  let lines = 0;
+  for (let index = 0; index < end; index++) {
+    if (output.charCodeAt(index) === 10 && ++lines >= limit.lines) {
+      end = index;
+      break;
+    }
+  }
+  if (end >= output.length) return null;
+  // A cut on a line break hides the lines after it, not that break.
+  const start = output.charCodeAt(end) === 10 ? end + 1 : end;
+  let hiddenLines = 0;
+  for (let index = start; index < output.length; index++) {
+    if (output.charCodeAt(index) === 10) hiddenLines++;
+  }
+  if (!output.endsWith("\n")) hiddenLines++;
+  return { head: output.slice(0, end), hiddenLines };
 }
 
 function toolImageSrc(image: ToolResultImage): string {
@@ -1057,11 +1086,13 @@ export function ToolCard({
   teamAgents,
   activeTeamNames,
   subAgentName,
+  outputLimit,
 }: ToolCardProps) {
   const canonicalName = canonicalToolName(name);
   const isCreateImage = canonicalName === "create_image";
   const isTeamRunTool = canonicalName === "team_run";
   const [open, setOpen] = useState(false);
+  const [showFullOutput, setShowFullOutput] = useState(false);
   const [teamStopState, setTeamStopState] = useState<
     "idle" | "stopping" | "stopped" | "error"
   >("idle");
@@ -1167,6 +1198,10 @@ export function ToolCard({
       : isTeamStop && !isError
         ? teamStopOutput(output)
       : output;
+  const truncatedOutput =
+    outputLimit && displayOutput && !showFullOutput
+      ? truncateOutput(displayOutput, outputLimit)
+      : null;
 
   if (isTodo) {
     return (
@@ -1439,8 +1474,22 @@ export function ToolCard({
               data-kind="output"
               data-error={isError ? "true" : "false"}
             >
-              {displayOutput.length ? displayOutput : "—"}
+              {truncatedOutput
+                ? truncatedOutput.head
+                : displayOutput.length
+                  ? displayOutput
+                  : "—"}
             </pre>
+          )}
+          {truncatedOutput && (
+            <button
+              type="button"
+              className="tool-card__more"
+              onClick={() => setShowFullOutput(true)}
+            >
+              Show all · {truncatedOutput.hiddenLines.toLocaleString()} more{" "}
+              {truncatedOutput.hiddenLines === 1 ? "line" : "lines"}
+            </button>
           )}
           {hasImages && (
             <div className="tool-card__images">

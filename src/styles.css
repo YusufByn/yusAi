@@ -7226,6 +7226,19 @@ textarea {
   color: var(--diff-rem-fg);
   background: var(--danger-tint-08);
 }
+.tool-card__more {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.tool-card__more:hover {
+  color: var(--text-1);
+}
 .tool-card__changes {
   display: flex;
   flex-direction: column;

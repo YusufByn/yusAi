@@ -10,7 +10,7 @@ import type {
   ToolResultImage,
 } from "../../types";
 import { Markdown } from "./Markdown";
-import { ToolCard, type ToolCardProps } from "./ToolCard";
+import { ToolCard, type ToolCardProps, type ToolOutputLimit } from "./ToolCard";
 
 // Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
 // one pane per yusAi conversation), created the first time the pane is
@@ -44,6 +44,10 @@ type PrimeToolCall = {
 };
 
 type PrimeStatus = "idle" | "starting" | "streaming";
+
+// Tool output beyond this renders behind "Show all": a cell can print
+// megabytes of stdout, and every streamed chunk re-renders the card.
+const TOOL_OUTPUT_LIMIT: ToolOutputLimit = { chars: 20_000, lines: 200 };
 
 type Props = {
   workspacePath: string;
@@ -413,6 +417,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
                     output={message.output}
                     isError={message.isError}
                     images={message.images}
+                    outputLimit={TOOL_OUTPUT_LIMIT}
                     onOpenFile={onOpenFile}
                   />
                 </div>
