@@ -27,7 +27,8 @@ use crate::workspace::{workspace_info, WorkspaceInfo};
 mod lessons;
 pub use lessons::{
     normalize_lesson_text, normalize_project_type, InsertLessonOutcome, Lesson, LessonEvent,
-    LessonKind, LessonLevel, LessonOrigin, LessonProposal, LessonScope, LessonStatus, NewLesson,
+    ImportedRefinement, LessonKind, LessonLevel, LessonOrigin, LessonProposal, LessonScope,
+    LessonStatus, NewLesson,
     NewProposal, ProjectTypeSetting, ProjectTypeSource, ProposalKind, ProposalStatus, RefineState,
 };
 
@@ -1556,7 +1557,7 @@ impl AppStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap_or(0);
 
-        if version >= 10 {
+        if version >= 11 {
             return Ok(());
         }
 
@@ -1609,9 +1610,10 @@ impl AppStore {
             conn.execute("delete from turn_checkpoints", [])
                 .context("unable to clear legacy turn checkpoints")?;
         }
-        // v10 : leçons Prime retenues par yusAi (store/lessons.rs).
+        // v10 : leçons Prime retenues par yusAi ; v11 : échecs d'import des
+        // refines (store/lessons.rs).
         lessons::ensure_lessons_tables(&conn)?;
-        conn.pragma_update(None, "user_version", 10)
+        conn.pragma_update(None, "user_version", 11)
             .context("unable to set sqlite schema version")?;
         Ok(())
     }

@@ -231,7 +231,12 @@ pub struct ImportReport {
     pub updated: Vec<String>,
     pub archived: Vec<String>,
     pub proposals: Vec<String>,
+    /// Edits écartées dès la conversion (non appliquées par Prime…).
     pub skipped: Vec<String>,
+    /// Opérations qui ont échoué dans le magasin, gardées avec la refine
+    /// (`ImportedRefinement::failures`) ; leurs entrées restent dans le
+    /// harness.
+    pub failed: Vec<String>,
     /// Entrées retirées du harness de Prime après l'import.
     pub removed_entries: usize,
 }
@@ -270,7 +275,9 @@ static IMPORT_LOCK: Mutex<()> = Mutex::new(());
 /// cette refine a créées dans le harness de Prime en sont retirées : elles
 /// vivent désormais chez nous, et le fichier local est partagé par tous nos
 /// fils (sinon toute refine suivante, de n'importe quel projet, les
-/// relirait). Les erreurs de ce retrait ne font pas échouer l'import.
+/// relirait). Une création qui échoue garde son entrée dans le fichier ;
+/// chaque échec est noté avec la refine. Les erreurs du retrait ne font pas
+/// échouer l'import.
 pub fn import_refinement_outcome(
     store: &AppStore,
     agent_dir: &Path,
@@ -333,7 +340,8 @@ pub fn import_refinement_outcome(
                         to_promote.push(existing_id.clone());
                         report.duplicates.push(existing_id);
                     }
-                    Err(error) => report.skipped.push(format!("create {entry_id}: {error:#}")),
+                    // L'entrée reste dans le harness : elle n'est pas chez nous.
+                    Err(error) => report.failed.push(format!("create {entry_id}: {error:#}")),
                 }
             }
             LessonOp::Update {
@@ -342,14 +350,12 @@ pub fn import_refinement_outcome(
                 content,
             } => match store.update_lesson(&lesson_id, &title, &content, &origin) {
                 Ok(_) => report.updated.push(lesson_id),
-                Err(error) => report
-                    .skipped
-                    .push(format!("update {lesson_id}: {error:#}")),
+                Err(error) => report.failed.push(format!("update {lesson_id}: {error:#}")),
             },
             LessonOp::Archive { lesson_id } => match store.archive_lesson(&lesson_id, &origin) {
                 Ok(_) => report.archived.push(lesson_id),
                 Err(error) => report
-                    .skipped
+                    .failed
                     .push(format!("archive {lesson_id}: {error:#}")),
             },
             LessonOp::Propose {
@@ -366,7 +372,7 @@ pub fn import_refinement_outcome(
                 refinement_id: origin.refinement_id.clone(),
             }) {
                 Ok(proposal) => report.proposals.push(proposal.id),
-                Err(error) => report.skipped.push(format!("proposal: {error:#}")),
+                Err(error) => report.failed.push(format!("proposal: {error:#}")),
             },
         }
     }
@@ -376,12 +382,16 @@ pub fn import_refinement_outcome(
                 Ok(Some(proposal)) => report.proposals.push(proposal),
                 Ok(None) => {}
                 Err(error) => report
-                    .skipped
+                    .failed
                     .push(format!("promote {lesson_id}: {error:#}")),
             }
         }
     }
-    store.mark_refinement_imported(&report.refinement_id, Some(&thread.conversation_id))?;
+    store.mark_refinement_imported(
+        &report.refinement_id,
+        Some(&thread.conversation_id),
+        &report.failed,
+    )?;
 
     let harness = refine_harness_file(agent_dir, global);
     match remove_harness_entries(&harness, &touched) {
@@ -810,5 +820,133 @@ mod tests {
     #[test]
     fn an_outcome_needs_its_refinement_id() {
         assert!(refinement_ops(&json!({ "edits": [] }), levels).is_err());
+    }
+
+    /// Un magasin et un dossier agent jetables, avec un harness local qui
+    /// porte les entrées données (`kind`, `id`, `content`).
+    fn import_fixture(entries: &[(&str, &str, &str)]) -> (AppStore, PathBuf) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "yusai-lessons-import-test-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let agent_dir = root.join("agent");
+        let harness = refine_harness_file(&agent_dir, false);
+        std::fs::create_dir_all(harness.parent().unwrap()).unwrap();
+        let mut state = json!({ "schema": 1, "entries": {}, "refinements": [] });
+        for (kind, id, content) in entries {
+            state["entries"][*kind][*id] = entry(id, kind, "Title", content);
+        }
+        std::fs::write(&harness, state.to_string()).unwrap();
+        let store = AppStore::open_at(root.join("state.sqlite3")).unwrap();
+        (store, agent_dir)
+    }
+
+    fn harness_ids(agent_dir: &Path, kind: &str) -> Vec<String> {
+        let text = std::fs::read_to_string(refine_harness_file(agent_dir, false)).unwrap();
+        let state: Value = serde_json::from_str(&text).unwrap();
+        let mut ids: Vec<String> = state["entries"][kind]
+            .as_object()
+            .map(|entries| entries.keys().cloned().collect())
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn a_failed_creation_keeps_its_entry_and_is_recorded_with_the_refine() {
+        let (store, agent_dir) = import_fixture(&[("memory", "tests", "Lancer cargo test.")]);
+        // Sans projet, la création échoue dans le magasin.
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: String::new(),
+        };
+        let report = import_refinement_outcome(
+            &store,
+            &agent_dir,
+            &thread,
+            &outcome(vec![create_edit("memory", "tests", "Lancer cargo test.")]),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(report.created.is_empty());
+        assert_eq!(report.failed.len(), 1, "report: {report:?}");
+        assert!(report.failed[0].starts_with("create tests:"));
+        assert_eq!(report.removed_entries, 0);
+        assert_eq!(harness_ids(&agent_dir, "memory"), vec!["tests"]);
+        let imported = store.imported_refinement("refine_1").unwrap().unwrap();
+        assert_eq!(imported.failures, report.failed);
+        assert_eq!(imported.conversation_id.as_deref(), Some("conv-1"));
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn only_the_entries_of_successful_creations_leave_the_harness() {
+        let (store, agent_dir) = import_fixture(&[
+            ("memory", "tests", "Lancer cargo test."),
+            ("memory", "other", "Une entrée d'une autre refine."),
+        ]);
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        // Deux leçons projet existantes : la mise à jour de la seconde vers
+        // le texte de la première échoue (même texte, même niveau).
+        let insert = |content: &str| match store
+            .insert_lesson(
+                &NewLesson {
+                    level: LessonLevel::Project,
+                    workspace_id: Some("/work/a".to_string()),
+                    project_type: None,
+                    kind: LessonKind::Memory,
+                    title: "Old".to_string(),
+                    content: content.to_string(),
+                },
+                &LessonOrigin::user(),
+            )
+            .unwrap()
+        {
+            InsertLessonOutcome::Created(lesson) => lesson.id,
+            other => panic!("{other:?}"),
+        };
+        let first = insert("Première.");
+        let second = insert("Seconde.");
+        let collide = json!({
+            "action": "update", "kind": "memory", "id": second,
+            "content": "Première.",
+            "after": entry(&second, "memory", "Old", "Première."),
+            "applied": true,
+        });
+        let report = import_refinement_outcome(
+            &store,
+            &agent_dir,
+            &thread,
+            &outcome(vec![
+                collide,
+                create_edit("memory", "tests", "Lancer cargo test."),
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(report.created.len(), 1, "report: {report:?}");
+        assert_eq!(report.failed.len(), 1, "report: {report:?}");
+        assert!(report.failed[0].starts_with(&format!("update {second}:")));
+        assert_eq!(report.removed_entries, 1);
+        assert_eq!(harness_ids(&agent_dir, "memory"), vec!["other"]);
+        assert_eq!(store.lesson(&second).unwrap().unwrap().content, "Seconde.");
+        assert_eq!(store.lesson(&first).unwrap().unwrap().content, "Première.");
+        assert_eq!(
+            store
+                .imported_refinement("refine_1")
+                .unwrap()
+                .unwrap()
+                .failures,
+            report.failed
+        );
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }
 }

@@ -94,6 +94,28 @@ pub(super) fn ensure_lessons_tables(conn: &Connection) -> Result<()> {
         "#,
     )
     .context("unable to create lesson tables")?;
+    ensure_refinement_failures_column(conn)
+}
+
+/// v11 : les opérations d'une refine qui ont échoué à l'import.
+fn ensure_refinement_failures_column(conn: &Connection) -> Result<()> {
+    let mut statement = conn
+        .prepare("pragma table_info(prime_imported_refinements)")
+        .context("unable to inspect imported refinements")?;
+    let has_column = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("unable to inspect imported refinements")?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .context("unable to inspect imported refinements")?
+        .iter()
+        .any(|name| name == "failures_json");
+    if !has_column {
+        conn.execute_batch(
+            "alter table prime_imported_refinements
+                add column failures_json text not null default '[]';",
+        )
+        .context("unable to add refinement failures column")?;
+    }
     Ok(())
 }
 
@@ -354,6 +376,16 @@ pub enum ProjectTypeSource {
 pub struct ProjectTypeSetting {
     pub project_type: Option<String>,
     pub source: ProjectTypeSource,
+}
+
+/// Une refine de Prime déjà importée, et ce qui a échoué à l'import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedRefinement {
+    pub refinement_id: String,
+    pub conversation_id: Option<String>,
+    pub imported_at_ms: i64,
+    pub failures: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -979,23 +1011,58 @@ impl AppStore {
         .map(|found| found.is_some())
     }
 
-    /// Note qu'une refine de Prime a été importée ; `false` si elle l'était
-    /// déjà (l'import est idempotent par `refinementId`).
+    /// Note qu'une refine de Prime a été importée, avec les opérations qui
+    /// ont échoué ; `false` si elle l'était déjà (l'import est idempotent
+    /// par `refinementId`).
     pub fn mark_refinement_imported(
         &self,
         refinement_id: &str,
         conversation_id: Option<&str>,
+        failures: &[String],
     ) -> Result<bool> {
         let conn = self.connection()?;
         let inserted = conn
             .execute(
                 "insert or ignore into prime_imported_refinements
-                    (refinement_id, conversation_id, imported_at_ms)
-                 values (?1, ?2, ?3)",
-                params![refinement_id, conversation_id, now_ms()],
+                    (refinement_id, conversation_id, imported_at_ms, failures_json)
+                 values (?1, ?2, ?3, ?4)",
+                params![
+                    refinement_id,
+                    conversation_id,
+                    now_ms(),
+                    serde_json::to_string(failures).context("unable to serialize failures")?
+                ],
             )
             .context("unable to record imported refinement")?;
         Ok(inserted == 1)
+    }
+
+    pub fn imported_refinement(&self, refinement_id: &str) -> Result<Option<ImportedRefinement>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "select conversation_id, imported_at_ms, failures_json
+             from prime_imported_refinements where refinement_id = ?1",
+            params![refinement_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .context("unable to read imported refinement")?
+        .map(|(conversation_id, imported_at_ms, failures)| {
+            Ok(ImportedRefinement {
+                refinement_id: refinement_id.to_string(),
+                conversation_id,
+                imported_at_ms,
+                failures: serde_json::from_str(&failures)
+                    .context("unable to parse refinement failures")?,
+            })
+        })
+        .transpose()
     }
 
     pub fn project_type(&self, workspace_id: &str) -> Result<Option<ProjectTypeSetting>> {
@@ -1168,14 +1235,14 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_idempotent_and_sets_version_10() {
+    fn migration_is_idempotent_and_sets_version_11() {
         let (store, path) = temp_store();
         store.migrate().unwrap();
         let conn = store.connection().unwrap();
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1456,11 +1523,25 @@ mod tests {
         let (store, path) = temp_store();
         assert!(!store.is_refinement_imported("refine_1").unwrap());
         assert!(store
-            .mark_refinement_imported("refine_1", Some("conv-1"))
+            .mark_refinement_imported("refine_1", Some("conv-1"), &[])
             .unwrap());
         assert!(store.is_refinement_imported("refine_1").unwrap());
+        assert!(store
+            .mark_refinement_imported("refine_2", None, &["update yl_x: collision".to_string()])
+            .unwrap());
+        let imported = store.imported_refinement("refine_2").unwrap().unwrap();
+        assert_eq!(imported.failures, vec!["update yl_x: collision"]);
+        assert_eq!(
+            store
+                .imported_refinement("refine_1")
+                .unwrap()
+                .unwrap()
+                .failures,
+            Vec::<String>::new()
+        );
+        assert_eq!(store.imported_refinement("refine_3").unwrap(), None);
         assert!(!store
-            .mark_refinement_imported("refine_1", Some("conv-1"))
+            .mark_refinement_imported("refine_1", Some("conv-1"), &[])
             .unwrap());
         let _ = std::fs::remove_file(path);
     }
