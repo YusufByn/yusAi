@@ -277,6 +277,16 @@ pub async fn open_thread(
     config: Value,
     session_path: &Path,
 ) -> Result<OpenedSession> {
+    open_thread_with_metadata(client, config, session_path, ide_runtime_metadata()).await
+}
+
+/// [`open_thread`] avec un marquage explicite (tests : un IDE disparu).
+pub async fn open_thread_with_metadata(
+    client: &DaemonClient,
+    config: Value,
+    session_path: &Path,
+    runtime_metadata: Value,
+) -> Result<OpenedSession> {
     // Le dossier existe avant le verrou du worker : sinon le verrou retient
     // le chemin non canonique (pa-daemon/src/lease.rs:78-87) et refuse
     // ensuite d'écrire dans le fichier créé, dont le chemin canonique diffère
@@ -285,11 +295,7 @@ pub async fn open_thread(
         tokio::fs::create_dir_all(dir).await?;
     }
     let response = client
-        .request(create_command(
-            config,
-            ide_runtime_metadata(),
-            Some(session_path),
-        ))
+        .request(create_command(config, runtime_metadata, Some(session_path)))
         .await?;
     let (active_session_id, created) = if response.success {
         let summary = response.data.unwrap_or(Value::Null);

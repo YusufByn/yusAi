@@ -918,6 +918,293 @@ async fn thinking_streams_and_comes_back_with_the_thread() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
+fn uv_available() -> bool {
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("uv").is_file()));
+    on_path
+        || std::env::var_os("HOME")
+            .is_some_and(|home| PathBuf::from(home).join(".local/bin/uv").is_file())
+}
+
+/// Les sessions de `{"type": "list"}` dont l'`activeSessionId` est donné.
+async fn listed_session_ids(client: &pa_tui::daemon_client::DaemonClient) -> Vec<String> {
+    let listed = client
+        .request_ok(pa_types::daemon::DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("list");
+    listed["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|session| session["activeSessionId"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Les enfants RLM d'une session (pa-daemon/src/state_getters.rs:38-64).
+async fn rlm_children(
+    client: &pa_tui::daemon_client::DaemonClient,
+    active_session_id: &str,
+) -> Vec<serde_json::Value> {
+    client
+        .request_ok(pa_types::daemon::DaemonCommand::GetRlmChildren {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("get_rlm_children")["children"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Attend qu'une session disparaisse de `list`.
+async fn wait_until_unlisted(client: &pa_tui::daemon_client::DaemonClient, id: &str) -> bool {
+    for _ in 0..100 {
+        if !listed_session_ids(client)
+            .await
+            .iter()
+            .any(|listed| listed == id)
+        {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// Sous-agents, avec un vrai noyau Python (sauté sans `uv`) : une cellule
+/// `rlm.spawn` lance un enfant, dont la réponse arrive au parent en ligne
+/// `custom` `agent_message` (pa-core/src/session_engine/agent_messaging.rs:303-326).
+/// Les enfants ne portent pas le marquage yusAi
+/// (pa-daemon/src/rlm_children/host.rs:109-115) mais meurent avec leur
+/// parent : au `Kill` (pa-daemon/src/worker/commands.rs:659), et donc aussi
+/// quand le nettoyage des orphelins tue le parent d'un IDE disparu.
+/// Le venv du noyau est stable d'un passage à l'autre (`CARGO_TARGET_TMPDIR`).
+#[tokio::test(flavor = "multi_thread")]
+async fn subagents_report_to_their_parent_and_die_with_it() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_desktop_lib::prime::ensure_daemon_running_with_kernel_venv;
+    use sinew_desktop_lib::prime_session::{
+        kill_session, open_thread, open_thread_with_metadata, prompt, reap_orphaned_sessions,
+        thread_path,
+    };
+
+    if !uv_available() {
+        eprintln!("uv not found; skipping the live-kernel sub-agent e2e");
+        return;
+    }
+    let kernel_venv = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prime-kernel-venv");
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let write = |name: &str, script: serde_json::Value| {
+        let path = root.join(name);
+        std::fs::write(&path, script.to_string()).unwrap();
+        path
+    };
+    let spawn_cell = |name: &str| {
+        serde_json::json!({ "content": [{
+            "type": "toolCall",
+            "name": "ipython",
+            "arguments": { "code": format!("handle = await rlm.spawn(\"fais ta tâche\", name=\"{name}\")") },
+        }] })
+    };
+    // L'enfant répond au parent par le handler du noyau, comme les tests de
+    // Prime (pa-daemon/tests/agent_family_e2e.rs:256-264).
+    let child = write(
+        "child.json",
+        serde_json::json!({ "engine": "faux", "responses": [
+            { "content": [{
+                "type": "toolCall",
+                "name": "ipython",
+                "arguments": { "code": "from rlm import host_request\nawait host_request(\"agent_message.send\", {\"message\": \"fini du kid\", \"receiver_role\": \"parent\"})" },
+            }] },
+            { "text": "fini" },
+        ] }),
+    );
+    let parent = write(
+        "parent.json",
+        serde_json::json!({ "engine": "faux", "responses": [
+            spawn_cell("kid"),
+            { "text": "enfant lancé" },
+            { "text": "bien reçu" },
+        ] }),
+    );
+    // Un enfant qui reste occupé, pour le parent orphelin.
+    let busy_child = write(
+        "busy-child.json",
+        serde_json::json!({ "responses": [{ "text": "toujours là", "delayMs": 60_000 }] }),
+    );
+    let orphan_parent = write(
+        "orphan-parent.json",
+        serde_json::json!({ "engine": "faux", "responses": [
+            spawn_cell("busy"),
+            { "text": "enfant lancé" },
+        ] }),
+    );
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+
+    let (client, mut events) =
+        ensure_daemon_running_with_kernel_venv(&exe, &socket_path, &agent_dir, &kernel_venv)
+            .await
+            .expect("daemon starts");
+
+    // 1. Parent vivant : l'enfant répond, puis meurt avec le parent.
+    let opened = open_thread(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": parent.to_string_lossy(),
+            "childScript": child.to_string_lossy(),
+        }),
+        &thread_path(&agent_dir, "conv-agents").unwrap(),
+    )
+    .await
+    .expect("parent opened");
+    let parent_id = opened.active_session_id.clone();
+    prompt(&client, &parent_id, "lance un sous-agent")
+        .await
+        .expect("prompt admitted");
+    let mut seen = Vec::new();
+    // La première construction du venv peut prendre quelques minutes.
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        while let Some(event) = events.recv().await {
+            let DaemonClientEvent::SessionEvent {
+                active_session_id,
+                event,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if active_session_id != parent_id {
+                continue;
+            }
+            seen.push(event["type"].as_str().unwrap_or_default().to_string());
+            let message = &event["message"];
+            if event["type"] == "message_start"
+                && message["role"] == "custom"
+                && message["customType"] == "agent_message"
+            {
+                return message["details"].clone();
+            }
+        }
+        serde_json::Value::Null
+    })
+    .await;
+    let details = reply
+        .unwrap_or_else(|_| panic!("no agent_message reached the parent; parent events: {seen:?}"));
+    assert_eq!(details["message"], "fini du kid", "details: {details}");
+    assert_eq!(details["from"]["sessionName"], "kid", "details: {details}");
+    assert_eq!(
+        details["from"]["runtimeKind"], "subagent",
+        "details: {details}"
+    );
+    assert_eq!(details["fromRelationship"], "child", "details: {details}");
+
+    let children = rlm_children(&client, &parent_id).await;
+    assert_eq!(children.len(), 1, "children: {children:?}");
+    assert_eq!(children[0]["sessionName"], "kid");
+    let kid_id = children[0]["activeSessionId"]
+        .as_str()
+        .expect("child activeSessionId")
+        .to_string();
+    kill_session(&client, &parent_id)
+        .await
+        .expect("parent killed");
+    assert!(
+        wait_until_unlisted(&client, &kid_id).await,
+        "the child died with its parent"
+    );
+
+    // 2. IDE disparu : le nettoyage tue le parent marqué, l'enfant suit.
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id();
+    gone.wait().unwrap();
+    // Un parent avec fichier : un parent en mémoire ne peut pas inscrire
+    // d'enfant au registre RLM de Prime (« invalid spawn »), l'enfant est
+    // aussitôt arrêté.
+    let orphan_id = open_thread_with_metadata(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": orphan_parent.to_string_lossy(),
+            "childScript": busy_child.to_string_lossy(),
+        }),
+        &thread_path(&agent_dir, "conv-orphan").unwrap(),
+        serde_json::json!({ "yusai": { "idePid": gone_pid, "ideProcessStartId": "gone" } }),
+    )
+    .await
+    .expect("orphan parent created")
+    .active_session_id;
+    prompt(&client, &orphan_id, "lance un sous-agent")
+        .await
+        .expect("prompt admitted");
+    let mut busy_id = None;
+    for _ in 0..600 {
+        if let Some(id) = rlm_children(&client, &orphan_id)
+            .await
+            .first()
+            .and_then(|child| child["activeSessionId"].as_str())
+            .filter(|id| !id.is_empty())
+        {
+            busy_id = Some(id.to_string());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let busy_id = busy_id.expect("the orphan's child was spawned");
+    assert!(listed_session_ids(&client).await.contains(&busy_id));
+    let reaped = reap_orphaned_sessions(&client, &agent_dir, &socket_path)
+        .await
+        .expect("reap");
+    assert_eq!(
+        reaped,
+        vec![orphan_id.clone()],
+        "only the marked parent is reaped directly"
+    );
+    assert!(
+        wait_until_unlisted(&client, &busy_id).await,
+        "the unmarked child died with its reaped parent"
+    );
+    // Les enfants sont créés par Prime sans `telemetryDisabled`
+    // (pa-daemon/src/rlm_children/lifecycle.rs:124-127) : leur worker crée
+    // l'identifiant `telemetry.json` (pa-core/src/session_engine/telemetry.rs:1073-1079),
+    // mais n'enregistre aucun événement, et rien ne part sans point d'envoi
+    // configuré (telemetry.rs:1117-1129).
+    assert!(
+        !agent_dir.join("telemetry.jsonl").exists(),
+        "no telemetry event recorded with sub-agents and a live kernel"
+    );
+
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cycle `ClientOwned` (pa-daemon/src/supervisor/sessions.rs:621-638) : une
 /// déconnexion sans `Kill` ne fait qu'un `detach`
 /// (pa-daemon/src/supervisor/clients.rs:354-373) et le worker continue de
