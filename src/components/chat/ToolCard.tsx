@@ -57,6 +57,10 @@ export type ToolCardProps = {
   // Opt-in cap on the rendered output (the Prime chat): longer output shows
   // its head and a "Show all" toggle, so a huge stdout stays cheap to render.
   outputLimit?: ToolOutputLimit;
+  // Opt-in shell display for a tool that runs commands without being named
+  // bash (Prime's ipython cells): terminal glyph, the command as title and
+  // a meta such as "+2" for the cell's other commands.
+  shellTitle?: { command: string; meta?: string };
 };
 
 export type ToolOutputLimit = { chars: number; lines: number };
@@ -1087,6 +1091,7 @@ export function ToolCard({
   activeTeamNames,
   subAgentName,
   outputLimit,
+  shellTitle,
 }: ToolCardProps) {
   const canonicalName = canonicalToolName(name);
   const isCreateImage = canonicalName === "create_image";
@@ -1276,7 +1281,9 @@ export function ToolCard({
     ? grepTitleParts(argsPretty, output, isError)
     : isGlob
       ? globTitleParts(argsPretty, output, isError)
-      : null;
+      : shellTitle
+        ? { main: shellTitle.command, meta: shellTitle.meta ?? null }
+        : null;
   const mcpTitle = isMcp ? mcpTitleParts(name, summary) : null;
   const bashTitle = isBash && command ? command : null;
   const editingTitle = showEditingTitle
@@ -1374,7 +1381,7 @@ export function ToolCard({
           <span className="tool-card__err-dot" />
         ) : (
           <span className="tool-card__glyph">
-            {isBash ? (
+            {isBash || shellTitle ? (
               <TerminalGlyph />
             ) : isGlob || isGrep ? (
               <AsteriskGlyph />

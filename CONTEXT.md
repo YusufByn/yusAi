@@ -27,7 +27,9 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   all ». Le modèle de Prime n'a qu'un outil, `ipython` (`args.code`) : bash
   et edit tournent dans le noyau Python
   (`pa-daemon/src/agent_engine/lifecycle.rs:1126-1128`). Titre de la carte :
-  première ligne de la cellule.
+  la commande quand la cellule appelle `bash(...)` (icône terminal, sans
+  `cd <projet> &&`, « +N » s'il y a d'autres appels ; `src/lib/primeBash.ts`),
+  sinon la première ligne de la cellule.
 - **Modèle et réflexion** : sélecteurs dans le composer (style Sinew,
   `ComposerPicker`), via `get_connection_state` / `get_available_models` /
   `set_model` / `set_thinking_level`. Opus 5.5 et Sonnet 5.5 disponibles.
@@ -69,7 +71,8 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 
 - `cargo test --workspace` : dont `src-tauri/tests/prime_daemon.rs`
   (superviseur réel + worker réel avec le moteur `faux` de Prime).
-- Front : `npx tsc --noEmit -p tsconfig.json`, `npx vite build`.
+- Front : `npx tsc --noEmit -p tsconfig.json`, `npx vite build`, `npm test`
+  (tests unitaires dans `tests/`, lancés par `node --test` sans dépendance).
 - En dev, réponse scriptée sans modèle : `YUSAI_PRIME_FAUX_SCRIPT=<faux.json>`.
   Avec `"engine": "faux"` : vrai moteur, texte seulement. Sans `engine` :
   moteur scripté, qui rejoue aussi des appels d'outils
@@ -103,8 +106,7 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 
 ## Suite (par priorité)
 
-1. **Affiner les cartes d'outils** : reconnaître `bash('…')` dans la
-   cellule (titre = commande, icône terminal) ; afficher les diffs d'`edit`
+1. **Affiner les cartes d'outils** : afficher les diffs d'`edit`
    (le noyau les capture, `pa-core/src/kernel/shared.rs:93`, mais ils
    n'apparaissent pas dans `result.details` d'`ipython.rs:441-477` : à
    creuser).

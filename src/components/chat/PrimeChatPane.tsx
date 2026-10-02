@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { listen } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
+import { primeBashTitle, type PrimeBashTitle } from "../../lib/primeBash";
 import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
 import type {
   PrimeEventPayload,
@@ -35,6 +36,8 @@ type PrimeToolCall = {
   name: string;
   summary: string;
   argsPretty?: string;
+  // The cell's shell command, when it calls bash.
+  bash: PrimeBashTitle | null;
   // Kernel boot stage shown as the title while the call runs.
   note?: string;
   output?: string;
@@ -201,6 +204,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
         case "tool_execution_start": {
           const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : "";
           const name = typeof event.toolName === "string" ? event.toolName : "tool";
+          const code = toolCode(event.args);
           streamingIdRef.current = null;
           const id = nextIdRef.current++;
           setMessages((current) => [
@@ -212,6 +216,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
               name,
               summary: toolSummary(name, event.args),
               argsPretty: toolArgsPretty(event.args),
+              bash: code === undefined ? null : primeBashTitle(code, workspacePath),
               status: "running",
               isError: false,
             },
@@ -264,7 +269,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
       cancelled = true;
       unlisten?.();
     };
-  }, [appendAssistantText, pushMessage, settleRunningToolCalls, updateToolCall]);
+  }, [appendAssistantText, pushMessage, settleRunningToolCalls, updateToolCall, workspacePath]);
 
   // The session dies with the pane (conversation deleted or workspace
   // changed, see Workspace.tsx); one still being created closes on arrival.
@@ -418,6 +423,14 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
                     isError={message.isError}
                     images={message.images}
                     outputLimit={TOOL_OUTPUT_LIMIT}
+                    shellTitle={
+                      message.bash && !message.note
+                        ? {
+                            command: message.bash.command,
+                            meta: message.bash.more > 0 ? `+${message.bash.more}` : undefined,
+                          }
+                        : undefined
+                    }
                     onOpenFile={onOpenFile}
                   />
                 </div>
