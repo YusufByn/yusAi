@@ -1069,6 +1069,16 @@ impl AppStore {
         project_type_of(&self.connection()?, workspace_id)
     }
 
+    /// Le type que l'utilisateur a choisi pour le projet, le seul qui compte
+    /// pour les leçons (injection, amorçage, import) ; une suggestion non
+    /// confirmée ne compte pas.
+    pub fn confirmed_project_type(&self, workspace_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .project_type(workspace_id)?
+            .filter(|setting| setting.source == ProjectTypeSource::User)
+            .and_then(|setting| setting.project_type))
+    }
+
     /// Enregistre le type d'un projet. Une suggestion ne remplace jamais un
     /// choix de l'utilisateur.
     pub fn set_project_type(
@@ -1681,6 +1691,24 @@ mod tests {
         assert!(store.defer_refine_if_unrefined("conv-1").unwrap());
         assert!(!store.defer_refine_if_unrefined("conv-2").unwrap());
         assert_eq!(store.pending_refines().unwrap(), vec!["conv-1"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn only_a_chosen_project_type_is_confirmed() {
+        let (store, path) = temp_store();
+        assert_eq!(store.confirmed_project_type("/work/a").unwrap(), None);
+        store
+            .set_project_type("/work/a", Some("rust"), ProjectTypeSource::Suggested)
+            .unwrap();
+        assert_eq!(store.confirmed_project_type("/work/a").unwrap(), None);
+        store
+            .set_project_type("/work/a", Some("rust"), ProjectTypeSource::User)
+            .unwrap();
+        assert_eq!(
+            store.confirmed_project_type("/work/a").unwrap().as_deref(),
+            Some("rust")
+        );
         let _ = std::fs::remove_file(path);
     }
 

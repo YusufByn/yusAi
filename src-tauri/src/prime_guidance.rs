@@ -58,9 +58,7 @@ pub fn with_guidance(mut config: serde_json::Value, guidance: &Guidance) -> serd
 
 /// Le texte pour une conversation du projet `workspace_id`.
 pub fn thread_guidance(store: &AppStore, data_dir: &Path, workspace_id: &str) -> Result<Guidance> {
-    let project_type = store
-        .project_type(workspace_id)?
-        .and_then(|setting| setting.project_type);
+    let project_type = store.confirmed_project_type(workspace_id)?;
     let lessons = store.applicable_lessons(&LessonScope {
         workspace_id: workspace_id.to_string(),
         project_type,

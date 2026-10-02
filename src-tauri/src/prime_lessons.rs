@@ -341,9 +341,7 @@ pub fn import_refinement_outcome_as(
     if !refinement_id.is_empty() && store.is_refinement_imported(refinement_id)? {
         return Ok(None);
     }
-    let project_type = store
-        .project_type(&thread.workspace_id)?
-        .and_then(|setting| setting.project_type);
+    let project_type = store.confirmed_project_type(&thread.workspace_id)?;
     let import = refinement_ops(details, |id| {
         let lesson = store.lesson(id).ok().flatten()?;
         lesson_target(&lesson, &thread.workspace_id, project_type.as_deref())
@@ -753,9 +751,7 @@ pub fn seed_thread_lessons(
     thread: &ThreadContext,
 ) -> Result<usize> {
     let _guard = IMPORT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    let project_type = store
-        .project_type(&thread.workspace_id)?
-        .and_then(|setting| setting.project_type);
+    let project_type = store.confirmed_project_type(&thread.workspace_id)?;
     let lessons = store.applicable_lessons(&LessonScope {
         workspace_id: thread.workspace_id.clone(),
         project_type,
@@ -1704,6 +1700,56 @@ mod tests {
         global["refinementId"] = json!("refine_3");
         global["scope"] = json!("global");
         assert_eq!(actor_of(&global, "refine:retain"), "refine:global");
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    /// Seul un type de projet choisi compte : tant qu'il n'est que suggéré,
+    /// les leçons de ce type ne sont ni injectées, ni amorcées, ni
+    /// modifiables par une refine du projet.
+    #[test]
+    fn a_suggested_project_type_does_not_count_until_confirmed() {
+        use sinew_app::store::ProjectTypeSource;
+        let (store, agent_dir) = import_fixture(&[]);
+        let typed = lesson(&store, LessonLevel::Type, "/work/b", "Préférer anyhow.");
+        store
+            .set_project_type("/work/a", Some("rust"), ProjectTypeSource::Suggested)
+            .unwrap();
+        let thread = ThreadContext {
+            conversation_id: "conv-a".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        let data_dir = agent_dir.parent().unwrap();
+        let injected = |store: &AppStore| {
+            crate::prime_guidance::thread_guidance(store, data_dir, "/work/a")
+                .unwrap()
+                .injected
+        };
+        let update = |id: &str| {
+            let mut details = outcome(vec![json!({
+                "action": "update", "kind": "memory", "id": typed.id,
+                "title": "T", "content": "Préférer thiserror.", "applied": true,
+            })]);
+            details["refinementId"] = json!(id);
+            details
+        };
+
+        assert!(injected(&store).is_empty());
+        assert_eq!(seed_thread_lessons(&store, &agent_dir, &thread).unwrap(), 0);
+        let report = import_refinement_outcome(&store, &agent_dir, &thread, &update("refine_1"))
+            .unwrap()
+            .unwrap();
+        assert!(report.proposals.is_empty(), "report: {report:?}");
+        assert_eq!(report.skipped.len(), 1, "report: {report:?}");
+
+        store
+            .set_project_type("/work/a", Some("rust"), ProjectTypeSource::User)
+            .unwrap();
+        assert_eq!(injected(&store), vec![typed.id.clone()]);
+        assert_eq!(seed_thread_lessons(&store, &agent_dir, &thread).unwrap(), 1);
+        let report = import_refinement_outcome(&store, &agent_dir, &thread, &update("refine_2"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.proposals.len(), 1, "a change proposal: {report:?}");
         let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }
 }

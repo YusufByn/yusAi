@@ -849,7 +849,7 @@ function ProjectTypePicker({
         onClick={() => setOpen((now) => !now)}
         title={
           suggested
-            ? "Project type suggested from its files: click to confirm or change"
+            ? "Project type suggested from its files, not used until you confirm it"
             : "Project type: lessons learned here can be shared with projects of the same type"
         }
       >
@@ -860,7 +860,9 @@ function ProjectTypePicker({
         <div className="prime-type__popover" role="menu" aria-label="Project type">
           {suggested && (
             <span className="prime-type__hint">
-              {current ? "Suggested from the project's files" : "No type found in the project's files"}
+              {current
+                ? "Suggested from the project's files, not used until confirmed"
+                : "No type found in the project's files"}
             </span>
           )}
           {types.map((type) => {

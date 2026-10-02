@@ -233,8 +233,10 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   relu à chaque affichage du panneau. Suggestion tirée des fichiers à la
   racine (`tauri.conf.json`, `Cargo.toml`, `package.json` et son framework,
   `pyproject.toml`…), recalculée tant que l'utilisateur n'a pas choisi,
-  affichée en italique ; la choisir la confirme. Pris en compte à la
-  prochaine ouverture d'un fil et à la prochaine refine.
+  affichée en italique ; la choisir la confirme. Seul un type confirmé
+  compte pour les leçons (`confirmed_project_type` : injection, amorçage,
+  import) ; il est pris en compte à la prochaine ouverture d'un fil et à la
+  prochaine refine.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
