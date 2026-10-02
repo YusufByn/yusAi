@@ -28,9 +28,12 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   bloc `AIThinkingBlock` (ouvert pendant le flux, replié ensuite avec sa
   durée), fermé par `thinking_end` ou la fin du message / tour / session ;
   les blocs `thinking` de l'historique sont restaurés (vides et `redacted`
-  ignorés, sans durée). Anthropic renvoie une réflexion résumée
+  ignorés, sans durée). Sous 1 s, pas de durée (« Thought ») : un bloc
+  entier peut arriver en une trame regroupée, la durée mesurée côté client
+  ne veut rien dire (`thinkingDuration`, `src/lib/primeHistory.ts`).
+  Anthropic renvoie une réflexion résumée
   (`display: "summarized"`, `pa-ai/src/providers/anthropic/params.rs:107-128`),
-  rien au niveau `off`.
+  rien au niveau `off`. Vérifié dans l'app avec un vrai modèle.
 - **Sous-agents (vus depuis le parent)** : une cellule `rlm.spawn(…)` est
   titrée « Agent · nom » (« Agent » si `name=` n'est pas un littéral) avec
   l'état de l'enfant (`get_rlm_children`, interrogé toutes les 2 s tant
@@ -122,6 +125,17 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `7c6ac74` (front : historique restauré, sélecteurs relus, réouverture après
   fermeture), commit suivant (suppression du fil avec la conversation, test
   e2e). Vérifié par les tests et le banc d'essai, pas encore dans l'app.
+- **Réflexion** : `7d99351` (test e2e), `0941095` (affichage, restauration),
+  `24ca115` (pas de durée sous 1 s).
+- **Sous-agents** : `edcaaee` (venv du noyau isolé), `f496017` (tests e2e :
+  `scratch_dir` unique), `60ddba1` (test e2e avec vrai noyau), `49bcfe4`
+  (affichage). Non poussés : attendre que l'utilisateur ait testé dans
+  l'app (dernier commit poussé : `e31abaf`).
+- **Diagnostics clos** : pas de bloc de réflexion avec Sonnet 5.5 = mode
+  adaptatif (le modèle décide ; niveau bien enregistré, requête bien
+  envoyée, aucun jeton de réflexion facturé) ; carte « (no output yet —
+  cell ran) » = le modèle avait envoyé cette phrase comme code (SyntaxError),
+  pas un bug d'affichage.
 
 ## Tests
 
