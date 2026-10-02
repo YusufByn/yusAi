@@ -123,7 +123,11 @@ fn edit_op(
     let id = edit.get("id").and_then(Value::as_str).unwrap_or("");
     let label = format!("{action} {kind}:{id}");
     if edit.get("applied").and_then(Value::as_bool) != Some(true) {
-        return Err(format!("{label}: not applied"));
+        // Prime dit pourquoi dans `error` (pa-core/src/refinement/mod.rs:314-315).
+        return Err(match text(edit.get("error")) {
+            Some(error) => format!("{label}: not applied ({error})"),
+            None => format!("{label}: not applied"),
+        });
     }
     if !matches!(action, "create" | "update" | "delete") {
         return Err(format!("{label}: unknown action"));
@@ -914,7 +918,7 @@ mod tests {
         assert_eq!(
             import.skipped,
             vec![
-                "create memory:a: not applied".to_string(),
+                "create memory:a: not applied (stale)".to_string(),
                 "create plan:b: unknown kind".to_string(),
                 "rename memory:c: unknown action".to_string(),
                 "create memory:d: empty entry".to_string(),
