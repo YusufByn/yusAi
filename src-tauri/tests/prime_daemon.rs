@@ -190,6 +190,138 @@ async fn prompt_streams_assistant_text() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Les appels d'outils arrivent au client tels que `PrimeChatPane` les lit :
+/// `tool_execution_start` (`toolCallId`, `toolName`, `args`) puis
+/// `tool_execution_end` (`result.content`, `isError`), émis par le worker
+/// (pa-daemon/src/worker/turn.rs:905-932). Un script sans `"engine": "faux"`
+/// passe par le moteur scripté, qui rejoue des appels d'outils
+/// (pa-daemon/src/engine/scripted.rs:16-23).
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_calls_reach_the_client() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_desktop_lib::prime_session::{create_session, kill_session, prompt};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("scripted.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "responses": [{
+                "text": "je lance deux cellules",
+                "toolCalls": [
+                    {
+                        "toolCallId": "call-ok",
+                        "toolName": "ipython",
+                        "args": { "code": "print(bash('ls'))" },
+                        "result": "README.md",
+                        "isError": false,
+                    },
+                    {
+                        "toolCallId": "call-err",
+                        "toolName": "ipython",
+                        "args": { "code": "edit('a.rs', [])" },
+                        "result": "ValueError: no edits",
+                        "isError": true,
+                    },
+                ],
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let session = create_session(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        }),
+    )
+    .await
+    .expect("session created and attached");
+    prompt(&client, &session, "vas-y")
+        .await
+        .expect("prompt admitted");
+
+    let mut tool_events = Vec::new();
+    let mut seen_types = Vec::new();
+    let collected = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            let DaemonClientEvent::SessionEvent { event, .. } = event else {
+                continue;
+            };
+            let kind = event["type"].as_str().unwrap_or_default().to_string();
+            if kind.starts_with("tool_execution_") {
+                tool_events.push(event);
+            }
+            let done = kind == "agent_end";
+            seen_types.push(kind);
+            if done {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(collected.is_ok(), "turn ended; events seen: {seen_types:?}");
+
+    let summary: Vec<_> = tool_events
+        .iter()
+        .map(|event| {
+            (
+                event["type"].as_str().unwrap_or_default(),
+                event["toolCallId"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("tool_execution_start", "call-ok"),
+            ("tool_execution_end", "call-ok"),
+            ("tool_execution_start", "call-err"),
+            ("tool_execution_end", "call-err"),
+        ],
+        "events seen: {seen_types:?}"
+    );
+    assert_eq!(tool_events[0]["toolName"], "ipython");
+    assert_eq!(tool_events[0]["args"]["code"], "print(bash('ls'))");
+    assert_eq!(tool_events[1]["isError"], false);
+    assert_eq!(tool_events[1]["result"]["content"][0]["type"], "text");
+    assert_eq!(tool_events[1]["result"]["content"][0]["text"], "README.md");
+    assert_eq!(tool_events[3]["isError"], true);
+    assert_eq!(
+        tool_events[3]["result"]["content"][0]["text"],
+        "ValueError: no edits"
+    );
+
+    kill_session(&client, &session)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cycle `ClientOwned` (pa-daemon/src/supervisor/sessions.rs:621-638) : une
 /// déconnexion sans `Kill` ne fait qu'un `detach`
 /// (pa-daemon/src/supervisor/clients.rs:354-373) et le worker continue de
