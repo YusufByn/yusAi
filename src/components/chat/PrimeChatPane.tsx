@@ -6,6 +6,7 @@ import { primeBashTitle, spawnCalls } from "../../lib/primeBash";
 import {
   agentRow,
   historyToMessages,
+  thinkingDuration,
   toolArgsPretty,
   toolCode,
   toolResultDetailsStatus,
@@ -153,8 +154,7 @@ export function PrimeChatPane({
           ? {
               ...message,
               streaming: false,
-              durationMs:
-                message.startedAt === undefined ? undefined : now - message.startedAt,
+              durationMs: thinkingDuration(message.startedAt, now),
             }
           : message,
       ),

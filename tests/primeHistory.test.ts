@@ -1,7 +1,7 @@
 // Run with `npm test` (Node runs the TypeScript directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { historyToMessages } from "../src/lib/primeHistory.ts";
+import { historyToMessages, thinkingDuration } from "../src/lib/primeHistory.ts";
 
 function convert(history: unknown[]) {
   let id = 1;
@@ -161,4 +161,12 @@ test("sub-agent spawns, replies and abnormal ends", () => {
     { id: 3, role: "agent", kind: "notice", name: "kid", text: "Finished without replying" },
     { id: 4, role: "agent", kind: "notice", name: "bob", text: "Failed: boom" },
   ]);
+});
+
+test("thinking duration: none when unmeasured or under a second", () => {
+  assert.equal(thinkingDuration(undefined, 5_000), undefined);
+  assert.equal(thinkingDuration(1_000, 1_000), undefined);
+  assert.equal(thinkingDuration(1_000, 1_999), undefined);
+  assert.equal(thinkingDuration(1_000, 2_000), 1_000);
+  assert.equal(thinkingDuration(1_000, 4_200), 3_200);
 });

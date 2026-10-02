@@ -13,6 +13,22 @@ export type PrimeMessage =
   | PrimeToolCall
   | PrimeAgentMessage;
 
+// Below this, a measured thinking time says nothing: the whole block can
+// arrive in one coalesced frame (pa-daemon/src/streaming.rs:1-20), so the
+// client sees ~0 s however long the model reasoned.
+export const MIN_THINKING_DURATION_MS = 1000;
+
+// The duration a finished thinking block shows, or none ("Thought", as for
+// restored blocks) when it was not measured or is too short to mean much.
+export function thinkingDuration(
+  startedAt: number | undefined,
+  endedAt: number,
+): number | undefined {
+  if (startedAt === undefined) return undefined;
+  const duration = endedAt - startedAt;
+  return duration >= MIN_THINKING_DURATION_MS ? duration : undefined;
+}
+
 // A sub-agent's row in its parent's thread: its reply (`agent_message`,
 // pa-core/src/session_engine/agent_messaging.rs:303-326) or the notice of an
 // abnormal end (`rlm_child_terminal_notice` / `rlm_child_failure`,
