@@ -103,6 +103,24 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   tuées. Le marquage se lit dans les descripteurs de workers (List ne le
   renvoie pas).
 
+## Décisions (2026-10-02, pas encore codées)
+
+- **Rétention : couche yusAi.** On garde `/refine` et l'auto-refine de Prime
+  pour apprendre, mais on range nous-mêmes. Prime n'a que deux portées
+  (session, global) et ses chemins d'écriture ne tombent pas là où le
+  modèle relit (voir Pièges, « Harness de Prime »).
+  - Leçons : nouvelle table de `desktop-state.sqlite3`, avec niveau
+    (projet, type, global), source et historique ; réinjectées par
+    `appendSystemPrompt` au `Create` (rejoué à la relance du worker,
+    vérifié par test e2e).
+  - Skills : dossiers dans les données de yusAi, passés par `config.skills`
+    au `Create` (priorité maximale, `pa-core/src/resources/mod.rs:141-154`).
+  - Une leçon arrive au niveau projet ; elle ne monte au niveau type ou
+    global qu'avec la validation de Yusuf.
+- **Type de projet** : sélecteur dans l'en-tête du chat Prime, prérempli par
+  une suggestion tirée des fichiers du projet ; types en noms libres ; choix
+  retenu par projet.
+
 ## Fait récemment (commits)
 
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
