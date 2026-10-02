@@ -727,10 +727,42 @@ async fn deleting_a_thread_kills_its_worker_and_removes_the_file() {
     .await
     .expect("thread opened");
     assert!(path.is_file());
+    // Le dossier des sous-agents porte l'id de session de l'en-tête, pas le
+    // nom du fichier (pa-daemon/src/rlm_children.rs:867-882).
+    let header: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let session_id = header["id"].as_str().unwrap().to_string();
+    assert_ne!(session_id, stem);
+    let children_dir = agent_dir.join("session-artifacts").join(&session_id);
+    std::fs::create_dir_all(children_dir.join("sub-test")).unwrap();
+    std::fs::write(
+        children_dir.join("sub-test").join("rlm-subagent.json"),
+        "{}",
+    )
+    .unwrap();
 
     let killed = delete_thread(&client, &path).await.expect("thread deleted");
     assert_eq!(killed, vec![opened.active_session_id.clone()]);
     assert!(!path.exists(), "the thread file is gone");
+    assert!(!children_dir.exists(), "the sub-agents' artifacts are gone");
+    let trash_cli = std::process::Command::new("trash")
+        .arg("-h")
+        .output()
+        .is_ok();
+    if let (true, Some(home)) = (trash_cli, std::env::var_os("HOME")) {
+        let trashed = PathBuf::from(home).join(".Trash").join(&session_id);
+        assert!(
+            trashed.join("sub-test").join("rlm-subagent.json").is_file(),
+            "the sub-agents' artifacts went to the Trash"
+        );
+        let _ = std::fs::remove_dir_all(trashed);
+    }
     let listed = client
         .request_ok(pa_types::daemon::DaemonCommand::List {
             id: None,
@@ -952,7 +984,8 @@ async fn next_refinement_outcome(
             let DaemonClientEvent::SessionEvent { event, .. } = event else {
                 continue;
             };
-            if event["type"] == "message_end" && event["message"]["customType"] == "refinement_outcome"
+            if event["type"] == "message_end"
+                && event["message"]["customType"] == "refinement_outcome"
             {
                 return Some(event["message"].clone());
             }
@@ -1041,7 +1074,9 @@ async fn refine_runs_scripted_and_append_system_prompt_survives_a_worker_restart
     .expect("thread opened");
     let session = opened.active_session_id.clone();
 
-    prompt(&client, &session, "salut").await.expect("prompt admitted");
+    prompt(&client, &session, "salut")
+        .await
+        .expect("prompt admitted");
     let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         while let Some(event) = events.recv().await {
             if let DaemonClientEvent::SessionEvent { event, .. } = event {
@@ -1089,7 +1124,10 @@ async fn refine_runs_scripted_and_append_system_prompt_survives_a_worker_restart
         .expect("local refine runs");
     assert_eq!(local["summary"], "local lesson", "refine result: {local}");
     assert_eq!(local["scope"], "local");
-    assert_eq!(local["appliedEdits"][0]["applied"], true, "refine result: {local}");
+    assert_eq!(
+        local["appliedEdits"][0]["applied"], true,
+        "refine result: {local}"
+    );
     let outcome = next_refinement_outcome(&mut events)
         .await
         .expect("refinement_outcome row");
@@ -1184,7 +1222,9 @@ async fn refine_runs_scripted_and_append_system_prompt_survives_a_worker_restart
         "appendSystemPrompt is replayed after the worker restart"
     );
 
-    kill_session(&client, &session).await.expect("session killed");
+    kill_session(&client, &session)
+        .await
+        .expect("session killed");
     let _ = client
         .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
             id: None,

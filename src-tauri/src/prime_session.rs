@@ -334,8 +334,21 @@ pub async fn open_thread_with_metadata(
 /// refuse une session encore active. Sous macOS, Prime envoie le fichier à
 /// la Corbeille par `trash` quand la commande existe, sinon le supprime
 /// (saved_session_commands.rs:116-138). Un fichier encore présent après
-/// coup est supprimé ici. Renvoie les sessions tuées.
+/// coup est supprimé ici.
+///
+/// Prime n'efface que `session-artifacts/<nom du fichier>/`
+/// (saved_session_commands.rs:142-154) ; les sous-agents vivent sous
+/// `session-artifacts/<id de session>/` (pa-daemon/src/rlm_children.rs:867-882),
+/// et l'id de session d'un fil yusAi n'est pas son nom de fichier. Ce
+/// dossier part aussi à la Corbeille, comme le fichier. Renvoie les
+/// sessions tuées.
 pub async fn delete_thread(client: &DaemonClient, session_path: &Path) -> Result<Vec<String>> {
+    let children_dir = thread_session_id(session_path).and_then(|session_id| {
+        session_path
+            .parent()?
+            .parent()
+            .map(|agent_dir| agent_dir.join("session-artifacts").join(session_id))
+    });
     let target = pa_daemon::lease::canonical_session_path(session_path);
     let listed = client
         .request_ok(DaemonCommand::List {
@@ -380,7 +393,44 @@ pub async fn delete_thread(client: &DaemonClient, session_path: &Path) -> Result
     if session_path.exists() {
         tokio::fs::remove_file(session_path).await?;
     }
+    if let Some(dir) = children_dir.filter(|dir| dir.is_dir()) {
+        tokio::task::spawn_blocking(move || move_to_trash(&dir)).await??;
+    }
     Ok(holders)
+}
+
+/// L'id de session écrit dans l'en-tête d'un fil
+/// (`{"type":"session","id":…}`, première ligne du fichier).
+fn thread_session_id(session_path: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(session_path).ok()?;
+    let mut header = String::new();
+    std::io::BufReader::new(file).read_line(&mut header).ok()?;
+    let header: Value = serde_json::from_str(&header).ok()?;
+    if header.get("type").and_then(Value::as_str) != Some("session") {
+        return None;
+    }
+    let id = header.get("id").and_then(Value::as_str)?;
+    let valid = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    valid.then(|| id.to_string())
+}
+
+/// Corbeille comme Prime pour le fichier du fil : la commande `trash` quand
+/// elle existe (macOS 26 l'a), sinon suppression
+/// (pa-daemon/src/saved_session_commands.rs:116-138).
+fn move_to_trash(path: &Path) -> Result<()> {
+    let trashed = std::process::Command::new("trash")
+        .arg("--")
+        .arg(path)
+        .output()
+        .is_ok_and(|output| output.status.success() || !path.exists());
+    if !trashed && path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
 }
 
 /// Envoie un prompt sans attendre la fin du tour : la réponse arrive par les

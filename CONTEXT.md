@@ -199,7 +199,12 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   passe par `/usr/bin/trash` quand il existe (macOS 26 l'a), sinon supprime
   le fichier (`pa-daemon/src/saved_session_commands.rs:116-138`). Ne pas
   remplacer par une suppression directe. Le test e2e retire de la Corbeille
-  le fichier qu'il y envoie.
+  le fichier qu'il y envoie. Le dossier des sous-agents,
+  `session-artifacts/<id de session>/` (id lu dans l'en-tête du fil, distinct
+  du nom de fichier), part aussi à la Corbeille (`delete_thread`) ; Prime ne
+  le touchait pas. En revanche `session-artifacts/<conversationId>/`
+  (instantané du noyau) est effacé définitivement par Prime
+  (`remove_dir_all`, saved_session_commands.rs:142-154).
 - **Diffs perdus au redémarrage** (limite acceptée) : les fichiers modifiés
   viennent de nos photos, pas du fichier de session ; après un redémarrage
   les cartes restaurées n'ont plus leurs diffs, et une cellule `edit`
