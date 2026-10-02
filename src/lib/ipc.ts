@@ -33,6 +33,7 @@ import type {
   PlanControl,
   PrimeImportReport,
   PrimeOpenedSession,
+  PrimeProjectType,
   PrimeSubAgent,
   PrimeSessionConfig,
   QuestionAnswer,
@@ -770,6 +771,16 @@ export const api = {
   // (prime_close.rs).
   primeSetDisplayed(conversationId: string, displayed: boolean) {
     return invoke<void>("prime_set_displayed", { conversationId, displayed });
+  },
+  // Le type du projet (sélecteur du chat Prime).
+  primeProjectType(workspacePath: string) {
+    return invoke<PrimeProjectType>("prime_project_type", { workspacePath });
+  },
+  primeSetProjectType(workspacePath: string, projectType: string | null) {
+    return invoke<PrimeProjectType>("prime_set_project_type", {
+      workspacePath,
+      projectType,
+    });
   },
   primeAbort(activeSessionId: string) {
     return invoke<void>("prime_abort", { activeSessionId });

@@ -866,6 +866,15 @@ export type PrimeOpenedSession = {
   messages: unknown[];
 };
 
+// Le type du projet pour les leçons de niveau type (prime_project.rs) :
+// suggéré depuis les fichiers du projet tant que l'utilisateur n'a pas
+// choisi ; `null` : pas de type.
+export type PrimeProjectType = {
+  projectType: string | null;
+  source: "suggested" | "user" | null;
+  knownTypes: string[];
+};
+
 // Ce qu'une refine a fait dans le magasin des leçons (prime_lessons.rs,
 // ImportReport) : ids des leçons et propositions, edits écartées.
 export type PrimeImportReport = {

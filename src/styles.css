@@ -6349,6 +6349,66 @@ textarea {
   font-size: var(--fs-sm);
   padding: 4px 0;
 }
+/* Project type in the Prime chat header (PrimeChatPane, ProjectTypePicker). */
+.prime-type {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.prime-type__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  padding: 1px 6px;
+  border-radius: var(--r-med);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  transition: background 150ms ease, color 150ms ease;
+}
+.prime-type__btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prime-type__btn:hover {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+.prime-type__btn[data-suggested="true"] {
+  color: var(--text-3);
+  font-style: italic;
+}
+.prime-type__popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 180px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg-3);
+  border-radius: var(--r-card);
+  padding: 4px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+}
+.prime-type__hint {
+  padding: 4px 9px 6px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.prime-type__input {
+  margin: 4px 2px 2px;
+  padding: 5px 8px;
+  border-radius: var(--r-small);
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+}
+
 /* "Remember" in the Prime chat header (PrimeChatPane, RetainButton). */
 .prime-retain {
   position: relative;

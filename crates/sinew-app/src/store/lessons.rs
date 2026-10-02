@@ -1113,6 +1113,35 @@ impl AppStore {
         })
     }
 
+    /// Les types de projet déjà connus, pour le sélecteur : ceux des
+    /// projets et ceux des leçons actives de niveau type, un par clé
+    /// normalisée (le nom choisi pour un projet l'emporte), triés.
+    pub fn known_project_types(&self) -> Result<Vec<String>> {
+        let conn = self.connection()?;
+        let mut statement = conn
+            .prepare(
+                "select project_type from prime_projects where project_type is not null
+                 union all
+                 select project_type from lessons
+                 where level = 'type' and status = 'active' and project_type is not null",
+            )
+            .context("unable to prepare project type query")?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("unable to query project types")?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .context("unable to read project types")?;
+        let mut known: Vec<String> = Vec::new();
+        for name in names {
+            let key = normalize_project_type(&name);
+            if !key.is_empty() && !known.iter().any(|seen| normalize_project_type(seen) == key) {
+                known.push(name.trim().to_string());
+            }
+        }
+        known.sort_by_key(|name| normalize_project_type(name));
+        Ok(known)
+    }
+
     pub fn refine_state(&self, conversation_id: &str) -> Result<RefineState> {
         let conn = self.connection()?;
         Ok(conn
@@ -1652,6 +1681,32 @@ mod tests {
         assert!(store.defer_refine_if_unrefined("conv-1").unwrap());
         assert!(!store.defer_refine_if_unrefined("conv-2").unwrap());
         assert_eq!(store.pending_refines().unwrap(), vec!["conv-1"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn known_project_types_come_from_projects_and_type_lessons() {
+        let (store, path) = temp_store();
+        assert!(store.known_project_types().unwrap().is_empty());
+        store
+            .set_project_type("/work/a", Some("Rust"), ProjectTypeSource::User)
+            .unwrap();
+        store
+            .set_project_type("/work/b", Some("rust"), ProjectTypeSource::Suggested)
+            .unwrap();
+        store
+            .set_project_type("/work/c", None, ProjectTypeSource::User)
+            .unwrap();
+        let typed = NewLesson {
+            level: LessonLevel::Type,
+            workspace_id: Some("/work/d".to_string()),
+            project_type: Some("python".to_string()),
+            kind: LessonKind::Memory,
+            title: "T".to_string(),
+            content: "Préférer pytest.".to_string(),
+        };
+        store.insert_lesson(&typed, &LessonOrigin::user()).unwrap();
+        assert_eq!(store.known_project_types().unwrap(), vec!["python", "Rust"]);
         let _ = std::fs::remove_file(path);
     }
 

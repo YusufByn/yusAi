@@ -109,6 +109,7 @@ pub mod prime_close;
 pub mod prime_diffs;
 pub mod prime_guidance;
 pub mod prime_lessons;
+pub mod prime_project;
 pub mod prime_refine;
 pub mod prime_session;
 mod providers;
@@ -409,6 +410,8 @@ pub fn run() {
             prime_session::prime_prompt,
             prime_session::prime_retain,
             prime_session::prime_set_displayed,
+            prime_session::prime_project_type,
+            prime_session::prime_set_project_type,
             prime_session::prime_abort,
             prime_session::prime_close_session,
             prime_session::prime_rlm_children,

@@ -227,7 +227,14 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   session de l'UI si elle a déjà rouvert la conversation, sinon fil rouvert,
   refiné puis tué (sauf si l'UI l'a rejoint entre-temps). Conversation, projet
   ou fil introuvable : état de refine oublié ; refine ratée : attente gardée, nouvel
-  essai à chaque démarrage. Test e2e `deferred_refines_run_at_the_next_start`.
+  essai à chaque démarrage. Test e2e `deferred_refines_run_at_the_next_start`. Type de
+  projet (`src-tauri/src/prime_project.rs`) : sélecteur dans l'en-tête du
+  chat Prime (types connus, « No type », « Other type… » en texte libre),
+  relu à chaque affichage du panneau. Suggestion tirée des fichiers à la
+  racine (`tauri.conf.json`, `Cargo.toml`, `package.json` et son framework,
+  `pyproject.toml`…), recalculée tant que l'utilisateur n'a pas choisi,
+  affichée en italique ; la choisir la confirme. Pris en compte à la
+  prochaine ouverture d'un fil et à la prochaine refine.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

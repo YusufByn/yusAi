@@ -24,6 +24,7 @@ import type {
   PrimeEventPayload,
   PrimeImportReport,
   PrimeModelOption,
+  PrimeProjectType,
   PrimeSessionConfig,
 } from "../../types";
 import { AIThinkingBlock } from "./AIThinkingBlock";
@@ -563,6 +564,33 @@ export function PrimeChatPane({
     return () => window.clearTimeout(timer);
   }, [retainNote]);
 
+  // The project's type, for type-level lessons: suggested from its files
+  // until chosen here (prime_project.rs). Re-read whenever the pane shows.
+  const [projectType, setProjectType] = useState<PrimeProjectType | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    api
+      .primeProjectType(workspacePath)
+      .then((value) => {
+        if (!cancelled) setProjectType(value);
+      })
+      .catch(console.error);
+    return () => {
+      cancelled = true;
+    };
+  }, [active, workspacePath]);
+  const chooseProjectType = useCallback(
+    async (value: string | null) => {
+      try {
+        setProjectType(await api.primeSetProjectType(workspacePath, value));
+      } catch (err) {
+        pushMessage("error", String(err));
+      }
+    },
+    [workspacePath, pushMessage],
+  );
+
   const busy = status !== "idle";
   const pickersDisabled = busy || configBusy || !config;
 
@@ -578,6 +606,12 @@ export function PrimeChatPane({
           />
           <span>Prime</span>
         </span>
+        {projectType && (
+          <ProjectTypePicker
+            value={projectType}
+            onChoose={(value) => void chooseProjectType(value)}
+          />
+        )}
         {headerExtra}
         <RetainButton
           running={retaining}
@@ -761,6 +795,124 @@ function modelLabel(model: PrimeModelOption): string {
 
 function thinkingLevelLabel(level: string): string {
   return THINKING_LEVELS.find((entry) => entry.value === level)?.label ?? level;
+}
+
+// The header's project type: a popover with the known types, "No type" and
+// a free-text "Other type…", closed by an outside click or Escape. A
+// suggested type is shown muted until confirmed (choosing it confirms it).
+function ProjectTypePicker({
+  value,
+  onChoose,
+}: {
+  value: PrimeProjectType;
+  onChoose: (projectType: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [other, setOther] = useState("");
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const choose = (projectType: string | null) => {
+    setOpen(false);
+    setOther("");
+    onChoose(projectType);
+  };
+  const current = value.projectType;
+  const suggested = value.source === "suggested";
+  const sameType = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+  const types =
+    current && !value.knownTypes.some((known) => sameType(known, current))
+      ? [current, ...value.knownTypes]
+      : value.knownTypes;
+
+  return (
+    <div className="prime-type" ref={ref}>
+      <button
+        type="button"
+        className="prime-type__btn"
+        data-suggested={suggested ? "true" : "false"}
+        onClick={() => setOpen((now) => !now)}
+        title={
+          suggested
+            ? "Project type suggested from its files: click to confirm or change"
+            : "Project type: lessons learned here can be shared with projects of the same type"
+        }
+      >
+        <span>{current ?? "No type"}</span>
+        <Icon icon="solar:alt-arrow-down-linear" width={11} height={11} />
+      </button>
+      {open && (
+        <div className="prime-type__popover" role="menu" aria-label="Project type">
+          {suggested && (
+            <span className="prime-type__hint">
+              {current ? "Suggested from the project's files" : "No type found in the project's files"}
+            </span>
+          )}
+          {types.map((type) => {
+            const selected = current !== null && sameType(type, current);
+            return (
+              <button
+                key={type}
+                type="button"
+                className="composer__popover-row"
+                data-selected={selected && !suggested ? "true" : "false"}
+                onClick={() => choose(type)}
+              >
+                <span className="composer__popover-label">
+                  <span>{type}</span>
+                </span>
+                {selected && (
+                  <Icon
+                    icon={suggested ? "solar:question-circle-linear" : "solar:check-read-linear"}
+                    width={13}
+                    height={13}
+                    className="composer__popover-check"
+                  />
+                )}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            className="composer__popover-row"
+            data-selected={current === null && !suggested ? "true" : "false"}
+            onClick={() => choose(null)}
+          >
+            <span className="composer__popover-label">
+              <span>No type</span>
+            </span>
+          </button>
+          <input
+            className="prime-type__input"
+            placeholder="Other type…"
+            value={other}
+            onChange={(event) => setOther(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && other.trim()) {
+                event.preventDefault();
+                choose(other.trim());
+              }
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
 }
 
 // How long the result of "Remember" stays in the header.

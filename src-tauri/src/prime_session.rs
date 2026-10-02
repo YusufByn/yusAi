@@ -37,6 +37,7 @@ use crate::prime_lessons::{
     import_global_harness_writes, import_refinement_outcome, import_thread_outcomes,
     refinement_outcome_details, ImportReport, ThreadContext,
 };
+use crate::prime_project::PrimeProjectType;
 use tokio::sync::{mpsc::UnboundedReceiver, watch, Mutex};
 
 pub const PRIME_EVENT_NAME: &str = "prime-event";
@@ -1258,6 +1259,46 @@ pub async fn prime_prompt(
         });
     }
     Ok(())
+}
+
+/// Le type du projet pour le sélecteur du chat Prime (suggéré depuis ses
+/// fichiers tant que l'utilisateur n'a pas choisi).
+#[tauri::command]
+pub async fn prime_project_type(
+    app: AppHandle,
+    workspace_path: String,
+) -> Result<PrimeProjectType, String> {
+    let store = app_store(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_project::project_type(&store, &workspace_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(error_text)
+}
+
+/// Le type choisi pour le projet ; `None` : pas de type. Pris en compte à
+/// la prochaine ouverture d'un fil (leçons injectées) et à la prochaine
+/// refine.
+#[tauri::command]
+pub async fn prime_set_project_type(
+    app: AppHandle,
+    workspace_path: String,
+    project_type: Option<String>,
+) -> Result<PrimeProjectType, String> {
+    let store = app_store(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_project::set_project_type(&store, &workspace_path, project_type.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(error_text)
+}
+
+fn app_store(app: &AppHandle) -> Result<sinew_app::store::AppStore, String> {
+    app.try_state::<crate::DesktopState>()
+        .map(|desktop| desktop.store.clone())
+        .ok_or_else(|| "app store unavailable".to_string())
 }
 
 /// Le panneau Prime d'une conversation est (ou n'est plus) affiché dans la
