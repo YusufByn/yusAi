@@ -132,6 +132,20 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   du worker (90 min) ET au moins 1 nouveau tour. Après Cmd+Q, `pending = 1` ;
   la refine part au prochain démarrage de l'app, en arrière-plan, une à la
   fois (pas à la réouverture de la conversation).
+- **Mise en veille = notre propre minuteur** (2026-10-02, validé par
+  Yusuf), car celle de Prime ne touche jamais nos fils attachés et ne
+  prévient pas le client (Pièges, « Mise en veille ») : conversation non
+  affichée et sans activité depuis 90 min → refine si au moins 1 nouveau
+  tour, puis `Kill` du worker par nous ; le fil se rouvre depuis son fichier
+  au prochain affichage.
+  - « Sans activité » = aucun tour en cours ET aucun sous-agent vivant.
+  - Si la refine échoue, on tue quand même le worker et on garde
+    `pending = 1`.
+  - Test e2e attendu (commit 8) : après notre `Kill`, un `Create` avec
+    `session_path` rouvre le fil (état `archived`) avec modèle et niveau de
+    réflexion restaurés.
+  - Effet de bord voulu : le minuteur évite de garder un worker et un noyau
+    Python vivants par conversation ouverte depuis le démarrage de l'app.
 - **Plan de la couche yusAi validé** (2026-10-02, détails tranchés par
   Claude à la demande de Yusuf) :
   - écritures globales du modèle (`rlm.harness.*(…, global_=True)`) :
