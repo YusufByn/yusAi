@@ -231,6 +231,27 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   construction : quelques minutes) et se saute sans `uv`.
 - **Test qui panique = daemon orphelin** : un test e2e en échec n'atteint
   pas son `Shutdown` ; vérifier `pgrep -fl yusai-prime-test` après un échec.
+- **Harness de Prime (`/refine`) : chemins incohérents dans le worker**
+  (test e2e `refine_runs_scripted_and_append_system_prompt_survives_a_worker_restart`,
+  planificateur scripté par le moteur `faux`) :
+  - refine locale → `<agent_dir>/yusai-threads/harness/harness_state.json`,
+    commun à tous nos fils (`pa-core/src/session_engine/refine.rs:237-240`,
+    `pa-daemon/src/agent_engine/lifecycle.rs:1044-1063`) ; le digest du
+    prompt lit `session-artifacts/<fil>/harness/`
+    (`pa-core/src/session_engine/engine.rs:363-377`) ;
+  - refine globale → `<agent_dir>/harness_state.json` et
+    `refinement_history.jsonl`, sans `harness/`
+    (`pa-daemon/src/agent_engine/session_engine_impl.rs:1289`) ; le digest et
+    le noyau lisent `<agent_dir>/harness/` (`engine.rs:548`,
+    `prime-agent-runtime/src/rlm/harness.py:166`) ;
+  - `rlm.harness.*` local depuis le noyau échoue (aucun `RLM_SESSION_DIR`,
+    `pa-core/src/session_engine/runtime_wiring.rs:242-246`) ;
+  - le fil ne garde que `refinement_outcome` / `refinement_notice` ; l'audit
+    `prime-agent.refinement` (base du retour arrière) reste en mémoire :
+    l'historique local meurt avec le worker.
+  D'où la décision de ranger nous-mêmes. `appendSystemPrompt` est, lui,
+  rejoué à la relance d'un worker tué (`Create` durable,
+  `pa-daemon/src/supervisor/worker_lifecycle.rs:235-252`).
 - Prime se présente avec une version Claude Code figée dans vendor
   (`claude-cli/2.1.281`) : un modèle qui exige plus récent serait refusé.
 

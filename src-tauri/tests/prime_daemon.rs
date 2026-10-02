@@ -918,6 +918,284 @@ async fn thinking_streams_and_comes_back_with_the_thread() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Les fichiers d'état du harness sous `agent_dir`, en chemins relatifs triés.
+fn harness_files(agent_dir: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, found);
+            } else if matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("harness_state.json" | "refinement_history.jsonl")
+            ) {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                found.push(relative.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(agent_dir, agent_dir, &mut found);
+    found.sort();
+    found
+}
+
+/// Attend la ligne `custom` `refinement_outcome` d'une refine
+/// (pa-daemon/src/session_custom.rs:308-319, émise par
+/// pa-daemon/src/worker/summary.rs:169-185).
+async fn next_refinement_outcome(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<pa_tui::daemon_client::DaemonClientEvent>,
+) -> Option<serde_json::Value> {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(event) = events.recv().await {
+            let DaemonClientEvent::SessionEvent { event, .. } = event else {
+                continue;
+            };
+            if event["type"] == "message_end" && event["message"]["customType"] == "refinement_outcome"
+            {
+                return Some(event["message"].clone());
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// `/refine` par le daemon, planificateur scripté par le moteur `faux` (le
+/// worker résout le même modèle faux pour la refine,
+/// pa-daemon/src/agent_engine/session_engine_impl.rs:1282-1310, et
+/// `complete_simple` consomme la réponse suivante du script).
+///
+/// Fige où le worker écrit aujourd'hui, à rebours de ce que relit le
+/// digest du prompt (`session-artifacts/<fil>/harness/` en local,
+/// `harness/` en global, pa-core/src/session_engine/engine.rs:363-377, 548) :
+/// - local : `<dossier du fichier de fil>/harness/`, commun à tous les fils
+///   (pa-core/src/session_engine/refine.rs:237-240,
+///   pa-daemon/src/agent_engine/lifecycle.rs:1044-1063) ;
+/// - global : `agent_dir` lui-même, sans `harness/`
+///   (pa-daemon/src/agent_engine/session_engine_impl.rs:1289).
+///
+/// Vérifie aussi que `appendSystemPrompt` survit à la relance d'un worker
+/// tué : le superviseur rejoue le `Create` durable, qui garde la clé
+/// (pa-daemon/src/supervisor/worker_lifecycle.rs:235-252).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn refine_runs_scripted_and_append_system_prompt_survives_a_worker_restart() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+
+    const MARKER: &str = "YUSAI-LESSON-MARKER: toujours lancer cargo test avant de commiter.";
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let proposal = |summary: &str, id: &str| {
+        serde_json::json!({
+            "summary": summary,
+            "rationale": "trajectory evidence",
+            "expectedOutcome": "the lesson is reused",
+            "edits": [{
+                "action": "create",
+                "kind": "memory",
+                "id": id,
+                "title": summary,
+                "content": "Toujours lancer cargo test avant de commiter.",
+            }],
+        })
+        .to_string()
+    };
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "engine": "faux",
+            "responses": [
+                { "text": "ok" },
+                { "text": proposal("local lesson", "yusai-local") },
+                { "text": proposal("global lesson", "yusai-global") },
+            ],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-refine").unwrap();
+    let opened = open_thread(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+            "appendSystemPrompt": [MARKER],
+        }),
+        &path,
+    )
+    .await
+    .expect("thread opened");
+    let session = opened.active_session_id.clone();
+
+    prompt(&client, &session, "salut").await.expect("prompt admitted");
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(turn.is_ok(), "turn ended");
+
+    async fn system_prompt(
+        client: &pa_tui::daemon_client::DaemonClient,
+        active_session_id: &str,
+    ) -> String {
+        client
+            .request_ok(pa_types::daemon::DaemonCommand::GetSystemPrompt {
+                id: None,
+                active_session_id: active_session_id.to_string(),
+                rest: serde_json::Map::default(),
+            })
+            .await
+            .expect("get_system_prompt")["systemPrompt"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+    assert!(
+        system_prompt(&client, &session).await.contains(MARKER),
+        "appendSystemPrompt reaches the system prompt"
+    );
+
+    // Refine locale.
+    let local = client
+        .request_ok(pa_types::daemon::DaemonCommand::Refine {
+            id: None,
+            active_session_id: session.clone(),
+            instructions: None,
+            rollback_id: None,
+            global: None,
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("local refine runs");
+    assert_eq!(local["summary"], "local lesson", "refine result: {local}");
+    assert_eq!(local["scope"], "local");
+    assert_eq!(local["appliedEdits"][0]["applied"], true, "refine result: {local}");
+    let outcome = next_refinement_outcome(&mut events)
+        .await
+        .expect("refinement_outcome row");
+    assert_eq!(outcome["details"]["refinementId"], local["id"]);
+    assert_eq!(outcome["details"]["scope"], "local");
+    assert_eq!(
+        harness_files(&agent_dir),
+        vec!["yusai-threads/harness/harness_state.json".to_string()],
+        "local refine lands next to the thread files, not in session-artifacts/conv-refine/"
+    );
+
+    // Refine globale.
+    let global = client
+        .request_ok(pa_types::daemon::DaemonCommand::Refine {
+            id: None,
+            active_session_id: session.clone(),
+            instructions: None,
+            rollback_id: None,
+            global: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("global refine runs");
+    assert_eq!(global["scope"], "global", "refine result: {global}");
+    let outcome = next_refinement_outcome(&mut events)
+        .await
+        .expect("refinement_outcome row");
+    assert_eq!(outcome["details"]["scope"], "global");
+    assert_eq!(
+        harness_files(&agent_dir),
+        vec![
+            "harness_state.json".to_string(),
+            "refinement_history.jsonl".to_string(),
+            "yusai-threads/harness/harness_state.json".to_string(),
+        ],
+        "global refine lands in agent_dir itself, not in agent_dir/harness/"
+    );
+    let global_state = std::fs::read_to_string(agent_dir.join("harness_state.json")).unwrap();
+    assert!(global_state.contains("yusai-global"));
+
+    // Le fil ne garde que les lignes affichées (`refinement_outcome`) et
+    // destinées au modèle (`refinement_notice`), que le worker écrit
+    // lui-même (pa-daemon/src/worker/summary.rs:169-185). L'audit
+    // `prime-agent.refinement`, base du retour arrière, reste dans la
+    // session en mémoire du moteur (pa-core/src/session_engine/refine.rs:400-404) :
+    // l'historique local meurt avec le worker ; le global survit dans
+    // `refinement_history.jsonl`.
+    let thread = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(thread.matches("\"refinement_outcome\"").count(), 2);
+    assert_eq!(thread.matches("\"refinement_notice\"").count(), 2);
+    assert_eq!(thread.matches("\"prime-agent.refinement\"").count(), 0);
+
+    // Worker tué : le superviseur le relance avec le `Create` durable.
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket_path);
+    let descriptor_of = || {
+        std::fs::read_dir(&descriptor_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .filter_map(|text| {
+                serde_json::from_str::<pa_types::daemon::DaemonWorkerDescriptor>(&text).ok()
+            })
+            .find(|descriptor| descriptor.root_active_session_id == session)
+    };
+    let before = descriptor_of().expect("worker descriptor");
+    assert_eq!(
+        before.create_command.rest.get("appendSystemPrompt"),
+        Some(&serde_json::json!([MARKER])),
+        "the durable create keeps appendSystemPrompt"
+    );
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &before.pid.to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(killed.success());
+    let mut relaunched = None;
+    for _ in 0..200 {
+        if let Some(descriptor) = descriptor_of() {
+            if descriptor.pid != before.pid
+                && descriptor.lifecycle == pa_types::daemon::DaemonWorkerLifecycle::Ready
+            {
+                relaunched = Some(descriptor);
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(relaunched.is_some(), "the supervisor relaunches the worker");
+    assert!(
+        system_prompt(&client, &session).await.contains(MARKER),
+        "appendSystemPrompt is replayed after the worker restart"
+    );
+
+    kill_session(&client, &session).await.expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
 fn uv_available() -> bool {
     let on_path = std::env::var_os("PATH")
