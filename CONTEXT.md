@@ -184,7 +184,15 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   test e2e avec vrai noyau). Limites : deux cellules finies au même moment
   dans deux conversations, la première arrivée prend les entrées ; une
   session qui démarre entre l'écriture et la garde voit l'entrée dans son
-  digest. Les leçons ne sont pas encore réinjectées (commit 6 du plan).
+  digest. File des refines (`src-tauri/src/prime_refine.rs`, `run_refine`) :
+  une refine à la fois dans toute l'app ; avant, les leçons applicables
+  (projet, type, global) sont amorcées dans le harness local partagé
+  (`seed_thread_lessons`, niveau lisible dans le `path` :
+  `yusai/project`…), pour que le planificateur puisse les modifier ; après,
+  import, retrait de nos `yl_…` même en cas d'échec, puis `mark_refined`
+  si la refine a réussi (un échec ne touche pas `pending` : à l'appelant de
+  décider). Pas encore d'appelant : « Retenir » (commit 7) et la fermeture
+  (commit 8). Les leçons ne sont pas encore réinjectées (commit 6 du plan).
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
@@ -334,6 +342,16 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   D'où la décision de ranger nous-mêmes. `appendSystemPrompt` est, lui,
   rejoué à la relance d'un worker tué (`Create` durable,
   `pa-daemon/src/supervisor/worker_lifecycle.rs:235-252`).
+  La requête `Refine` passe par le superviseur avec sa limite courte de
+  30 s (`pa-daemon/src/supervisor/routing.rs:648-661`) ; au-delà, le client
+  reçoit « Session worker timed out » mais le worker poursuit la refine.
+  Notre file relit alors le fil (`GetMessages`) jusqu'à la nouvelle ligne
+  `refinement_outcome`, dans la limite de 10 min (test e2e
+  `a_refine_outliving_the_supervisor_route_still_lands`, `delayMs` du moteur
+  faux). Une refine qui échoue après ces 30 s ne laisse aucune trace
+  (`pa-daemon/src/session_custom.rs:298-306`) : la file attend la limite.
+  Une mise à jour sans titre est refusée par Prime
+  (`pa-core/src/refinement/planner.rs:223-225`).
   Limite restante de notre file de refines : l'auto-refine de Prime (après
   compaction) et `refine.run()` appelé par le modèle passent hors de notre
   file. Ils peuvent lire les entrées `yl_…` amorcées pour une refine d'un

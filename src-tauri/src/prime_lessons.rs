@@ -31,11 +31,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::{anyhow, Context, Result};
+use pa_core::refinement::{HarnessEntry, HarnessScope, RefinementKind};
+use pa_core::session::manager::format_iso;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sinew_app::store::{
-    AppStore, InsertLessonOutcome, LessonKind, LessonLevel, LessonOrigin, LessonStatus, NewLesson,
-    NewProposal, ProposalKind,
+    AppStore, InsertLessonOutcome, Lesson, LessonKind, LessonLevel, LessonOrigin, LessonScope,
+    LessonStatus, NewLesson, NewProposal, ProposalKind,
 };
 
 /// Préfixe des ids de nos leçons, tels qu'amorcés dans le harness de Prime.
@@ -264,7 +266,8 @@ pub fn refine_harness_file(agent_dir: &Path, global: bool) -> PathBuf {
 
 const HARNESS_STATE_FILE: &str = "harness_state.json";
 
-/// Les imports passent un par un : magasin et fichier du harness partagé.
+/// Les imports, l'amorçage et le retrait de nos leçons passent un par un :
+/// magasin et fichiers du harness partagés.
 static IMPORT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Importe une ligne `refinement_outcome` dans le magasin, une seule fois
@@ -602,29 +605,164 @@ pub fn remove_harness_entries(path: &Path, entries: &[(&str, String)]) -> Result
     if entries.is_empty() {
         return Ok(0);
     }
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
+    edit_harness_file(path, false, |state| {
+        let mut removed = 0;
+        for (kind, id) in entries {
+            if let Some(records) = state
+                .get_mut("entries")
+                .and_then(|entries| entries.get_mut(*kind))
+                .and_then(Value::as_object_mut)
+            {
+                if records.remove(id).is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    })
+}
+
+/// Amorce nos leçons dans le harness local partagé avant une refine, pour
+/// que le planificateur de Prime les voie et puisse les modifier ou les
+/// supprimer (une edit sur une entrée absente échoue,
+/// pa-core/src/refinement/planner.rs:347-372). Les entrées `yl_…` déjà
+/// présentes (refine interrompue) sont d'abord retirées ; les autres
+/// restent. Le planificateur affiche le `path` de chaque entrée
+/// (pa-core/src/refinement/executor.rs:76-79) : il y lit le niveau de la
+/// leçon. Renvoie le nombre de leçons amorcées.
+pub fn seed_lessons(path: &Path, lessons: &[Lesson]) -> Result<usize> {
+    let mut seeded = Vec::with_capacity(lessons.len());
+    for lesson in lessons {
+        let entry = HarnessEntry {
+            id: lesson.id.clone(),
+            kind: refinement_kind(lesson.kind),
+            title: lesson.title.clone(),
+            content: lesson.content.clone(),
+            path: seeded_path(lesson),
+            scope: Some(HarnessScope::Local),
+            reference: serde_json::Map::new(),
+            arguments: serde_json::Map::new(),
+            metadata: serde_json::Map::new(),
+            source: "yusai".to_string(),
+            created_at: format_iso(lesson.created_at_ms),
+            updated_at: format_iso(lesson.updated_at_ms),
+            version: 1,
+        };
+        seeded.push((harness_kind(lesson.kind), serde_json::to_value(entry)?));
+    }
+    let changes = edit_harness_file(path, !seeded.is_empty(), |state| {
+        if !state.is_object() {
+            return 0;
+        }
+        let mut changes = drop_seeded(state);
+        if !state.get("entries").is_some_and(Value::is_object) {
+            state["entries"] = json!({});
+        }
+        for (kind, entry) in &seeded {
+            let id = entry["id"].as_str().unwrap_or_default().to_string();
+            let records = &mut state["entries"][*kind];
+            if !records.is_object() {
+                *records = json!({});
+            }
+            records[id.as_str()] = entry.clone();
+            changes += 1;
+        }
+        changes
+    })?;
+    if changes == 0 && !seeded.is_empty() {
+        return Err(anyhow!("{} is not a harness state", path.display()));
+    }
+    Ok(seeded.len())
+}
+
+/// Retire du harness local toutes nos entrées `yl_…`, après une refine ;
+/// le reste du fichier ne bouge pas. Renvoie le nombre d'entrées retirées.
+pub fn remove_seeded_lessons(path: &Path) -> Result<usize> {
+    edit_harness_file(path, false, drop_seeded)
+}
+
+/// Amorce, sous le verrou des imports, les leçons qui s'appliquent à la
+/// conversation (son projet, le type du projet, le global).
+pub fn seed_thread_lessons(
+    store: &AppStore,
+    agent_dir: &Path,
+    thread: &ThreadContext,
+) -> Result<usize> {
+    let _guard = IMPORT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let project_type = store
+        .project_type(&thread.workspace_id)?
+        .and_then(|setting| setting.project_type);
+    let lessons = store.applicable_lessons(&LessonScope {
+        workspace_id: thread.workspace_id.clone(),
+        project_type,
+    })?;
+    seed_lessons(&refine_harness_file(agent_dir, false), &lessons)
+}
+
+/// [`remove_seeded_lessons`] sous le verrou des imports.
+pub fn unseed_thread_lessons(agent_dir: &Path) -> Result<usize> {
+    let _guard = IMPORT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    remove_seeded_lessons(&refine_harness_file(agent_dir, false))
+}
+
+fn drop_seeded(state: &mut Value) -> usize {
+    let mut removed = 0;
+    if let Some(kinds) = state.get_mut("entries").and_then(Value::as_object_mut) {
+        for records in kinds.values_mut().filter_map(Value::as_object_mut) {
+            let before = records.len();
+            records.retain(|id, _| !id.starts_with(LESSON_ID_PREFIX));
+            removed += before - records.len();
+        }
+    }
+    removed
+}
+
+/// `yusai/project`, `yusai/type/<type>` ou `yusai/global`.
+fn seeded_path(lesson: &Lesson) -> String {
+    match lesson.level {
+        LessonLevel::Project => "yusai/project".to_string(),
+        LessonLevel::Type => format!(
+            "yusai/type/{}",
+            lesson.project_type.as_deref().unwrap_or_default()
+        ),
+        LessonLevel::Global => "yusai/global".to_string(),
+    }
+}
+
+fn refinement_kind(kind: LessonKind) -> RefinementKind {
+    match kind {
+        LessonKind::Memory => RefinementKind::Memory,
+        LessonKind::Prompt => RefinementKind::Prompt,
+        LessonKind::Subagent => RefinementKind::Subagent,
+    }
+}
+
+/// Lit un fichier d'état du harness, le modifie et le réécrit (atomique,
+/// 0o600) si `edit` signale un changement. Fichier absent : rien à faire,
+/// sauf avec `create`, où l'on part d'un état vide.
+fn edit_harness_file(
+    path: &Path,
+    create: bool,
+    edit: impl FnOnce(&mut Value) -> usize,
+) -> Result<usize> {
+    let mut state = match std::fs::read_to_string(path) {
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            json!({ "schema": 1, "entries": {}, "refinements": [] })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => {
             return Err(error).with_context(|| format!("read {}", path.display()));
         }
     };
-    let mut state: Value =
-        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-    let mut removed = 0;
-    for (kind, id) in entries {
-        if let Some(records) = state
-            .get_mut("entries")
-            .and_then(|entries| entries.get_mut(*kind))
-            .and_then(Value::as_object_mut)
-        {
-            if records.remove(id).is_some() {
-                removed += 1;
-            }
-        }
-    }
-    if removed == 0 {
+    let changes = edit(&mut state);
+    if changes == 0 {
         return Ok(0);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let content = format!("{}\n", serde_json::to_string_pretty(&state)?);
     let temp = path.with_extension(format!("json.yusai-{}.tmp", std::process::id()));
@@ -639,7 +777,7 @@ pub fn remove_harness_entries(path: &Path, entries: &[(&str, String)]) -> Result
         std::io::Write::write_all(&mut file, content.as_bytes())?;
     }
     std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))?;
-    Ok(removed)
+    Ok(changes)
 }
 
 /// Rattrapage à l'ouverture d'un fil : les lignes `refinement_outcome` de
@@ -1213,6 +1351,133 @@ mod tests {
             import_global_harness_writes(&store, &agent_dir, &thread).unwrap(),
             None
         );
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    fn lesson(store: &AppStore, level: LessonLevel, workspace: &str, content: &str) -> Lesson {
+        let new = NewLesson {
+            level,
+            workspace_id: Some(workspace.to_string()),
+            project_type: (level == LessonLevel::Type).then(|| "rust".to_string()),
+            kind: LessonKind::Memory,
+            title: content.to_string(),
+            content: content.to_string(),
+        };
+        match store.insert_lesson(&new, &LessonOrigin::user()).unwrap() {
+            InsertLessonOutcome::Created(lesson) => lesson,
+            other => panic!("not created: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seeding_shows_prime_the_applicable_lessons_and_unseeding_leaves_the_rest() {
+        let (store, agent_dir) = import_fixture(&[
+            ("memory", "theirs", "Une entrée de Prime."),
+            ("memory", "yl_stale", "Reste d'une refine interrompue."),
+        ]);
+        store
+            .set_project_type(
+                "/work/a",
+                Some("rust"),
+                sinew_app::store::ProjectTypeSource::User,
+            )
+            .unwrap();
+        let project = lesson(
+            &store,
+            LessonLevel::Project,
+            "/work/a",
+            "Lancer cargo test.",
+        );
+        let typed = lesson(&store, LessonLevel::Type, "/work/a", "Préférer anyhow.");
+        let global = lesson(
+            &store,
+            LessonLevel::Global,
+            "/work/a",
+            "Répondre en français.",
+        );
+        let elsewhere = lesson(&store, LessonLevel::Project, "/work/b", "Autre projet.");
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+
+        assert_eq!(seed_thread_lessons(&store, &agent_dir, &thread).unwrap(), 3);
+        let mut expected = vec![
+            project.id.clone(),
+            typed.id.clone(),
+            global.id.clone(),
+            "theirs".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(harness_ids(&agent_dir, "memory"), expected);
+        assert!(!harness_ids(&agent_dir, "memory").contains(&elsewhere.id));
+        // Prime relit nos entrées telles quelles, niveau compris dans le
+        // `path`.
+        let file = refine_harness_file(&agent_dir, false);
+        let state =
+            pa_core::refinement::load_harness_state(file.parent().unwrap(), HarnessScope::Local);
+        let memories = &state.entries[&RefinementKind::Memory];
+        assert_eq!(memories.len(), 4);
+        assert_eq!(memories[&project.id].content, "Lancer cargo test.");
+        assert_eq!(memories[&project.id].path, "yusai/project");
+        assert_eq!(memories[&typed.id].path, "yusai/type/rust");
+        assert_eq!(memories[&global.id].path, "yusai/global");
+        assert_eq!(memories[&global.id].source, "yusai");
+
+        assert_eq!(unseed_thread_lessons(&agent_dir).unwrap(), 3);
+        assert_eq!(harness_ids(&agent_dir, "memory"), vec!["theirs"]);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(serde_json::from_str::<Value>(&text).unwrap()["refinements"].is_array());
+        assert_eq!(unseed_thread_lessons(&agent_dir).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn seeding_creates_the_harness_only_when_there_is_something_to_seed() {
+        let (store, agent_dir) = import_fixture(&[]);
+        let file = refine_harness_file(&agent_dir, false);
+        std::fs::remove_file(&file).unwrap();
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        assert_eq!(seed_thread_lessons(&store, &agent_dir, &thread).unwrap(), 0);
+        assert!(!file.exists());
+        let project = lesson(
+            &store,
+            LessonLevel::Project,
+            "/work/a",
+            "Lancer cargo test.",
+        );
+        assert_eq!(seed_thread_lessons(&store, &agent_dir, &thread).unwrap(), 1);
+        assert_eq!(harness_ids(&agent_dir, "memory"), vec![project.id]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn an_unreadable_harness_is_left_alone() {
+        let (store, agent_dir) = import_fixture(&[]);
+        let file = refine_harness_file(&agent_dir, false);
+        std::fs::write(&file, "pas du json").unwrap();
+        lesson(
+            &store,
+            LessonLevel::Project,
+            "/work/a",
+            "Lancer cargo test.",
+        );
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        assert!(seed_thread_lessons(&store, &agent_dir, &thread).is_err());
+        assert!(unseed_thread_lessons(&agent_dir).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "pas du json");
         let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }
 }

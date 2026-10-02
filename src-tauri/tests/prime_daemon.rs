@@ -1601,6 +1601,297 @@ async fn model_global_harness_writes_become_proposed_project_lessons() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Un fil scripté prêt pour des refines : daemon lancé, premier tour fini
+/// (première réponse du script), événements vidés en tâche de fond (le
+/// relais de l'app n'existe pas ici : la file importe elle-même).
+#[cfg(unix)]
+async fn scripted_thread(
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    refine_plans: &[(serde_json::Value, u64)],
+) -> (pa_tui::daemon_client::DaemonClient, String) {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_desktop_lib::prime_session::{open_thread, prompt, thread_path};
+
+    let mut responses = vec![serde_json::json!({ "text": "ok" })];
+    responses.extend(refine_plans.iter().map(
+        |(plan, delay_ms)| serde_json::json!({ "text": plan.to_string(), "delayMs": delay_ms }),
+    ));
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": responses }).to_string(),
+    )
+    .unwrap();
+    let agent_dir = root.join("agent");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) =
+        ensure_daemon_running_with(&exe, &root.join("daemon.sock"), &agent_dir)
+            .await
+            .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-queue").unwrap();
+    let config = serde_json::json!({
+        "cwd": workspace.to_string_lossy(),
+        "script": script.to_string_lossy(),
+    });
+    let opened = open_thread(&client, config, &path)
+        .await
+        .expect("thread opened");
+    let session = opened.active_session_id.clone();
+    prompt(&client, &session, "salut")
+        .await
+        .expect("prompt admitted");
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(turn.is_ok(), "turn ended");
+    tokio::spawn(async move { while events.recv().await.is_some() {} });
+    (client, session)
+}
+
+#[cfg(unix)]
+async fn stop_scripted_thread(client: pa_tui::daemon_client::DaemonClient, session: &str) {
+    sinew_desktop_lib::prime_session::kill_session(&client, session)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+}
+
+/// File des refines : nos leçons sont amorcées dans le harness local, le
+/// planificateur peut donc les modifier (une edit sur une entrée absente
+/// échoue) ; deux refines lancées ensemble passent l'une après l'autre (la
+/// seconde voit la leçon créée par la première) ; à la fin, il ne reste
+/// dans le harness que l'entrée qui n'est pas à nous.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_refines_see_our_lessons_and_run_one_at_a_time() {
+    use sinew_app::store::{
+        AppStore, InsertLessonOutcome, LessonKind, LessonLevel, LessonOrigin, LessonScope,
+        NewLesson, ProposalKind,
+    };
+    use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
+    use sinew_desktop_lib::prime_refine::run_refine;
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_id = workspace.to_string_lossy().into_owned();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let insert = |level: LessonLevel, content: &str| {
+        let new = NewLesson {
+            level,
+            workspace_id: Some(workspace_id.clone()),
+            project_type: None,
+            kind: LessonKind::Memory,
+            title: content.to_string(),
+            content: content.to_string(),
+        };
+        match store.insert_lesson(&new, &LessonOrigin::user()).unwrap() {
+            InsertLessonOutcome::Created(lesson) => lesson,
+            other => panic!("not created: {other:?}"),
+        }
+    };
+    let project = insert(LessonLevel::Project, "Lancer cargo test.");
+    let global = insert(LessonLevel::Global, "Répondre en anglais.");
+    // Une entrée de Prime qui n'est pas à nous : elle doit rester.
+    let local_file = refine_harness_file(&agent_dir, false);
+    std::fs::create_dir_all(local_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &local_file,
+        serde_json::json!({
+            "schema": 1,
+            "entries": { "memory": { "theirs": {
+                "id": "theirs", "kind": "memory", "title": "Theirs",
+                "content": "Une entrée de Prime.", "path": "general",
+                "reference": {}, "arguments": {}, "metadata": {},
+                "source": "refine", "created_at": "2026-10-02T00:00:00.000Z",
+                "updated_at": "2026-10-02T00:00:00.000Z", "version": 1,
+            } } },
+            "refinements": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let first = serde_json::json!({
+        "summary": "first",
+        "rationale": "trajectory evidence",
+        "expectedOutcome": "reused",
+        "edits": [
+            { "action": "update", "kind": "memory", "id": project.id,
+              "title": "Tests", "content": "Lancer cargo test --workspace." },
+            { "action": "delete", "kind": "memory", "id": global.id },
+            { "action": "create", "kind": "memory", "id": "yusai-new",
+              "title": "Format", "content": "Formater avec cargo fmt." },
+        ],
+    });
+    let second = serde_json::json!({
+        "summary": "second",
+        "rationale": "trajectory evidence",
+        "expectedOutcome": "reused",
+        "edits": [
+            { "action": "update", "kind": "memory", "id": project.id,
+              "title": "Tests", "content": "Lancer cargo nextest." },
+        ],
+    });
+    // La première refine traîne : sans la file, la seconde s'amorcerait et
+    // planifierait pendant ce temps.
+    let (client, session) =
+        scripted_thread(&root, &workspace, &[(first, 2_000), (second, 0)]).await;
+    let thread = ThreadContext {
+        conversation_id: "conv-queue".to_string(),
+        workspace_id: workspace_id.clone(),
+    };
+    store.note_user_turn("conv-queue").unwrap();
+
+    let (one, two) = tokio::join!(
+        run_refine(
+            &client,
+            store.clone(),
+            agent_dir.clone(),
+            &session,
+            thread.clone(),
+            None
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            run_refine(
+                &client,
+                store.clone(),
+                agent_dir.clone(),
+                &session,
+                thread.clone(),
+                None,
+            )
+            .await
+        },
+    );
+    let one = one.expect("first refine");
+    let two = two.expect("second refine");
+
+    assert_eq!(one.seeded, 2, "run: {one:?}");
+    let report = one.report.expect("first import");
+    assert_eq!(
+        report.updated,
+        vec![project.id.clone()],
+        "report: {report:?}"
+    );
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    assert_eq!(report.proposals.len(), 1, "report: {report:?}");
+    assert!(report.failed.is_empty(), "report: {report:?}");
+    // La seconde s'est amorcée après l'import de la première : elle voit
+    // la leçon créée, et sa mise à jour trouve l'entrée.
+    assert_eq!(two.seeded, 3, "run: {two:?}");
+    let report = two.report.expect("second import");
+    assert_eq!(
+        report.updated,
+        vec![project.id.clone()],
+        "report: {report:?}"
+    );
+
+    assert_eq!(
+        store.lesson(&project.id).unwrap().unwrap().content,
+        "Lancer cargo nextest."
+    );
+    let proposals = store.pending_lesson_proposals().unwrap();
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].kind, ProposalKind::Archive);
+    assert_eq!(proposals[0].lesson_id.as_ref(), Some(&global.id));
+    let scope = LessonScope {
+        workspace_id,
+        project_type: None,
+    };
+    assert_eq!(store.applicable_lessons(&scope).unwrap().len(), 3);
+    // Ni nos leçons ni l'entrée importée ne restent dans le harness.
+    assert_eq!(harness_entry_ids(&local_file, "memory"), vec!["theirs"]);
+    let state = store.refine_state("conv-queue").unwrap();
+    assert_eq!(state.user_turns_since_refine, 0);
+    assert!(state.last_refined_at_ms.is_some());
+    assert!(!state.pending);
+
+    stop_scripted_thread(client, &session).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Le superviseur coupe la requête `Refine` au bout de 30 s
+/// (pa-daemon/src/supervisor/routing.rs:648-661) mais le worker poursuit :
+/// la file retrouve la refine dans le fil et l'importe quand même.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refine_outliving_the_supervisor_route_still_lands() {
+    use sinew_app::store::{AppStore, LessonScope};
+    use sinew_desktop_lib::prime_lessons::{refine_harness_file, ThreadContext};
+    use sinew_desktop_lib::prime_refine::run_refine;
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let slow = serde_json::json!({
+        "summary": "slow",
+        "rationale": "trajectory evidence",
+        "expectedOutcome": "reused",
+        "edits": [{ "action": "create", "kind": "memory", "id": "yusai-slow",
+                    "title": "Lent", "content": "Une refine qui prend son temps." }],
+    });
+    let (client, session) = scripted_thread(&root, &workspace, &[(slow, 33_000)]).await;
+    let thread = ThreadContext {
+        conversation_id: "conv-queue".to_string(),
+        workspace_id: workspace.to_string_lossy().into_owned(),
+    };
+
+    let started = std::time::Instant::now();
+    let run = run_refine(
+        &client,
+        store.clone(),
+        agent_dir.clone(),
+        &session,
+        thread.clone(),
+        None,
+    )
+    .await
+    .expect("refine lands after the route timeout");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(30),
+        "the route timeout was exercised"
+    );
+    let report = run.report.expect("imported by the queue");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    let scope = LessonScope {
+        workspace_id: thread.workspace_id.clone(),
+        project_type: None,
+    };
+    assert_eq!(
+        store.applicable_lessons(&scope).unwrap()[0].content,
+        "Une refine qui prend son temps."
+    );
+    assert!(harness_entry_ids(&refine_harness_file(&agent_dir, false), "memory").is_empty());
+    assert!(store
+        .refine_state("conv-queue")
+        .unwrap()
+        .last_refined_at_ms
+        .is_some());
+
+    stop_scripted_thread(client, &session).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
 fn uv_available() -> bool {
     let on_path = std::env::var_os("PATH")
