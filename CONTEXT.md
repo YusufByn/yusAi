@@ -141,10 +141,13 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   exister avant le `Create`, sinon le verrou retient un chemin non canonique
   et refuse ensuite d'écrire (« session lease does not own append target »,
   `pa-daemon/src/lease.rs:78-87, 392-396` ; lien `/var` -> `/private/var`).
-- **Suppression = Corbeille** : `delete_saved_session` passe par
-  `/usr/bin/trash` quand il existe (macOS 26 l'a), le fichier part donc à la
-  Corbeille (`pa-daemon/src/saved_session_commands.rs:116-138`). Le test e2e
-  retire de la Corbeille le fichier qu'il y envoie.
+- **Suppression = Corbeille (décision validée le 2026-10-02)** : supprimer
+  une conversation envoie son fil Prime à la Corbeille, récupérable, plutôt
+  que de l'effacer. C'est le comportement de `delete_saved_session`, qui
+  passe par `/usr/bin/trash` quand il existe (macOS 26 l'a), sinon supprime
+  le fichier (`pa-daemon/src/saved_session_commands.rs:116-138`). Ne pas
+  remplacer par une suppression directe. Le test e2e retire de la Corbeille
+  le fichier qu'il y envoie.
 - **Diffs perdus au redémarrage** (limite acceptée) : les fichiers modifiés
   viennent de nos photos, pas du fichier de session ; après un redémarrage
   les cartes restaurées n'ont plus leurs diffs, et une cellule `edit`
