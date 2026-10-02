@@ -24,6 +24,13 @@ use crate::tool_names;
 use crate::tool_run::TurnCheckpoint;
 use crate::workspace::{workspace_info, WorkspaceInfo};
 
+mod lessons;
+pub use lessons::{
+    normalize_lesson_text, normalize_project_type, InsertLessonOutcome, Lesson, LessonEvent,
+    LessonKind, LessonLevel, LessonOrigin, LessonProposal, LessonScope, LessonStatus, NewLesson,
+    NewProposal, ProjectTypeSetting, ProjectTypeSource, ProposalKind, ProposalStatus, RefineState,
+};
+
 const DEFAULT_CONVERSATION_TITLE: &str = "New conversation";
 const MODE_MODEL_SETTINGS_KEY: &str = "mode_model_settings";
 const MCP_SETTINGS_KEY: &str = "mcp_settings";
@@ -1542,7 +1549,7 @@ impl AppStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap_or(0);
 
-        if version >= 9 {
+        if version >= 10 {
             return Ok(());
         }
 
@@ -1595,7 +1602,9 @@ impl AppStore {
             conn.execute("delete from turn_checkpoints", [])
                 .context("unable to clear legacy turn checkpoints")?;
         }
-        conn.pragma_update(None, "user_version", 9)
+        // v10 : leçons Prime retenues par yusAi (store/lessons.rs).
+        lessons::ensure_lessons_tables(&conn)?;
+        conn.pragma_update(None, "user_version", 10)
             .context("unable to set sqlite schema version")?;
         Ok(())
     }
