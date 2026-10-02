@@ -70,6 +70,11 @@ async fn spawns_supervisor_and_connects() {
         !agent_dir.join("telemetry.json").exists(),
         "telemetry is disabled for the supervisor"
     );
+    // Miroir local coupé pour les sous-agents (`disable_telemetry_mirror`).
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agent_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(settings["telemetry"]["localMirror"], false);
 
     // Un second appel réutilise le superviseur déjà lancé.
     let (second, _second_events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
@@ -1444,6 +1449,18 @@ async fn subagents_report_to_their_parent_and_die_with_it() {
         .as_str()
         .expect("child activeSessionId")
         .to_string();
+    // Le noyau de l'enfant a démarré (sa cellule a répondu). Son client de
+    // télémétrie écrit par lots toutes les 10 s
+    // (pa-telemetry/src/client.rs:40) : on attend un lot pendant que
+    // l'enfant vit encore, sinon l'absence de `telemetry.jsonl` ne prouve
+    // rien. Sans `telemetry.localMirror: false`, la ligne « kernel
+    // bootstrap » de l'enfant arrivait ici
+    // (pa-core/src/session_engine/engine.rs:386-409).
+    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+    assert!(
+        !agent_dir.join("telemetry.jsonl").exists(),
+        "a live sub-agent records no telemetry event"
+    );
     kill_session(&client, &parent_id)
         .await
         .expect("parent killed");
@@ -1503,10 +1520,10 @@ async fn subagents_report_to_their_parent_and_die_with_it() {
         "the unmarked child died with its reaped parent"
     );
     // Les enfants sont créés par Prime sans `telemetryDisabled`
-    // (pa-daemon/src/rlm_children/lifecycle.rs:124-127) : leur worker crée
+    // (pa-daemon/src/rlm_children/lifecycle.rs:124-130) : leur worker crée
     // l'identifiant `telemetry.json` (pa-core/src/session_engine/telemetry.rs:1073-1079),
-    // mais n'enregistre aucun événement, et rien ne part sans point d'envoi
-    // configuré (telemetry.rs:1117-1129).
+    // mais le miroir local est coupé par nos réglages et rien ne part sans
+    // point d'envoi configuré (telemetry.rs:1084-1091).
     assert!(
         !agent_dir.join("telemetry.jsonl").exists(),
         "no telemetry event recorded with sub-agents and a live kernel"

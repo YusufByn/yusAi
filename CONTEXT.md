@@ -96,7 +96,9 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `set_anthropic_credential` aux points d'installation du provider
   (`lib.rs`, `providers.rs`).
 - **Télémétrie Prime coupée** : env du superviseur + `telemetry_disabled`
-  au `Create`.
+  au `Create` + `telemetry.localMirror: false` écrit dans
+  `<agent_dir>/settings.json` sous le verrou de Prime à chaque
+  `ensure_daemon_running` (`disable_telemetry_mirror`, pour les sous-agents).
 - **Workers orphelins** : Cmd+Q tue les sessions de l'IDE puis arrête le
   daemon s'il est vide ; au démarrage, les sessions dont l'IDE (pid +
   identité de démarrage, dans `runtimeMetadata.yusai`) n'existe plus sont
@@ -237,12 +239,13 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `sub-5a60fe37` de la conversation `942e9be0…`. Les cinq lignes du 01/10
   (18:49Z) précèdent la coupure (`e81f5f3`, 20:58 heure locale). Rien ne
   part : puits nul sans point d'envoi (`telemetry.rs:1084-1091`), `telemetry`
-  à `null` dans nos réglages. Le test e2e des sous-agents ne le voit pas,
-  probablement parce que le client écrit par lots toutes les 10 s
-  (`pa-telemetry/src/client.rs:40`) et que ses enfants vivent moins
-  longtemps : son assertion « pas de `telemetry.jsonl` » est un faux
-  négatif. Inévitable sans patch vendor (ou en coupant le miroir par
-  `telemetry.localMirror: false` dans les réglages de Prime).
+  à `null` dans nos réglages. Corrigé : `disable_telemetry_mirror` écrit
+  `telemetry.localMirror: false` (lu par `build_client` à chaque
+  construction de session d'un worker). L'ancien test e2e ne voyait rien
+  parce que le client écrit par lots toutes les 10 s
+  (`pa-telemetry/src/client.rs:40`) ; il attend maintenant un lot pendant
+  que l'enfant vit (vérifié : sans le correctif, il échoue). `telemetry.json`
+  (identifiant d'installation) reste créé par les enfants.
 - **`uv` et le PATH** : le venv du noyau se construit avec `uv`, cherché dans
   le PATH ou `~/.local/bin` (`pa-core/src/kernel/bootstrap/venv/uv.rs:85-101`).
   En dev (lancé du terminal) il est trouvé ; une app empaquetée lancée du

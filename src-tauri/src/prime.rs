@@ -184,6 +184,50 @@ fn supervisor_env(agent_dir: &Path, kernel_venv: &Path) -> Vec<(&'static str, Os
     env
 }
 
+/// Écrit `telemetry.localMirror: false` dans les réglages globaux de Prime
+/// (`<agent_dir>/settings.json`), sous son verrou de fichier
+/// (pa-core/src/settings/storage.rs:23-59).
+///
+/// Prime crée les sous-agents sans `telemetryDisabled`
+/// (pa-daemon/src/rlm_children/lifecycle.rs:124-130) : leur worker construit
+/// un client de télémétrie (pa-daemon/src/agent_engine/lifecycle.rs:1071-1085)
+/// dont le miroir local `telemetry.jsonl` est actif par défaut
+/// (pa-core/src/session_engine/telemetry.rs:1092-1100), et le crochet
+/// « kernel bootstrap » échappe à la porte « profondeur 0 »
+/// (pa-core/src/session_engine/engine.rs:386-409). Sans miroir, il ne reste
+/// que le puits nul : aucun point d'envoi n'est configuré.
+pub fn disable_telemetry_mirror(agent_dir: &Path) -> Result<()> {
+    use pa_core::settings::{FileSettingsStorage, SettingsScope, SettingsStorage};
+
+    std::fs::create_dir_all(agent_dir)
+        .with_context(|| format!("create the Prime agent dir {}", agent_dir.display()))?;
+    FileSettingsStorage::new(agent_dir, agent_dir).with_lock(
+        SettingsScope::Global,
+        &mut |current| {
+            let mut settings = match current.as_deref() {
+                None => serde_json::Map::new(),
+                Some(text) if text.trim().is_empty() => serde_json::Map::new(),
+                // Un fichier illisible reste à Prime, qui le signale.
+                Some(text) => serde_json::from_str(text).ok()?,
+            };
+            let telemetry = settings
+                .entry("telemetry")
+                .or_insert_with(|| serde_json::json!({}));
+            if telemetry.is_null() {
+                *telemetry = serde_json::json!({});
+            }
+            let telemetry = telemetry.as_object_mut()?;
+            if telemetry.get("localMirror") == Some(&serde_json::Value::Bool(false)) {
+                return None;
+            }
+            telemetry.insert("localMirror".to_string(), serde_json::Value::Bool(false));
+            serde_json::to_string_pretty(&settings)
+                .ok()
+                .map(|text| text + "\n")
+        },
+    )
+}
+
 /// En dev, les ressources de Prime viennent de vendor/prime-agent (les
 /// ressources de l'app viendront avec le packaging).
 #[cfg(debug_assertions)]
@@ -255,6 +299,14 @@ pub async fn ensure_daemon_running_with_kernel_venv(
     agent_dir: &Path,
     kernel_venv: &Path,
 ) -> Result<(DaemonClient, UnboundedReceiver<DaemonClientEvent>)> {
+    // Avant toute session : chaque worker relit les réglages à la
+    // construction de sa session, daemon déjà lancé ou non.
+    let settings_dir = agent_dir.to_path_buf();
+    if let Err(error) =
+        tokio::task::spawn_blocking(move || disable_telemetry_mirror(&settings_dir)).await?
+    {
+        tracing::warn!(error = %error, "could not disable the Prime telemetry mirror");
+    }
     match probe_daemon(socket_path).await {
         DaemonProbe::Current => return DaemonClient::connect_with_retry(socket_path).await,
         DaemonProbe::Stale(client) => shutdown_stale_daemon(*client, socket_path).await?,
@@ -400,5 +452,46 @@ mod tests {
         assert_eq!(value(AGENT_DIR_ENV), Some(OsString::from("/agent")));
         assert_eq!(value(TELEMETRY_ENV), Some(OsString::from("0")));
         assert_eq!(value(KERNEL_VENV_ENV), Some(OsString::from("/venv")));
+    }
+
+    #[test]
+    fn telemetry_mirror_is_disabled_without_touching_other_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "yusai-prime-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let path = dir.join("settings.json");
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+
+        // Pas encore de réglages.
+        disable_telemetry_mirror(&dir).unwrap();
+        assert_eq!(read()["telemetry"]["localMirror"], false);
+
+        // Réglages existants, `telemetry` à `null` comme Prime l'écrit.
+        std::fs::write(
+            &path,
+            r#"{"defaultThinkingLevel": "high", "telemetry": null}"#,
+        )
+        .unwrap();
+        disable_telemetry_mirror(&dir).unwrap();
+        let settings = read();
+        assert_eq!(settings["defaultThinkingLevel"], "high");
+        assert_eq!(settings["telemetry"]["localMirror"], false);
+
+        // Déjà coupé : le fichier n'est pas réécrit.
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        disable_telemetry_mirror(&dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
