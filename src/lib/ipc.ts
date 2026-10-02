@@ -31,6 +31,7 @@ import type {
   OpenRouterModelSearchResult,
   OpenRouterProviderStatus,
   PlanControl,
+  PrimeOpenedSession,
   PrimeSessionConfig,
   QuestionAnswer,
   SavedConversation,
@@ -747,8 +748,12 @@ export const api = {
   },
   // Prime Agent (daemon natif) : la réponse arrive par l'événement
   // `prime-event` (voir PrimeEventPayload).
-  primeCreateSession(workspacePath: string) {
-    return invoke<string>("prime_create_session", { workspacePath });
+  // Ouvre le fil Prime de la conversation depuis son fichier de session.
+  primeCreateSession(workspacePath: string, conversationId: string) {
+    return invoke<PrimeOpenedSession>("prime_create_session", {
+      workspacePath,
+      conversationId,
+    });
   },
   primePrompt(activeSessionId: string, message: string) {
     return invoke<void>("prime_prompt", { activeSessionId, message });

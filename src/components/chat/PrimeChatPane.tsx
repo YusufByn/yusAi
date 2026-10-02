@@ -2,53 +2,31 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { listen } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
-import { primeBashTitle, type PrimeBashTitle } from "../../lib/primeBash";
+import { primeBashTitle } from "../../lib/primeBash";
+import {
+  historyToMessages,
+  toolArgsPretty,
+  toolCode,
+  toolResultDetailsStatus,
+  toolResultImages,
+  toolResultText,
+  toolSummary,
+  type PrimeMessage,
+  type PrimeTextMessage,
+  type PrimeToolCall,
+} from "../../lib/primeHistory";
 import { primeToolTitle } from "../../lib/primeToolTitle";
 import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
-import type {
-  FileChange,
-  PrimeEventPayload,
-  PrimeModelOption,
-  PrimeSessionConfig,
-  ToolResultImage,
-} from "../../types";
+import type { PrimeEventPayload, PrimeModelOption, PrimeSessionConfig } from "../../types";
 import { Markdown } from "./Markdown";
-import { ToolCard, type ToolCardProps, type ToolOutputLimit } from "./ToolCard";
+import { ToolCard, type ToolOutputLimit } from "./ToolCard";
 
 // Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
-// one pane per yusAi conversation), created the first time the pane is
-// shown so the model and thinking pickers reflect the worker's state.
+// one pane per yusAi conversation), opened the first time the pane is shown
+// from the conversation's session file, so the thread, the model and the
+// thinking level come back after a restart (prime_session.rs, open_thread).
 // User prompts, assistant text and tool calls are rendered; thinking and
 // sub-agents are out of scope for this milestone.
-
-type PrimeMessage = PrimeTextMessage | PrimeToolCall;
-
-type PrimeTextMessage = {
-  id: number;
-  role: "user" | "assistant" | "error";
-  text: string;
-};
-
-// One tool call, from `tool_execution_start` to `tool_execution_end`
-// (pa-daemon/src/worker/turn.rs:905-932).
-type PrimeToolCall = {
-  id: number;
-  role: "tool";
-  toolCallId: string;
-  name: string;
-  summary: string;
-  argsPretty?: string;
-  // The cell's shell command, when it calls bash.
-  bash: PrimeBashTitle | null;
-  // Kernel boot stage shown as the title while the call runs.
-  note?: string;
-  output?: string;
-  status: ToolCardProps["status"];
-  isError: boolean;
-  images?: ToolResultImage[];
-  // Files the call changed in the workspace (prime_diffs.rs).
-  fileChanges?: FileChange[];
-};
 
 type PrimeStatus = "idle" | "starting" | "streaming";
 
@@ -58,18 +36,29 @@ const TOOL_OUTPUT_LIMIT: ToolOutputLimit = { chars: 20_000, lines: 200 };
 
 type Props = {
   workspacePath: string;
+  // The yusAi conversation whose Prime thread this pane shows.
+  conversationId: string;
   // The pane is the one on screen (Prime engine, active conversation).
   active: boolean;
   headerExtra?: ReactNode;
   onOpenFile: (path: string) => void;
 };
 
-export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }: Props) {
+export function PrimeChatPane({
+  workspacePath,
+  conversationId,
+  active,
+  headerExtra,
+  onOpenFile,
+}: Props) {
   const [messages, setMessages] = useState<PrimeMessage[]>([]);
   const [status, setStatus] = useState<PrimeStatus>("idle");
   const [text, setText] = useState("");
   const [config, setConfig] = useState<PrimeSessionConfig | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
+  // Bumped when the daemon closes the session (idle passivation, another
+  // window): a pane on screen reopens its thread from the file.
+  const [closedCount, setClosedCount] = useState(0);
   const sessionIdRef = useRef<string | null>(null);
   // The in-flight session creation, shared by the eager start and a send.
   const creatingRef = useRef<Promise<string> | null>(null);
@@ -165,7 +154,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
         setStatus("idle");
         setConfig(null);
         settleRunningToolCalls();
-        pushMessage("error", `Prime session closed: ${payload.reason}`);
+        setClosedCount((count) => count + 1);
         return;
       }
       if (payload.kind === "toolFileChanges") {
@@ -302,12 +291,23 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
     setStatus("starting");
     const creating = (async () => {
       try {
-        const sessionId = await api.primeCreateSession(workspacePath);
+        const opened = await api.primeCreateSession(workspacePath, conversationId);
+        const sessionId = opened.activeSessionId;
         if (unmountedRef.current) {
           void api.primeCloseSession(sessionId).catch(console.error);
           throw new Error("Prime pane closed");
         }
         sessionIdRef.current = sessionId;
+        // The file is the source of truth: its thread replaces the pane's.
+        streamingIdRef.current = null;
+        setMessages(
+          historyToMessages(opened.messages, {
+            nextId: () => nextIdRef.current++,
+            bashTitle: (code) => primeBashTitle(code, workspacePath),
+          }),
+        );
+        // Read after the open: the worker has restored the file's model and
+        // thinking level by then (pa-daemon/src/worker/create.rs:226-271).
         setConfig(await api.primeSessionConfig(sessionId).catch(() => null));
         return sessionId;
       } finally {
@@ -317,14 +317,14 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
     })();
     creatingRef.current = creating;
     return creating;
-  }, [workspacePath]);
+  }, [workspacePath, conversationId]);
 
   useEffect(() => {
     if (!active || sessionIdRef.current || creatingRef.current) return;
     void ensureSession().catch((err) => {
       if (!unmountedRef.current) pushMessage("error", String(err));
     });
-  }, [active, ensureSession, pushMessage]);
+  }, [active, ensureSession, pushMessage, closedCount]);
 
   useLayoutEffect(() => {
     const body = bodyRef.current;
@@ -335,13 +335,17 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
     const prompt = text.trim();
     if (!prompt || status === "starting") return;
     setText("");
-    pushMessage("user", prompt);
+    let shown = false;
     try {
+      // Opened first: reopening the thread replaces the pane's messages.
       const sessionId = await ensureSession();
+      pushMessage("user", prompt);
+      shown = true;
       setStatus("streaming");
       await api.primePrompt(sessionId, prompt);
     } catch (err) {
       setStatus("idle");
+      if (!shown) pushMessage("user", prompt);
       pushMessage("error", String(err));
     }
   }, [text, status, ensureSession, pushMessage]);
@@ -537,83 +541,6 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
       </div>
     </div>
   );
-}
-
-// Prime's model only has the `ipython` tool, whose sole argument is `code`
-// (pa-core/src/tools/ipython.rs:348-359); bash and edit run inside it.
-function toolCode(args: unknown): string | undefined {
-  if (!args || typeof args !== "object") return undefined;
-  const code = (args as Record<string, unknown>).code;
-  return typeof code === "string" ? code : undefined;
-}
-
-// The card title: the first line of the cell, else the tool name.
-function toolSummary(name: string, args: unknown): string {
-  const line = toolCode(args)
-    ?.split("\n")
-    .map((value) => value.trim())
-    .find(Boolean);
-  if (!line) return name;
-  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
-}
-
-// The cell as written, or the raw arguments as JSON for other tools.
-function toolArgsPretty(args: unknown): string | undefined {
-  const code = toolCode(args);
-  if (code !== undefined) return code;
-  if (args === undefined || args === null) return undefined;
-  try {
-    return JSON.stringify(args, null, 2);
-  } catch {
-    return undefined;
-  }
-}
-
-// The text blocks of a `{content, details}` tool result, joined like the
-// ACP bridge does (pa-daemon/src/acp/events.rs:393-408).
-function toolResultText(result: unknown): string | undefined {
-  if (typeof result === "string") return result;
-  if (!result || typeof result !== "object") return undefined;
-  const content = (result as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return undefined;
-  return content
-    .filter(
-      (block): block is { type: "text"; text: string } =>
-        !!block &&
-        typeof block === "object" &&
-        (block as Record<string, unknown>).type === "text" &&
-        typeof (block as Record<string, unknown>).text === "string",
-    )
-    .map((block) => block.text)
-    .join("\n");
-}
-
-function toolResultDetailsStatus(result: unknown): string | undefined {
-  if (!result || typeof result !== "object") return undefined;
-  const details = (result as Record<string, unknown>).details;
-  if (!details || typeof details !== "object") return undefined;
-  const status = (details as Record<string, unknown>).status;
-  return typeof status === "string" ? status : undefined;
-}
-
-// Image blocks are `{type: "image", data, mimeType}` (pa-agent/src/types.rs:95-101).
-function toolResultImages(result: unknown): ToolResultImage[] {
-  if (!result || typeof result !== "object") return [];
-  const content = (result as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return [];
-  const images: ToolResultImage[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue;
-    const record = block as Record<string, unknown>;
-    if (
-      record.type === "image" &&
-      typeof record.data === "string" &&
-      typeof record.mimeType === "string"
-    ) {
-      images.push({ media_type: record.mimeType, data: record.data });
-    }
-  }
-  return images;
 }
 
 function modelKey(model: PrimeModelOption): string {

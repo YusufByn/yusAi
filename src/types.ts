@@ -852,6 +852,12 @@ export type PrimeEventPayload =
 
 // Modèle et niveau de réflexion d'une session Prime (prime_session_config).
 export type PrimeModelOption = { provider: string; id: string; name: string };
+// Une session Prime ouverte et son historique (messages du fichier).
+export type PrimeOpenedSession = {
+  activeSessionId: string;
+  messages: unknown[];
+};
+
 export type PrimeSessionConfig = {
   model: PrimeModelOption | null;
   thinkingLevel: string | null;

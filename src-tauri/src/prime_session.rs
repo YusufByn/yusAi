@@ -737,17 +737,21 @@ pub async fn prime_create_session(
     app: AppHandle,
     state: State<'_, PrimeState>,
     workspace_path: String,
-) -> Result<String, String> {
+    conversation_id: String,
+) -> Result<OpenedSession, String> {
     if !Path::new(&workspace_path).is_dir() {
         return Err(format!("workspace not found: {workspace_path}"));
     }
+    let session_path =
+        thread_path(&crate::prime::agent_dir(), &conversation_id).map_err(error_text)?;
     let client = connected_client(&app, &state).await.map_err(error_text)?;
     // La connexion Anthropic de yusAi, recopiée avant que le worker ne
     // résolve son modèle.
     crate::prime_auth::ensure_anthropic_sync(&crate::prime::agent_dir()).await;
-    let active_session_id = create_session(&client, create_config(&workspace_path))
+    let opened = open_thread(&client, create_config(&workspace_path), &session_path)
         .await
         .map_err(error_text)?;
+    let active_session_id = opened.active_session_id.clone();
     state.track(&active_session_id);
     // La racine des photos est le dossier de travail du worker, relu auprès
     // de lui, pas le répertoire courant de l'IDE.
@@ -774,7 +778,7 @@ pub async fn prime_create_session(
         }
         Err(error) => tracing::warn!(error = %error, "prime tool diffs disabled for this session"),
     }
-    Ok(active_session_id)
+    Ok(opened)
 }
 
 #[tauri::command]
