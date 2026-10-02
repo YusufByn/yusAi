@@ -5,6 +5,7 @@ import { api } from "../../lib/ipc";
 import { primeBashTitle, type PrimeBashTitle } from "../../lib/primeBash";
 import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
 import type {
+  FileChange,
   PrimeEventPayload,
   PrimeModelOption,
   PrimeSessionConfig,
@@ -44,6 +45,8 @@ type PrimeToolCall = {
   status: ToolCardProps["status"];
   isError: boolean;
   images?: ToolResultImage[];
+  // Files the call changed in the workspace (prime_diffs.rs).
+  fileChanges?: FileChange[];
 };
 
 type PrimeStatus = "idle" | "starting" | "streaming";
@@ -162,6 +165,13 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
         setConfig(null);
         settleRunningToolCalls();
         pushMessage("error", `Prime session closed: ${payload.reason}`);
+        return;
+      }
+      if (payload.kind === "toolFileChanges") {
+        updateToolCall(payload.toolCallId, (call) => ({
+          ...call,
+          fileChanges: payload.fileChanges,
+        }));
         return;
       }
       const event = payload.event;
@@ -422,6 +432,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
                     output={message.output}
                     isError={message.isError}
                     images={message.images}
+                    fileChanges={message.fileChanges}
                     outputLimit={TOOL_OUTPUT_LIMIT}
                     shellTitle={
                       message.bash && !message.note

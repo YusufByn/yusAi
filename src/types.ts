@@ -841,7 +841,14 @@ export type PrimeEventPayload =
       event: { type?: string; [key: string]: unknown };
     }
   | { kind: "sessionClosed"; activeSessionId: string; reason: string }
-  | { kind: "disconnected"; reason: string };
+  | { kind: "disconnected"; reason: string }
+  // Fichiers modifiés par un appel d'outil, après son `tool_execution_end`.
+  | {
+      kind: "toolFileChanges";
+      activeSessionId: string;
+      toolCallId: string;
+      fileChanges: FileChange[];
+    };
 
 // Modèle et niveau de réflexion d'une session Prime (prime_session_config).
 export type PrimeModelOption = { provider: string; id: string; name: string };

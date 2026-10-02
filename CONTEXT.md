@@ -30,6 +30,19 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   la commande quand la cellule appelle `bash(...)` (icône terminal, sans
   `cd <projet> &&`, « +N » s'il y a d'autres appels ; `src/lib/primeBash.ts`),
   sinon la première ligne de la cellule.
+- **Fichiers modifiés par un appel** (`src-tauri/src/prime_diffs.rs`) : le
+  noyau Prime perd les diffs d'`edit` avant le résultat
+  (`pa-core/src/session_engine/runtime_wiring.rs:342-367` ne recopie pas
+  `diffs`). On photographie donc le dossier de travail du worker (relu par
+  `get_connection_state`, pas le cwd de l'IDE) à chaque `agent_start`, puis
+  après chaque `tool_execution_end`, comme le bash de Sinew. L'événement
+  Prime part d'abord ; les fichiers suivent dans un événement
+  `toolFileChanges` rattaché au `toolCallId`, affichés dans la carte dépliée.
+  Limites : plusieurs cellules d'une même réponse s'enchaînent sans pause
+  (`pa-core/src/tools/ipython.rs:511-512`), un changement peut alors
+  s'afficher sur la carte voisine ; une modification à la main pendant un
+  appel est attribuée à Prime ; dossiers ignorés et plafonds de
+  `crates/sinew-app/src/tool_run.rs:21-22, 736-753`.
 - **Modèle et réflexion** : sélecteurs dans le composer (style Sinew,
   `ComposerPicker`), via `get_connection_state` / `get_available_models` /
   `set_model` / `set_thinking_level`. Opus 5.5 et Sonnet 5.5 disponibles.
@@ -106,10 +119,11 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 
 ## Suite (par priorité)
 
-1. **Affiner les cartes d'outils** : afficher les diffs d'`edit`
-   (le noyau les capture, `pa-core/src/kernel/shared.rs:93`, mais ils
-   n'apparaissent pas dans `result.details` d'`ipython.rs:441-477` : à
-   creuser).
+1. **Affiner les cartes d'outils** : titre des cellules `edit` (aujourd'hui
+   leur première ligne, souvent `old = …`) ; si Prime corrige un jour la perte
+   des diffs (`details.diffs`, que son TUI lit déjà,
+   `pa-tui/src/tool_card/ipython_details.rs:100-104`), les utiliser à la place
+   des photos.
 2. **Donner à Prime les outils de yusAi** (prévu, pas pour tout de suite) : exposer les outils de
    `crates/sinew-app` sous forme de serveur MCP et l'attacher à chaque
    session avec `DaemonCommand::ReplaceAcpMcpServers`
