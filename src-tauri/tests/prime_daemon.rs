@@ -2,15 +2,25 @@
 //! superviseur Prime auquel `DaemonClient` se connecte.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sinew_desktop_lib::prime::ensure_daemon_running_with;
 
+/// Un dossier par test. Le compteur est indispensable : les tests démarrent
+/// ensemble et l'horloge macOS est à la microseconde, deux tests pouvaient
+/// tirer le même nom et partager dossier, socket et daemon (l'un arrêtait
+/// le daemon ou effaçait le dossier de l'autre).
 fn scratch_dir() -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    std::env::temp_dir().join(format!("yusai-prime-test-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "yusai-prime-test-{}-{}-{nanos}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -408,7 +418,10 @@ async fn tool_file_changes_follow_each_turn() {
     let mut seen_types = Vec::new();
     for turn in 0..2 {
         if turn == 1 {
-            // Modification à la main entre les deux tours.
+            // Les photos du tour précédent sont faites (elles tournent en
+            // tâche de fond après `tool_execution_end`) : la modification à
+            // la main tombe bien entre les deux tours.
+            diffs.flush(&session).await;
             std::fs::write(workspace.join("b.txt"), "hand edited\n").unwrap();
         }
         prompt(&client, &session, "vas-y")
