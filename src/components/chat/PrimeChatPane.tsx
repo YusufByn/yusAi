@@ -760,7 +760,8 @@ function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
-// "2 lessons created · 1 updated · 1 proposal", or "Nothing new".
+// "Remembered: 2 lessons created · 1 updated · 1 proposal", or
+// "Remembered: nothing new".
 function retainSummary(report: PrimeImportReport): string {
   const parts = [];
   if (report.created.length) parts.push(`${plural(report.created.length, "lesson")} created`);
@@ -768,7 +769,7 @@ function retainSummary(report: PrimeImportReport): string {
   if (report.archived.length) parts.push(`${report.archived.length} archived`);
   if (report.proposals.length) parts.push(plural(report.proposals.length, "proposal"));
   if (report.failed.length) parts.push(`${report.failed.length} failed`);
-  return parts.length ? parts.join(" · ") : "Nothing new";
+  return `Remembered: ${parts.length ? parts.join(" · ") : "nothing new"}`;
 }
 
 // The header's "Remember" button: a popover with optional instructions
