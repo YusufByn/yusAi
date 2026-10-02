@@ -20,7 +20,14 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   bascule Sinew / Prime dans l'en-tête du chat (Sinew par défaut), une
   session Prime par conversation yusAi, démarrée quand le panneau s'affiche.
   Protocole natif (`DaemonClient` + `DaemonCommand`), événements relayés en
-  `prime-event`. Rendu : texte de l'assistant seulement.
+  `prime-event`. Rendu : texte de l'assistant et appels d'outils.
+- **Appels d'outils** : `tool_execution_start` / `_update` / `_end`
+  (`pa-daemon/src/worker/turn.rs:905-932`) affichés avec `ToolCard`, repliés
+  par défaut, sortie tronquée à 200 lignes / 20 000 caractères avec « Show
+  all ». Le modèle de Prime n'a qu'un outil, `ipython` (`args.code`) : bash
+  et edit tournent dans le noyau Python
+  (`pa-daemon/src/agent_engine/lifecycle.rs:1126-1128`). Titre de la carte :
+  première ligne de la cellule.
 - **Modèle et réflexion** : sélecteurs dans le composer (style Sinew,
   `ComposerPicker`), via `get_connection_state` / `get_available_models` /
   `set_model` / `set_thinking_level`. Opus 5.5 et Sonnet 5.5 disponibles.
@@ -53,6 +60,10 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   le composer réutilisaient déjà les classes Sinew (`msg`, `user-text`,
   `composer*`, `Markdown`). Vérifié dans un banc d'essai navigateur, pas dans
   l'app.
+- **Appels d'outils de Prime** : `8488c9e` (rendu), `f78d16a` (troncature,
+  `outputLimit` opt-in dans `ToolCard`, sans effet sur Sinew), `e29ff53`
+  (test e2e). Vérifié dans un banc d'essai navigateur (IPC simulé), pas
+  encore dans l'app avec un vrai modèle.
 
 ## Tests
 
@@ -60,6 +71,10 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   (superviseur réel + worker réel avec le moteur `faux` de Prime).
 - Front : `npx tsc --noEmit -p tsconfig.json`, `npx vite build`.
 - En dev, réponse scriptée sans modèle : `YUSAI_PRIME_FAUX_SCRIPT=<faux.json>`.
+  Avec `"engine": "faux"` : vrai moteur, texte seulement. Sans `engine` :
+  moteur scripté, qui rejoue aussi des appels d'outils
+  (`{"responses":[{"text":…,"toolCalls":[{"toolCallId","toolName","args","result","isError","delayMs"}]}]}`,
+  `pa-daemon/src/engine/scripted.rs:16-23`).
 - Arrêter un daemon resté actif : `pkill -f "Sinew --mode daemon"; pkill -f "Sinew worker"`.
 - Vérifier qu'il ne reste rien après Cmd+Q : `pgrep -fl "Sinew (worker|--mode daemon)"`.
 
@@ -77,15 +92,22 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   les surcharges Prime doivent être plus spécifiques.
 - **Patch crossterm** : le `[patch]` du `Cargo.toml` racine doit rester
   identique à celui de `vendor/prime-agent/Cargo.toml` (pa-tui en dépend).
+- **Sortie en direct des outils** : `tool_execution_update` porte un
+  morceau (incrémental) pour `details.status = "ok"`
+  (`pa-core/src/tools/ipython.rs:402-408`), mais le runtime ne branche pas ce
+  flux (`on_stream` abandonné, `pa-core/src/session_engine/runtime_wiring.rs:318-321`) :
+  en pratique seuls les messages de démarrage du noyau (`"starting"`)
+  arrivent pendant l'exécution, la sortie arrive au `tool_execution_end`.
 - Prime se présente avec une version Claude Code figée dans vendor
   (`claude-cli/2.1.281`) : un modèle qui exige plus récent serait refusé.
 
 ## Suite (par priorité)
 
-1. **Afficher les appels d'outils de Prime** dans `PrimeChatPane`
-   (aujourd'hui invisibles alors qu'il exécute bash, edit, etc.) :
-   événements `tool_execution_start` / `tool_execution_end`, réutiliser
-   `ToolCard.tsx`. Référence de mapping : `pa-daemon/src/acp/wire_events.rs`.
+1. **Affiner les cartes d'outils** : reconnaître `bash('…')` dans la
+   cellule (titre = commande, icône terminal) ; afficher les diffs d'`edit`
+   (le noyau les capture, `pa-core/src/kernel/shared.rs:93`, mais ils
+   n'apparaissent pas dans `result.details` d'`ipython.rs:441-477` : à
+   creuser).
 2. **Donner à Prime les outils de yusAi** (prévu, pas pour tout de suite) : exposer les outils de
    `crates/sinew-app` sous forme de serveur MCP et l'attacher à chaque
    session avec `DaemonCommand::ReplaceAcpMcpServers`
