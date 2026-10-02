@@ -761,6 +761,150 @@ async fn deleting_a_thread_kills_its_worker_and_removes_the_file() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Réflexion : les `thinking_delta` puis `thinking_end` arrivent avant le
+/// texte (pa-daemon/src/agent_engine/turn/run_once.rs:531-556), et le bloc
+/// `thinking` revient dans l'historique à la réouverture.
+#[tokio::test(flavor = "multi_thread")]
+async fn thinking_streams_and_comes_back_with_the_thread() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "engine": "faux",
+            "reasoning": true,
+            "responses": [{
+                "content": [
+                    { "type": "thinking", "thinking": "je pèse le pour et le contre" },
+                    { "type": "text", "text": "voilà" },
+                ],
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let config = serde_json::json!({
+        "cwd": workspace.to_string_lossy(),
+        "script": script.to_string_lossy(),
+    });
+
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-think").unwrap();
+    let opened = open_thread(&client, config.clone(), &path)
+        .await
+        .expect("thread opened");
+    prompt(&client, &opened.active_session_id, "réfléchis")
+        .await
+        .expect("prompt admitted");
+
+    let mut stream_kinds = Vec::new();
+    let mut thinking = String::new();
+    let mut seen_types = Vec::new();
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            let DaemonClientEvent::SessionEvent { event, .. } = event else {
+                continue;
+            };
+            let kind = event["type"].as_str().unwrap_or_default().to_string();
+            if let Some(stream) = event["assistantMessageEvent"]["type"].as_str() {
+                if stream_kinds.last().map(String::as_str) != Some(stream) {
+                    stream_kinds.push(stream.to_string());
+                }
+                if stream == "thinking_delta" {
+                    thinking.push_str(
+                        event["assistantMessageEvent"]["delta"]
+                            .as_str()
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            let done = kind == "agent_end";
+            seen_types.push(kind);
+            if done {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(turn.is_ok(), "turn ended; events seen: {seen_types:?}");
+    assert_eq!(thinking, "je pèse le pour et le contre");
+    // `thinking_start` ne passe pas : la trame sans delta est remplacée par
+    // le premier `thinking_delta` qui la suit (pa-daemon/src/streaming.rs:118-127).
+    // Le client ouvre donc le bloc au premier delta.
+    let position = |kind: &str| stream_kinds.iter().position(|seen| seen == kind);
+    assert!(
+        position("thinking_start").is_none(),
+        "stream kinds: {stream_kinds:?}"
+    );
+    assert!(
+        position("thinking_delta").is_some()
+            && position("thinking_delta") < position("thinking_end")
+            && position("thinking_end") < position("text_delta"),
+        "stream kinds: {stream_kinds:?}"
+    );
+
+    kill_session(&client, &opened.active_session_id)
+        .await
+        .expect("killed");
+    let reopened = open_thread(&client, config, &path)
+        .await
+        .expect("thread reopened");
+    let blocks: Vec<(String, String)> = reopened
+        .messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+        .map(|block| {
+            let kind = block["type"].as_str().unwrap_or_default().to_string();
+            let text = block["thinking"]
+                .as_str()
+                .or_else(|| block["text"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            (kind, text)
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![
+            (
+                "thinking".to_string(),
+                "je pèse le pour et le contre".to_string()
+            ),
+            ("text".to_string(), "voilà".to_string()),
+        ]
+    );
+
+    kill_session(&client, &reopened.active_session_id)
+        .await
+        .expect("reopened killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cycle `ClientOwned` (pa-daemon/src/supervisor/sessions.rs:621-638) : une
 /// déconnexion sans `Kill` ne fait qu'un `detach`
 /// (pa-daemon/src/supervisor/clients.rs:354-373) et le worker continue de
