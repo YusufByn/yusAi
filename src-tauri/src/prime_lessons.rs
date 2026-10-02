@@ -22,10 +22,16 @@
 //!   `yl_…`, amorcée dans le harness avant la refine) s'applique si la leçon
 //!   est au niveau projet ; au niveau type ou global, elle devient une
 //!   proposition en attente de validation ;
+//! - une mise à jour ou une suppression visant une de nos leçons qui ne
+//!   s'applique pas à la conversation de la refine (autre projet, autre
+//!   type) est ignorée : une refine d'un autre projet (auto-refine de
+//!   Prime, `refine.run()` du modèle) peut voir nos entrées amorcées pour
+//!   une refine en cours ;
 //! - une mise à jour d'une entrée qui n'est pas à nous devient une création
 //!   (le magasin écarte le doublon) ; sa suppression est ignorée.
 //!
-//! La conversion est pure : le niveau de nos leçons vient de l'appelant.
+//! La conversion est pure : ce que sont nos leçons vient de l'appelant
+//! ([`LessonTarget`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -36,8 +42,8 @@ use pa_core::session::manager::format_iso;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sinew_app::store::{
-    AppStore, InsertLessonOutcome, Lesson, LessonKind, LessonLevel, LessonOrigin, LessonScope,
-    LessonStatus, NewLesson, NewProposal, ProposalKind,
+    normalize_project_type, AppStore, InsertLessonOutcome, Lesson, LessonKind, LessonLevel,
+    LessonOrigin, LessonScope, LessonStatus, NewLesson, NewProposal, ProposalKind,
 };
 
 /// Préfixe des ids de nos leçons, tels qu'amorcés dans le harness de Prime.
@@ -71,6 +77,16 @@ pub enum LessonOp {
     },
 }
 
+/// Ce que l'import sait d'une de nos leçons (id `yl_…`) visée par une edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LessonTarget {
+    /// Leçon active qui s'applique à la conversation de la refine.
+    Here(LessonLevel),
+    /// Leçon qui ne s'applique pas à cette conversation (projet ou type
+    /// différent), active ou non : la refine n'y touche pas.
+    Elsewhere,
+}
+
 /// Ce qu'une refine demande au magasin.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefinementImport {
@@ -83,10 +99,11 @@ pub struct RefinementImport {
 }
 
 /// Les opérations d'une ligne `refinement_outcome` (ses `details`).
-/// `level_of` donne le niveau d'une de nos leçons encore active, ou `None`.
+/// `target_of` dit ce qu'est une de nos leçons pour la conversation de la
+/// refine ; `None` pour une leçon inconnue ou archivée de cette conversation.
 pub fn refinement_ops(
     details: &Value,
-    level_of: impl Fn(&str) -> Option<LessonLevel>,
+    target_of: impl Fn(&str) -> Option<LessonTarget>,
 ) -> Result<RefinementImport> {
     let refinement_id = details
         .get("refinementId")
@@ -107,7 +124,7 @@ pub fn refinement_ops(
         .into_iter()
         .flatten()
     {
-        match edit_op(edit, &import, &level_of) {
+        match edit_op(edit, &import, &target_of) {
             Ok(op) => import.ops.push(op),
             Err(reason) => import.skipped.push(reason),
         }
@@ -118,7 +135,7 @@ pub fn refinement_ops(
 fn edit_op(
     edit: &Value,
     import: &RefinementImport,
-    level_of: &impl Fn(&str) -> Option<LessonLevel>,
+    target_of: &impl Fn(&str) -> Option<LessonTarget>,
 ) -> std::result::Result<LessonOp, String> {
     let action = edit.get("action").and_then(Value::as_str).unwrap_or("");
     let kind = edit.get("kind").and_then(Value::as_str).unwrap_or("");
@@ -158,7 +175,13 @@ fn edit_op(
     };
 
     let ours = id.starts_with(LESSON_ID_PREFIX).then_some(id);
-    let current_level = ours.and_then(level_of);
+    let current_level = match ours.and_then(target_of) {
+        Some(LessonTarget::Here(level)) => Some(level),
+        Some(LessonTarget::Elsewhere) => {
+            return Err(format!("{label}: lesson outside this conversation"));
+        }
+        None => None,
+    };
     if action == "delete" {
         let Some(lesson_id) = ours.filter(|_| current_level.is_some()) else {
             return Err(format!("{label}: not one of our active lessons"));
@@ -299,13 +322,12 @@ pub fn import_refinement_outcome(
     if !refinement_id.is_empty() && store.is_refinement_imported(refinement_id)? {
         return Ok(None);
     }
+    let project_type = store
+        .project_type(&thread.workspace_id)?
+        .and_then(|setting| setting.project_type);
     let import = refinement_ops(details, |id| {
-        store
-            .lesson(id)
-            .ok()
-            .flatten()
-            .filter(|lesson| lesson.status == LessonStatus::Active)
-            .map(|lesson| lesson.level)
+        let lesson = store.lesson(id).ok().flatten()?;
+        lesson_target(&lesson, &thread.workspace_id, project_type.as_deref())
     })?;
     let global = details.get("scope").and_then(Value::as_str) == Some("global");
     let origin = LessonOrigin {
@@ -588,6 +610,29 @@ fn propose_global(
     Ok(Some(proposal.id))
 }
 
+/// Ce qu'est une de nos leçons pour une conversation du projet
+/// `workspace_id`, de type `project_type`.
+fn lesson_target(
+    lesson: &Lesson,
+    workspace_id: &str,
+    project_type: Option<&str>,
+) -> Option<LessonTarget> {
+    let applies = match lesson.level {
+        LessonLevel::Project => lesson.workspace_id.as_deref() == Some(workspace_id),
+        LessonLevel::Type => match (lesson.project_type.as_deref(), project_type) {
+            (Some(lesson_type), Some(project_type)) => {
+                normalize_project_type(lesson_type) == normalize_project_type(project_type)
+            }
+            _ => false,
+        },
+        LessonLevel::Global => true,
+    };
+    if !applies {
+        return Some(LessonTarget::Elsewhere);
+    }
+    (lesson.status == LessonStatus::Active).then_some(LessonTarget::Here(lesson.level))
+}
+
 fn harness_kind(kind: LessonKind) -> &'static str {
     match kind {
         LessonKind::Memory => "memory",
@@ -846,11 +891,12 @@ mod tests {
         })
     }
 
-    fn levels(id: &str) -> Option<LessonLevel> {
+    fn levels(id: &str) -> Option<LessonTarget> {
         match id {
-            "yl_project" => Some(LessonLevel::Project),
-            "yl_type" => Some(LessonLevel::Type),
-            "yl_global" => Some(LessonLevel::Global),
+            "yl_project" => Some(LessonTarget::Here(LessonLevel::Project)),
+            "yl_type" => Some(LessonTarget::Here(LessonLevel::Type)),
+            "yl_global" => Some(LessonTarget::Here(LessonLevel::Global)),
+            "yl_elsewhere" => Some(LessonTarget::Elsewhere),
             _ => None,
         }
     }
@@ -1478,6 +1524,140 @@ mod tests {
         assert!(seed_thread_lessons(&store, &agent_dir, &thread).is_err());
         assert!(unseed_thread_lessons(&agent_dir).is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "pas du json");
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    #[test]
+    fn lessons_outside_the_conversation_are_left_alone() {
+        let import = refinement_ops(
+            &outcome(vec![
+                json!({
+                    "action": "update", "kind": "memory", "id": "yl_elsewhere",
+                    "title": "T", "content": "Nouveau texte.", "applied": true,
+                }),
+                json!({ "action": "delete", "kind": "memory", "id": "yl_elsewhere", "applied": true }),
+            ]),
+            levels,
+        )
+        .unwrap();
+        assert!(import.ops.is_empty(), "ops: {:?}", import.ops);
+        assert_eq!(
+            import.skipped,
+            vec![
+                "update memory:yl_elsewhere: lesson outside this conversation".to_string(),
+                "delete memory:yl_elsewhere: lesson outside this conversation".to_string(),
+            ]
+        );
+    }
+
+    /// Une refine d'une conversation du projet B (auto-refine de Prime)
+    /// voit les leçons du projet A amorcées pour une refine en cours et les
+    /// modifie : l'import de B n'y touche pas, ni ne les recopie dans B.
+    #[test]
+    fn a_refine_of_another_project_does_not_touch_our_lessons() {
+        let (store, agent_dir) = import_fixture(&[]);
+        let set_type = |workspace: &str, project_type: &str| {
+            store
+                .set_project_type(
+                    workspace,
+                    Some(project_type),
+                    sinew_app::store::ProjectTypeSource::User,
+                )
+                .unwrap();
+        };
+        set_type("/work/a", "rust");
+        set_type("/work/b", "python");
+        let project = lesson(
+            &store,
+            LessonLevel::Project,
+            "/work/a",
+            "Lancer cargo test.",
+        );
+        let typed = lesson(&store, LessonLevel::Type, "/work/a", "Préférer anyhow.");
+        let archived = lesson(&store, LessonLevel::Project, "/work/a", "Ancienne règle.");
+        store
+            .archive_lesson(&archived.id, &LessonOrigin::user())
+            .unwrap();
+        let global = lesson(
+            &store,
+            LessonLevel::Global,
+            "/work/a",
+            "Répondre en français.",
+        );
+        let update = |id: &str, content: &str| {
+            json!({
+                "action": "update", "kind": "memory", "id": id,
+                "title": "T", "content": content, "applied": true,
+            })
+        };
+        let details = outcome(vec![
+            update(&project.id, "Lancer pytest."),
+            json!({ "action": "delete", "kind": "memory", "id": typed.id, "applied": true }),
+            update(&archived.id, "Ancienne règle, reprise."),
+            update(&global.id, "Répondre en anglais."),
+        ]);
+        let thread_b = ThreadContext {
+            conversation_id: "conv-b".to_string(),
+            workspace_id: "/work/b".to_string(),
+        };
+
+        let report = import_refinement_outcome(&store, &agent_dir, &thread_b, &details)
+            .unwrap()
+            .unwrap();
+        assert!(report.created.is_empty(), "report: {report:?}");
+        assert!(report.updated.is_empty(), "report: {report:?}");
+        assert!(report.archived.is_empty(), "report: {report:?}");
+        assert_eq!(report.skipped.len(), 3, "report: {report:?}");
+        assert!(report
+            .skipped
+            .iter()
+            .all(|reason| reason.ends_with("lesson outside this conversation")));
+        // Le global s'applique aussi à B : proposition de changement, comme
+        // avant.
+        let proposals = store.pending_lesson_proposals().unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].kind, ProposalKind::Change);
+        assert_eq!(proposals[0].lesson_id.as_ref(), Some(&global.id));
+
+        let unchanged = |lesson: &Lesson| {
+            let now = store.lesson(&lesson.id).unwrap().unwrap();
+            assert_eq!(now.content, lesson.content);
+            assert_eq!(now.status, lesson.status);
+            assert_eq!(
+                store.lesson_events(&lesson.id).unwrap().len(),
+                1 + usize::from(lesson.status == LessonStatus::Archived)
+            );
+        };
+        unchanged(&project);
+        unchanged(&typed);
+        unchanged(&store.lesson(&archived.id).unwrap().unwrap());
+        let scope_b = LessonScope {
+            workspace_id: "/work/b".to_string(),
+            project_type: Some("python".to_string()),
+        };
+        let lessons_b = store.applicable_lessons(&scope_b).unwrap();
+        assert_eq!(lessons_b.len(), 1, "only the global lesson: {lessons_b:?}");
+
+        // La même refine dans une conversation de A, elle, s'applique.
+        let mut details = details;
+        details["refinementId"] = json!("refine_2");
+        let thread_a = ThreadContext {
+            conversation_id: "conv-a".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        let report = import_refinement_outcome(&store, &agent_dir, &thread_a, &details)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            report.updated,
+            vec![project.id.clone()],
+            "report: {report:?}"
+        );
+        assert_eq!(
+            report.created.len(),
+            1,
+            "the archived lesson comes back: {report:?}"
+        );
         let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }
 }
