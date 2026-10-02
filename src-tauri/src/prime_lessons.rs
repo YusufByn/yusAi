@@ -1,4 +1,8 @@
-//! Conversion d'une refine de Prime en opérations sur nos leçons.
+//! Les refines de Prime deviennent des leçons yusAi : conversion des edits
+//! en opérations (`refinement_ops`, fonction pure), puis import dans le
+//! magasin (`import_refinement_outcome`), en direct depuis le relais
+//! d'événements ou en rattrapage depuis l'historique d'un fil
+//! (`import_thread_outcomes`).
 //!
 //! Une refine arrive en ligne `custom` `refinement_outcome`, dont les
 //! `details` portent `refinementId`, `summary`, `scope`, `edits` et, pour un
@@ -21,11 +25,18 @@
 //! - une mise à jour d'une entrée qui n'est pas à nous devient une création
 //!   (le magasin écarte le doublon) ; sa suppression est ignorée.
 //!
-//! Fonction pure : le niveau de nos leçons vient de l'appelant.
+//! La conversion est pure : le niveau de nos leçons vient de l'appelant.
 
-use anyhow::{anyhow, Result};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+
+use anyhow::{anyhow, Context, Result};
+use serde::Serialize;
 use serde_json::{json, Value};
-use sinew_app::store::{LessonKind, LessonLevel, ProposalKind};
+use sinew_app::store::{
+    AppStore, InsertLessonOutcome, LessonKind, LessonLevel, LessonOrigin, LessonStatus, NewLesson,
+    NewProposal, ProposalKind,
+};
 
 /// Préfixe des ids de nos leçons, tels qu'amorcés dans le harness de Prime.
 pub const LESSON_ID_PREFIX: &str = "yl_";
@@ -33,8 +44,10 @@ pub const LESSON_ID_PREFIX: &str = "yl_";
 /// Une opération sur le magasin des leçons.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LessonOp {
-    /// Nouvelle leçon au niveau projet.
+    /// Nouvelle leçon au niveau projet. `entry_id` est l'entrée du harness
+    /// de Prime qui l'a portée, retirée du harness une fois importée.
     Create {
+        entry_id: String,
         kind: LessonKind,
         title: String,
         content: String,
@@ -177,6 +190,7 @@ fn edit_op(
         // Création, ou mise à jour d'une entrée qui n'est pas (ou plus) une
         // de nos leçons actives : une leçon projet de plus.
         _ => Ok(LessonOp::Create {
+            entry_id: id.to_string(),
             kind: lesson_kind,
             title,
             content,
@@ -197,6 +211,310 @@ fn entry_text(edit: &Value) -> Option<(String, String)> {
     let title = pick("title").unwrap_or_else(|| first_words(&content));
     Some((title, content))
 }
+
+/// La conversation d'où vient une refine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadContext {
+    pub conversation_id: String,
+    /// Le projet : `workspace_id` des conversations (son chemin).
+    pub workspace_id: String,
+}
+
+/// Ce qu'un import a fait dans le magasin.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    pub refinement_id: String,
+    pub created: Vec<String>,
+    /// Leçons existantes qui portaient déjà le texte d'une création.
+    pub duplicates: Vec<String>,
+    pub updated: Vec<String>,
+    pub archived: Vec<String>,
+    pub proposals: Vec<String>,
+    pub skipped: Vec<String>,
+    /// Entrées retirées du harness de Prime après l'import.
+    pub removed_entries: usize,
+}
+
+/// Une refine locale du worker écrit dans `harness/` à côté des fichiers
+/// de fil (`<agent_dir>/yusai-threads/harness/`), une refine globale dans
+/// `agent_dir` lui-même : chemins figés par le test e2e
+/// `refine_runs_scripted_and_append_system_prompt_survives_a_worker_restart`
+/// (pa-core/src/session_engine/refine.rs:237-240,
+/// pa-daemon/src/agent_engine/session_engine_impl.rs:1289).
+pub fn refine_harness_file(agent_dir: &Path, global: bool) -> PathBuf {
+    if global {
+        agent_dir.join(HARNESS_STATE_FILE)
+    } else {
+        agent_dir
+            .join(crate::prime_session::THREADS_DIR)
+            .join("harness")
+            .join(HARNESS_STATE_FILE)
+    }
+}
+
+const HARNESS_STATE_FILE: &str = "harness_state.json";
+
+/// Les imports passent un par un : magasin et fichier du harness partagé.
+static IMPORT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Importe une ligne `refinement_outcome` dans le magasin, une seule fois
+/// par `refinementId` (`None` si elle l'était déjà).
+///
+/// Une refine de portée globale (`refine.run(global_=True)` par le modèle)
+/// arrive au niveau projet comme les autres, avec une proposition de montée
+/// vers global pour chaque leçon créée (ou déjà présente sous un autre
+/// niveau).
+///
+/// Une fois l'import noté en base, et seulement alors, les entrées que
+/// cette refine a créées dans le harness de Prime en sont retirées : elles
+/// vivent désormais chez nous, et le fichier local est partagé par tous nos
+/// fils (sinon toute refine suivante, de n'importe quel projet, les
+/// relirait). Les erreurs de ce retrait ne font pas échouer l'import.
+pub fn import_refinement_outcome(
+    store: &AppStore,
+    agent_dir: &Path,
+    thread: &ThreadContext,
+    details: &Value,
+) -> Result<Option<ImportReport>> {
+    let _guard = IMPORT_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let refinement_id = details
+        .get("refinementId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !refinement_id.is_empty() && store.is_refinement_imported(refinement_id)? {
+        return Ok(None);
+    }
+    let import = refinement_ops(details, |id| {
+        store
+            .lesson(id)
+            .ok()
+            .flatten()
+            .filter(|lesson| lesson.status == LessonStatus::Active)
+            .map(|lesson| lesson.level)
+    })?;
+    let global = details.get("scope").and_then(Value::as_str) == Some("global");
+    let origin = LessonOrigin {
+        actor: if global { "refine:global" } else { "refine" }.to_string(),
+        conversation_id: Some(thread.conversation_id.clone()),
+        refinement_id: Some(import.refinement_id.clone()),
+    };
+    let mut report = ImportReport {
+        refinement_id: import.refinement_id.clone(),
+        skipped: import.skipped.clone(),
+        ..ImportReport::default()
+    };
+    let mut touched: Vec<(&'static str, String)> = Vec::new();
+    let mut to_promote: Vec<String> = Vec::new();
+    for op in import.ops {
+        match op {
+            LessonOp::Create {
+                entry_id,
+                kind,
+                title,
+                content,
+            } => {
+                let lesson = NewLesson {
+                    level: LessonLevel::Project,
+                    workspace_id: Some(thread.workspace_id.clone()),
+                    project_type: None,
+                    kind,
+                    title,
+                    content,
+                };
+                match store.insert_lesson(&lesson, &origin) {
+                    Ok(InsertLessonOutcome::Created(created)) => {
+                        touched.push((harness_kind(kind), entry_id));
+                        to_promote.push(created.id.clone());
+                        report.created.push(created.id);
+                    }
+                    Ok(InsertLessonOutcome::Duplicate { existing_id }) => {
+                        touched.push((harness_kind(kind), entry_id));
+                        to_promote.push(existing_id.clone());
+                        report.duplicates.push(existing_id);
+                    }
+                    Err(error) => report.skipped.push(format!("create {entry_id}: {error:#}")),
+                }
+            }
+            LessonOp::Update {
+                lesson_id,
+                title,
+                content,
+            } => match store.update_lesson(&lesson_id, &title, &content, &origin) {
+                Ok(_) => report.updated.push(lesson_id),
+                Err(error) => report
+                    .skipped
+                    .push(format!("update {lesson_id}: {error:#}")),
+            },
+            LessonOp::Archive { lesson_id } => match store.archive_lesson(&lesson_id, &origin) {
+                Ok(_) => report.archived.push(lesson_id),
+                Err(error) => report
+                    .skipped
+                    .push(format!("archive {lesson_id}: {error:#}")),
+            },
+            LessonOp::Propose {
+                lesson_id,
+                kind,
+                target_level,
+                payload,
+            } => match store.create_lesson_proposal(&NewProposal {
+                lesson_id,
+                kind,
+                target_level,
+                payload,
+                conversation_id: origin.conversation_id.clone(),
+                refinement_id: origin.refinement_id.clone(),
+            }) {
+                Ok(proposal) => report.proposals.push(proposal.id),
+                Err(error) => report.skipped.push(format!("proposal: {error:#}")),
+            },
+        }
+    }
+    if global {
+        for lesson_id in to_promote {
+            match propose_global(store, &lesson_id, &origin) {
+                Ok(Some(proposal)) => report.proposals.push(proposal),
+                Ok(None) => {}
+                Err(error) => report
+                    .skipped
+                    .push(format!("promote {lesson_id}: {error:#}")),
+            }
+        }
+    }
+    store.mark_refinement_imported(&report.refinement_id, Some(&thread.conversation_id))?;
+
+    let harness = refine_harness_file(agent_dir, global);
+    match remove_harness_entries(&harness, &touched) {
+        Ok(removed) => report.removed_entries = removed,
+        Err(error) => tracing::warn!(
+            error = %error,
+            file = %harness.display(),
+            "imported prime refine entries stay in the harness"
+        ),
+    }
+    Ok(Some(report))
+}
+
+/// Une proposition de montée vers global, sauf si la leçon y est déjà ou
+/// si une proposition identique attend.
+fn propose_global(
+    store: &AppStore,
+    lesson_id: &str,
+    origin: &LessonOrigin,
+) -> Result<Option<String>> {
+    let Some(lesson) = store.lesson(lesson_id)? else {
+        return Ok(None);
+    };
+    if lesson.level == LessonLevel::Global {
+        return Ok(None);
+    }
+    let already = store
+        .pending_lesson_proposals()?
+        .into_iter()
+        .any(|proposal| {
+            proposal.lesson_id.as_deref() == Some(lesson_id)
+                && proposal.kind == ProposalKind::Promote
+                && proposal.target_level == Some(LessonLevel::Global)
+        });
+    if already {
+        return Ok(None);
+    }
+    let proposal = store.create_lesson_proposal(&NewProposal {
+        lesson_id: Some(lesson_id.to_string()),
+        kind: ProposalKind::Promote,
+        target_level: Some(LessonLevel::Global),
+        payload: json!({ "reason": "global refine requested in the conversation" }),
+        conversation_id: origin.conversation_id.clone(),
+        refinement_id: origin.refinement_id.clone(),
+    })?;
+    Ok(Some(proposal.id))
+}
+
+fn harness_kind(kind: LessonKind) -> &'static str {
+    match kind {
+        LessonKind::Memory => "memory",
+        LessonKind::Prompt => "prompt",
+        LessonKind::Subagent => "subagent",
+    }
+}
+
+/// Retire des entrées (`kind`, `id`) d'un fichier d'état du harness de
+/// Prime (`{"schema":1,"entries":{kind:{id:entry}},"refinements":[…]}`,
+/// pa-core/src/refinement/mod.rs:93-101), le reste intact. Écriture
+/// atomique, seulement si quelque chose change. Renvoie le nombre
+/// d'entrées retirées.
+pub fn remove_harness_entries(path: &Path, entries: &[(&str, String)]) -> Result<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", path.display()));
+        }
+    };
+    let mut state: Value =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let mut removed = 0;
+    for (kind, id) in entries {
+        if let Some(records) = state
+            .get_mut("entries")
+            .and_then(|entries| entries.get_mut(*kind))
+            .and_then(Value::as_object_mut)
+        {
+            if records.remove(id).is_some() {
+                removed += 1;
+            }
+        }
+    }
+    if removed == 0 {
+        return Ok(0);
+    }
+    let content = format!("{}\n", serde_json::to_string_pretty(&state)?);
+    let temp = path.with_extension(format!("json.yusai-{}.tmp", std::process::id()));
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
+            .open(&temp)
+            .with_context(|| format!("write {}", temp.display()))?;
+        std::io::Write::write_all(&mut file, content.as_bytes())?;
+    }
+    std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))?;
+    Ok(removed)
+}
+
+/// Rattrapage à l'ouverture d'un fil : les lignes `refinement_outcome` de
+/// son historique (`snapshot.messages`) pas encore importées (refines
+/// faites quand rien n'écoutait : auto-refine de Prime, app fermée…).
+pub fn import_thread_outcomes(
+    store: &AppStore,
+    agent_dir: &Path,
+    thread: &ThreadContext,
+    messages: &[Value],
+) -> Vec<ImportReport> {
+    let mut reports = Vec::new();
+    for details in messages.iter().filter_map(refinement_outcome_details) {
+        match import_refinement_outcome(store, agent_dir, thread, details) {
+            Ok(Some(report)) => reports.push(report),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = %error, "prime refine import failed"),
+        }
+    }
+    reports
+}
+
+/// Les `details` d'un message `custom` `refinement_outcome`.
+pub fn refinement_outcome_details(message: &Value) -> Option<&Value> {
+    (message.get("customType").and_then(Value::as_str) == Some(REFINEMENT_OUTCOME))
+        .then(|| message.get("details"))
+        .flatten()
+}
+
+const REFINEMENT_OUTCOME: &str = "refinement_outcome";
 
 fn text(value: Option<&Value>) -> Option<String> {
     value
@@ -270,16 +588,19 @@ mod tests {
             import.ops,
             vec![
                 LessonOp::Create {
+                    entry_id: "tests".to_string(),
                     kind: LessonKind::Memory,
                     title: "Stored title".to_string(),
                     content: "Toujours lancer cargo test.".to_string(),
                 },
                 LessonOp::Create {
+                    entry_id: "style".to_string(),
                     kind: LessonKind::Prompt,
                     title: "Stored title".to_string(),
                     content: "Répondre brièvement.".to_string(),
                 },
                 LessonOp::Create {
+                    entry_id: "reviewer".to_string(),
                     kind: LessonKind::Subagent,
                     title: "Stored title".to_string(),
                     content: "Relire les diffs.".to_string(),
@@ -357,7 +678,8 @@ mod tests {
                 "refinementSummary": "lessons from the session",
             }),
         };
-        let create = LessonOp::Create {
+        let create = |entry_id: &str| LessonOp::Create {
+            entry_id: entry_id.to_string(),
             kind: LessonKind::Memory,
             title: "New".to_string(),
             content: "Nouvelle version.".to_string(),
@@ -374,8 +696,8 @@ mod tests {
                 change("yl_global", LessonLevel::Global),
                 // Leçon archivée ou supprimée entre-temps, entrée de Prime :
                 // créations (le magasin écarte un doublon).
-                create.clone(),
-                create,
+                create("yl_gone"),
+                create("prime_entry"),
             ]
         );
     }
@@ -463,6 +785,7 @@ mod tests {
         assert_eq!(
             import.ops,
             vec![LessonOp::Create {
+                entry_id: "e".to_string(),
                 kind: LessonKind::Memory,
                 title: "Un contenu sans titre qui sert de titre".to_string(),
                 content: "Un contenu sans titre qui sert de titre court ici et là.".to_string(),

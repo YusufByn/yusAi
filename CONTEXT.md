@@ -166,6 +166,16 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 
 ## Fait récemment (commits)
 
+- **Couche de rétention, en cours** : magasin des leçons (`db14f96`,
+  `crates/sinew-app/src/store/lessons.rs`, sqlite v10) ; conversion des
+  refines (`41622b1`, `src-tauri/src/prime_lessons.rs`) ; capture : le
+  relais importe chaque `refinement_outcome` en direct
+  (`import_live_refinement`), l'ouverture d'un fil rattrape celles de son
+  historique (`catch_up_refinements`). Import unique par `refinementId` ;
+  une refine globale ajoute une proposition de montée ; après un import
+  réussi, les entrées créées par la refine quittent le harness de Prime
+  (local : `yusai-threads/harness/`, global : `agent_dir`). Les leçons ne
+  sont pas encore réinjectées (commit 6 du plan).
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

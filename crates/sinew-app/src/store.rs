@@ -712,6 +712,13 @@ impl AppStore {
         Ok(store)
     }
 
+    /// Un magasin à un chemin donné, migré (tests, outils).
+    pub fn open_at(path: impl Into<PathBuf>) -> Result<Self> {
+        let store = Self { path: path.into() };
+        store.migrate()?;
+        Ok(store)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

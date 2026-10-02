@@ -967,6 +967,18 @@ impl AppStore {
         Ok(())
     }
 
+    pub fn is_refinement_imported(&self, refinement_id: &str) -> Result<bool> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "select 1 from prime_imported_refinements where refinement_id = ?1",
+            params![refinement_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("unable to read imported refinements")
+        .map(|found| found.is_some())
+    }
+
     /// Note qu'une refine de Prime a été importée ; `false` si elle l'était
     /// déjà (l'import est idempotent par `refinementId`).
     pub fn mark_refinement_imported(
@@ -1442,9 +1454,11 @@ mod tests {
     #[test]
     fn refinements_import_once() {
         let (store, path) = temp_store();
+        assert!(!store.is_refinement_imported("refine_1").unwrap());
         assert!(store
             .mark_refinement_imported("refine_1", Some("conv-1"))
             .unwrap());
+        assert!(store.is_refinement_imported("refine_1").unwrap());
         assert!(!store
             .mark_refinement_imported("refine_1", Some("conv-1"))
             .unwrap());

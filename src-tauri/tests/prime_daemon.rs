@@ -1241,6 +1241,222 @@ async fn refine_runs_scripted_and_append_system_prompt_survives_a_worker_restart
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Le contenu d'un fichier d'état du harness (vide s'il manque).
+fn harness_entry_ids(path: &std::path::Path, kind: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let state: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut ids: Vec<String> = state["entries"][kind]
+        .as_object()
+        .map(|entries| entries.keys().cloned().collect())
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// Les refines deviennent des leçons yusAi : capture d'une
+/// `refinement_outcome` réelle (planificateur scripté), import unique par
+/// `refinementId`, retrait du harness des entrées importées, proposition de
+/// montée pour une refine globale, rattrapage depuis l'historique du fil.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn refinements_become_lessons_once_and_leave_the_harness() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::{AppStore, LessonLevel, LessonScope, ProposalKind};
+    use sinew_desktop_lib::prime_lessons::{
+        import_refinement_outcome, import_thread_outcomes, refine_harness_file, ThreadContext,
+    };
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let local = serde_json::json!({
+        "summary": "local lessons",
+        "rationale": "trajectory evidence",
+        "expectedOutcome": "reused",
+        "edits": [
+            {
+                "action": "create", "kind": "memory", "id": "yusai-local",
+                "title": "Tests", "content": "Toujours lancer cargo test avant de commiter.",
+            },
+            {
+                "action": "create", "kind": "skill", "id": "fmt-skill",
+                "title": "Format", "content": "Formater le code avec cargo fmt.",
+                "reference": { "type": "python", "import": "fmt_skill", "callable": "run" },
+                "arguments": {},
+            },
+        ],
+    });
+    let global = serde_json::json!({
+        "summary": "global lesson",
+        "rationale": "trajectory evidence",
+        "expectedOutcome": "reused",
+        "edits": [{
+            "action": "create", "kind": "memory", "id": "yusai-global",
+            "title": "Langue", "content": "Répondre en français.",
+        }],
+    });
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "engine": "faux",
+            "responses": [
+                { "text": "ok" },
+                { "text": local.to_string() },
+                { "text": global.to_string() },
+            ],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-lessons").unwrap();
+    let config = serde_json::json!({
+        "cwd": workspace.to_string_lossy(),
+        "script": script.to_string_lossy(),
+    });
+    let opened = open_thread(&client, config.clone(), &path)
+        .await
+        .expect("thread opened");
+    let session = opened.active_session_id.clone();
+    prompt(&client, &session, "salut")
+        .await
+        .expect("prompt admitted");
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(turn.is_ok(), "turn ended");
+
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let thread = ThreadContext {
+        conversation_id: "conv-lessons".to_string(),
+        workspace_id: workspace.to_string_lossy().into_owned(),
+    };
+    let refine = |global: bool| {
+        client.request_ok(pa_types::daemon::DaemonCommand::Refine {
+            id: None,
+            active_session_id: session.clone(),
+            instructions: None,
+            rollback_id: None,
+            global: global.then_some(true),
+            rest: serde_json::Map::default(),
+        })
+    };
+
+    // Refine locale : une leçon projet, une proposition de skill.
+    refine(false).await.expect("local refine runs");
+    let outcome = next_refinement_outcome(&mut events)
+        .await
+        .expect("refinement_outcome row");
+    let local_file = refine_harness_file(&agent_dir, false);
+    assert_eq!(
+        harness_entry_ids(&local_file, "memory"),
+        vec!["yusai-local"]
+    );
+    let report = import_refinement_outcome(&store, &agent_dir, &thread, &outcome["details"])
+        .unwrap()
+        .expect("first import");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    assert_eq!(report.proposals.len(), 1, "report: {report:?}");
+    assert_eq!(report.removed_entries, 1, "report: {report:?}");
+    let scope = LessonScope {
+        workspace_id: thread.workspace_id.clone(),
+        project_type: None,
+    };
+    let lessons = store.applicable_lessons(&scope).unwrap();
+    assert_eq!(lessons.len(), 1);
+    assert_eq!(lessons[0].level, LessonLevel::Project);
+    assert_eq!(
+        lessons[0].content,
+        "Toujours lancer cargo test avant de commiter."
+    );
+    let history = store.lesson_events(&lessons[0].id).unwrap();
+    assert_eq!(history[0].conversation_id.as_deref(), Some("conv-lessons"));
+    assert_eq!(
+        history[0].refinement_id.as_deref(),
+        outcome["details"]["refinementId"].as_str()
+    );
+    // L'entrée importée quitte le harness partagé ; la skill (proposition)
+    // y reste.
+    assert!(harness_entry_ids(&local_file, "memory").is_empty());
+    assert_eq!(harness_entry_ids(&local_file, "skill"), vec!["fmt-skill"]);
+    // Une seule fois par refine.
+    assert_eq!(
+        import_refinement_outcome(&store, &agent_dir, &thread, &outcome["details"]).unwrap(),
+        None
+    );
+
+    // Refine globale (comme `refine.run(global_=True)`) : niveau projet +
+    // proposition de montée.
+    refine(true).await.expect("global refine runs");
+    let outcome = next_refinement_outcome(&mut events)
+        .await
+        .expect("refinement_outcome row");
+    let global_file = refine_harness_file(&agent_dir, true);
+    assert_eq!(
+        harness_entry_ids(&global_file, "memory"),
+        vec!["yusai-global"]
+    );
+    let report = import_refinement_outcome(&store, &agent_dir, &thread, &outcome["details"])
+        .unwrap()
+        .expect("global import");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    assert_eq!(report.removed_entries, 1, "report: {report:?}");
+    assert!(harness_entry_ids(&global_file, "memory").is_empty());
+    let proposals = store.pending_lesson_proposals().unwrap();
+    let kinds: Vec<ProposalKind> = proposals.iter().map(|proposal| proposal.kind).collect();
+    assert_eq!(kinds, vec![ProposalKind::Skill, ProposalKind::Promote]);
+    assert_eq!(proposals[1].lesson_id.as_ref(), Some(&report.created[0]));
+    assert_eq!(proposals[1].target_level, Some(LessonLevel::Global));
+    assert_eq!(
+        store.lesson(&report.created[0]).unwrap().unwrap().level,
+        LessonLevel::Project
+    );
+
+    // Rattrapage : l'historique rouvert porte les deux refines ; déjà
+    // importées ici, importées une fois dans un magasin neuf.
+    kill_session(&client, &session)
+        .await
+        .expect("session killed");
+    let reopened = open_thread(&client, config, &path)
+        .await
+        .expect("thread reopened");
+    assert!(import_thread_outcomes(&store, &agent_dir, &thread, &reopened.messages).is_empty());
+    let fresh = AppStore::open_at(root.join("fresh.sqlite3")).unwrap();
+    let caught_up = import_thread_outcomes(&fresh, &agent_dir, &thread, &reopened.messages);
+    assert_eq!(caught_up.len(), 2, "messages: {:?}", reopened.messages);
+    assert_eq!(fresh.applicable_lessons(&scope).unwrap().len(), 2);
+    assert!(import_thread_outcomes(&fresh, &agent_dir, &thread, &reopened.messages).is_empty());
+
+    kill_session(&client, &reopened.active_session_id)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
 fn uv_available() -> bool {
     let on_path = std::env::var_os("PATH")

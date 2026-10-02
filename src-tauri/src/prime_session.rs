@@ -15,7 +15,7 @@
 //!   tuées ([`reap_orphaned_sessions`]), jamais celles d'une autre instance
 //!   ouverte.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -29,25 +29,35 @@ use sinew_app::tool_run::FileChange;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::prime_diffs::PrimeDiffs;
+use crate::prime_lessons::{
+    import_refinement_outcome, import_thread_outcomes, refinement_outcome_details, ThreadContext,
+};
 use tokio::sync::{mpsc::UnboundedReceiver, watch, Mutex};
 
 pub const PRIME_EVENT_NAME: &str = "prime-event";
 
 /// Client du daemon partagé par toutes les fenêtres, connecté à la demande,
-/// sessions créées par ce processus (tuées à la sortie) et fichiers
-/// modifiés par leurs appels d'outils.
+/// sessions créées par ce processus (tuées à la sortie) avec leur
+/// conversation, et fichiers modifiés par leurs appels d'outils.
 #[derive(Default)]
 pub struct PrimeState {
     client: Mutex<Option<DaemonClient>>,
-    sessions: StdMutex<HashSet<String>>,
+    sessions: StdMutex<HashMap<String, ThreadContext>>,
     diffs: StdMutex<PrimeDiffs>,
 }
 
 impl PrimeState {
-    fn track(&self, active_session_id: &str) {
+    fn track(&self, active_session_id: &str, thread: ThreadContext) {
         if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.insert(active_session_id.to_string());
+            sessions.insert(active_session_id.to_string(), thread);
         }
+    }
+
+    fn thread(&self, active_session_id: &str) -> Option<ThreadContext> {
+        self.sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(active_session_id).cloned())
     }
 
     fn untrack(&self, active_session_id: &str) {
@@ -163,7 +173,7 @@ pub async fn create_session(client: &DaemonClient, config: Value) -> Result<Stri
 /// le superviseur y déplace les vieux fichiers vers `sessions-archive/`
 /// (pa-daemon/src/session_archive.rs:1-17, 184-215), et un `Create` sur un
 /// chemin disparu ouvrirait une session vide (pa-daemon/src/worker/create.rs:300-328).
-const THREADS_DIR: &str = "yusai-threads";
+pub(crate) const THREADS_DIR: &str = "yusai-threads";
 
 /// Le fichier de session Prime d'une conversation yusAi.
 pub fn thread_path(agent_dir: &Path, conversation_id: &str) -> Result<PathBuf> {
@@ -582,7 +592,7 @@ pub fn on_exit(app: &AppHandle) {
         let sessions: Vec<String> = state
             .sessions
             .lock()
-            .map(|mut sessions| sessions.drain().collect())
+            .map(|mut sessions| sessions.drain().map(|(id, _)| id).collect())
             .unwrap_or_default();
         let client = state.client.lock().await.clone();
         if let Some(client) = client.filter(|client| !*client.reader_dead().borrow()) {
@@ -834,6 +844,11 @@ fn spawn_event_relay(
                     match &payload {
                         PrimeEventPayload::SessionEvent { active_session_id, event } => {
                             state.with_diffs(|diffs| diffs.observe(active_session_id, event));
+                            if event["type"] == "message_end" {
+                                if let Some(details) = refinement_outcome_details(&event["message"]) {
+                                    import_live_refinement(&app, &state, active_session_id, details);
+                                }
+                            }
                         }
                         PrimeEventPayload::SessionClosed { active_session_id, .. } => {
                             state.with_diffs(|diffs| diffs.forget(active_session_id));
@@ -857,6 +872,49 @@ fn spawn_event_relay(
                     }
                 }
             }
+        }
+    });
+}
+
+/// Importe en tâche de fond une refine reçue en direct dans le relais.
+fn import_live_refinement(
+    app: &AppHandle,
+    state: &PrimeState,
+    active_session_id: &str,
+    details: &Value,
+) {
+    let Some(thread) = state.thread(active_session_id) else {
+        return;
+    };
+    let Some(store) = app
+        .try_state::<crate::DesktopState>()
+        .map(|desktop| desktop.store.clone())
+    else {
+        return;
+    };
+    let details = details.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match import_refinement_outcome(&store, &crate::prime::agent_dir(), &thread, &details) {
+            Ok(Some(report)) => tracing::info!(?report, "prime refine imported"),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = %error, "prime refine import failed"),
+        }
+    });
+}
+
+/// Rattrapage en tâche de fond des refines de l'historique d'un fil.
+fn catch_up_refinements(app: &AppHandle, thread: ThreadContext, messages: Vec<Value>) {
+    let Some(store) = app
+        .try_state::<crate::DesktopState>()
+        .map(|desktop| desktop.store.clone())
+    else {
+        return;
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let reports =
+            import_thread_outcomes(&store, &crate::prime::agent_dir(), &thread, &messages);
+        if !reports.is_empty() {
+            tracing::info!(?reports, "prime refines caught up from the thread");
         }
     });
 }
@@ -910,7 +968,12 @@ pub async fn prime_create_session(
         .await
         .map_err(error_text)?;
     let active_session_id = opened.active_session_id.clone();
-    state.track(&active_session_id);
+    let thread = ThreadContext {
+        conversation_id: conversation_id.clone(),
+        workspace_id: workspace_path.clone(),
+    };
+    state.track(&active_session_id, thread.clone());
+    catch_up_refinements(&app, thread, opened.messages.clone());
     // La racine des photos est le dossier de travail du worker, relu auprès
     // de lui, pas le répertoire courant de l'IDE.
     match session_cwd(&client, &active_session_id).await {
