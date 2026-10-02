@@ -3,19 +3,44 @@ import { listen } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
 import { MODELS, PROVIDERS, THINKING_LEVELS } from "../../lib/models";
-import type { PrimeEventPayload, PrimeModelOption, PrimeSessionConfig } from "../../types";
+import type {
+  PrimeEventPayload,
+  PrimeModelOption,
+  PrimeSessionConfig,
+  ToolResultImage,
+} from "../../types";
 import { Markdown } from "./Markdown";
+import { ToolCard, type ToolCardProps } from "./ToolCard";
 
 // Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
 // one pane per yusAi conversation), created the first time the pane is
-// shown so the model and thinking pickers reflect the worker's state. Only
-// user prompts and assistant text are rendered; tool calls, thinking and
+// shown so the model and thinking pickers reflect the worker's state.
+// User prompts, assistant text and tool calls are rendered; thinking and
 // sub-agents are out of scope for this milestone.
 
-type PrimeMessage = {
+type PrimeMessage = PrimeTextMessage | PrimeToolCall;
+
+type PrimeTextMessage = {
   id: number;
   role: "user" | "assistant" | "error";
   text: string;
+};
+
+// One tool call, from `tool_execution_start` to `tool_execution_end`
+// (pa-daemon/src/worker/turn.rs:905-932).
+type PrimeToolCall = {
+  id: number;
+  role: "tool";
+  toolCallId: string;
+  name: string;
+  summary: string;
+  argsPretty?: string;
+  // Kernel boot stage shown as the title while the call runs.
+  note?: string;
+  output?: string;
+  status: ToolCardProps["status"];
+  isError: boolean;
+  images?: ToolResultImage[];
 };
 
 type PrimeStatus = "idle" | "starting" | "streaming";
@@ -43,7 +68,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
   const streamingIdRef = useRef<number | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
-  const pushMessage = useCallback((role: PrimeMessage["role"], value: string) => {
+  const pushMessage = useCallback((role: PrimeTextMessage["role"], value: string) => {
     const id = nextIdRef.current++;
     setMessages((current) => [...current, { id, role, text: value }]);
     return id;
@@ -59,12 +84,53 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
       const target = id;
       setMessages((current) =>
         current.map((message) =>
-          message.id === target ? { ...message, text: message.text + delta } : message,
+          message.id === target && message.role === "assistant"
+            ? { ...message, text: message.text + delta }
+            : message,
         ),
       );
     },
     [pushMessage],
   );
+
+  // Updates the newest card for the call (Prime's TUI does the same,
+  // pa-tui/src/session_ui/apply.rs:1038-1041).
+  const updateToolCall = useCallback(
+    (toolCallId: string, update: (call: PrimeToolCall) => PrimeToolCall) => {
+      setMessages((current) => {
+        for (let index = current.length - 1; index >= 0; index--) {
+          const message = current[index];
+          if (message.role === "tool" && message.toolCallId === toolCallId) {
+            const next = current.slice();
+            next[index] = update(message);
+            return next;
+          }
+        }
+        return current;
+      });
+    },
+    [],
+  );
+
+  // A call still running when its turn or session ends never gets its
+  // `tool_execution_end`: settle it so no spinner is left behind.
+  const settleRunningToolCalls = useCallback(() => {
+    setMessages((current) =>
+      current.some((message) => message.role === "tool" && message.status === "running")
+        ? current.map((message) =>
+            message.role === "tool" && message.status === "running"
+              ? {
+                  ...message,
+                  status: "error",
+                  isError: true,
+                  note: undefined,
+                  output: message.output || "Interrupted",
+                }
+              : message,
+          )
+        : current,
+    );
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -77,6 +143,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
         streamingIdRef.current = null;
         setStatus("idle");
         setConfig(null);
+        settleRunningToolCalls();
         pushMessage("error", `Prime daemon disconnected: ${payload.reason}`);
         return;
       }
@@ -86,6 +153,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
         streamingIdRef.current = null;
         setStatus("idle");
         setConfig(null);
+        settleRunningToolCalls();
         pushMessage("error", `Prime session closed: ${payload.reason}`);
         return;
       }
@@ -100,6 +168,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
         case "agent_end":
           streamingIdRef.current = null;
           setStatus("idle");
+          settleRunningToolCalls();
           // A turn can fail over to another model or clamp the level.
           void api
             .primeSessionConfig(payload.activeSessionId)
@@ -125,6 +194,63 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
             pushMessage("error", message.errorMessage);
           }
           break;
+        case "tool_execution_start": {
+          const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : "";
+          const name = typeof event.toolName === "string" ? event.toolName : "tool";
+          streamingIdRef.current = null;
+          const id = nextIdRef.current++;
+          setMessages((current) => [
+            ...current,
+            {
+              id,
+              role: "tool",
+              toolCallId,
+              name,
+              summary: toolSummary(name, event.args),
+              argsPretty: toolArgsPretty(event.args),
+              status: "running",
+              isError: false,
+            },
+          ]);
+          break;
+        }
+        case "tool_execution_update": {
+          if (typeof event.toolCallId !== "string") break;
+          const partial = event.partialResult;
+          const text = toolResultText(partial);
+          if (text === undefined) break;
+          const partialStatus = toolResultDetailsStatus(partial);
+          updateToolCall(event.toolCallId, (call) =>
+            partialStatus === "starting"
+              ? // Kernel boot stage, one message per stage
+                // (pa-core/src/tools/ipython.rs:392-396).
+                { ...call, note: text }
+              : partialStatus === "ok"
+                ? // A new stdout/stderr chunk, not the output so far
+                  // (ipython.rs:402-408, from kernel/manager/events.rs:161-179).
+                  { ...call, note: undefined, output: (call.output ?? "") + text }
+                : // Other tools: Prime's TUI treats a partial as the whole
+                  // result so far (pa-tui/src/session_ui/apply.rs:1051).
+                  { ...call, note: undefined, output: text },
+          );
+          break;
+        }
+        case "tool_execution_end": {
+          if (typeof event.toolCallId !== "string") break;
+          const isError = event.isError === true;
+          const output = toolResultText(event.result);
+          const images = toolResultImages(event.result);
+          // The final result replaces whatever streamed in.
+          updateToolCall(event.toolCallId, (call) => ({
+            ...call,
+            status: isError ? "error" : "done",
+            isError,
+            note: undefined,
+            output: output ?? call.output,
+            images: images.length > 0 ? images : undefined,
+          }));
+          break;
+        }
       }
     }).then((u) => {
       if (cancelled) u();
@@ -134,7 +260,7 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
       cancelled = true;
       unlisten?.();
     };
-  }, [appendAssistantText, pushMessage]);
+  }, [appendAssistantText, pushMessage, settleRunningToolCalls, updateToolCall]);
 
   // The session dies with the pane (conversation deleted or workspace
   // changed, see Workspace.tsx); one still being created closes on arrival.
@@ -277,6 +403,19 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
                 <div key={message.id} className="msg" data-role="user">
                   <div className="msg__body user-text">{message.text}</div>
                 </div>
+              ) : message.role === "tool" ? (
+                <div key={message.id} className="msg" data-role="assistant">
+                  <ToolCard
+                    name={message.name}
+                    status={message.status}
+                    summary={message.note ?? message.summary}
+                    argsPretty={message.argsPretty}
+                    output={message.output}
+                    isError={message.isError}
+                    images={message.images}
+                    onOpenFile={onOpenFile}
+                  />
+                </div>
               ) : message.role === "error" ? (
                 <div key={message.id} className="msg" data-role="assistant">
                   <div className="msg__body prime-chat__error">{message.text}</div>
@@ -375,6 +514,83 @@ export function PrimeChatPane({ workspacePath, active, headerExtra, onOpenFile }
       </div>
     </div>
   );
+}
+
+// Prime's model only has the `ipython` tool, whose sole argument is `code`
+// (pa-core/src/tools/ipython.rs:348-359); bash and edit run inside it.
+function toolCode(args: unknown): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const code = (args as Record<string, unknown>).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+// The card title: the first line of the cell, else the tool name.
+function toolSummary(name: string, args: unknown): string {
+  const line = toolCode(args)
+    ?.split("\n")
+    .map((value) => value.trim())
+    .find(Boolean);
+  if (!line) return name;
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
+}
+
+// The cell as written, or the raw arguments as JSON for other tools.
+function toolArgsPretty(args: unknown): string | undefined {
+  const code = toolCode(args);
+  if (code !== undefined) return code;
+  if (args === undefined || args === null) return undefined;
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+// The text blocks of a `{content, details}` tool result, joined like the
+// ACP bridge does (pa-daemon/src/acp/events.rs:393-408).
+function toolResultText(result: unknown): string | undefined {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") return undefined;
+  const content = (result as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return undefined;
+  return content
+    .filter(
+      (block): block is { type: "text"; text: string } =>
+        !!block &&
+        typeof block === "object" &&
+        (block as Record<string, unknown>).type === "text" &&
+        typeof (block as Record<string, unknown>).text === "string",
+    )
+    .map((block) => block.text)
+    .join("\n");
+}
+
+function toolResultDetailsStatus(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const details = (result as Record<string, unknown>).details;
+  if (!details || typeof details !== "object") return undefined;
+  const status = (details as Record<string, unknown>).status;
+  return typeof status === "string" ? status : undefined;
+}
+
+// Image blocks are `{type: "image", data, mimeType}` (pa-agent/src/types.rs:95-101).
+function toolResultImages(result: unknown): ToolResultImage[] {
+  if (!result || typeof result !== "object") return [];
+  const content = (result as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return [];
+  const images: ToolResultImage[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const record = block as Record<string, unknown>;
+    if (
+      record.type === "image" &&
+      typeof record.data === "string" &&
+      typeof record.mimeType === "string"
+    ) {
+      images.push({ media_type: record.mimeType, data: record.data });
+    }
+  }
+  return images;
 }
 
 function modelKey(model: PrimeModelOption): string {
