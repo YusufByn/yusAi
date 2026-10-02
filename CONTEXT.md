@@ -221,10 +221,24 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 - **Télémétrie des enfants** : Prime crée les enfants sans
   `telemetryDisabled` (`pa-daemon/src/rlm_children/lifecycle.rs:124-127`) et
   le worker ignore `PRIME_AGENT_TELEMETRY` (`pa-daemon/src/agent_engine/lifecycle.rs:1071-1085`) :
-  un enfant crée `telemetry.json` (identifiant d'installation). Aucun
-  événement n'est enregistré et rien ne part sans point d'envoi configuré
-  (`pa-core/src/session_engine/telemetry.rs:1117-1129`). Inévitable sans
-  patch vendor.
+  un enfant crée `telemetry.json` (identifiant d'installation) et un client
+  de télémétrie avec le miroir local `telemetry.jsonl`, actif par défaut
+  (`pa-core/src/session_engine/telemetry.rs:1092-1100`). Prime compte sur la
+  porte « profondeur 0 » (commentaire de `rlm_children/lifecycle.rs:127-130`),
+  qui ne coupe que la télémétrie de session (`engine.rs:771`) : le crochet
+  « kernel bootstrap » n'y est pas soumis (`engine.rs:386-409`). Chaque
+  démarrage du noyau d'un enfant écrit donc une ligne dans
+  `telemetry.jsonl`. Diagnostic du 2026-10-02 : les deux lignes de 10:16Z
+  et 10:19Z suivent de 4 s la création des enfants `sub-e6bb6e0c` et
+  `sub-5a60fe37` de la conversation `942e9be0…`. Les cinq lignes du 01/10
+  (18:49Z) précèdent la coupure (`e81f5f3`, 20:58 heure locale). Rien ne
+  part : puits nul sans point d'envoi (`telemetry.rs:1084-1091`), `telemetry`
+  à `null` dans nos réglages. Le test e2e des sous-agents ne le voit pas,
+  probablement parce que le client écrit par lots toutes les 10 s
+  (`pa-telemetry/src/client.rs:40`) et que ses enfants vivent moins
+  longtemps : son assertion « pas de `telemetry.jsonl` » est un faux
+  négatif. Inévitable sans patch vendor (ou en coupant le miroir par
+  `telemetry.localMirror: false` dans les réglages de Prime).
 - **`uv` et le PATH** : le venv du noyau se construit avec `uv`, cherché dans
   le PATH ou `~/.local/bin` (`pa-core/src/kernel/bootstrap/venv/uv.rs:85-101`).
   En dev (lancé du terminal) il est trouvé ; une app empaquetée lancée du
