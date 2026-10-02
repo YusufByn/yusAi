@@ -12,8 +12,11 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
 - **Isolation** : dossier d'état `~/Library/Application Support/dev.hyrak.sinew/prime-agent`,
   socket `<TMPDIR>/yusai-prime-<hash>/daemon.sock`. Ces variables
   (`PRIME_AGENT_CODING_AGENT_DIR`, `PI_PACKAGE_DIR` en debug,
-  `PRIME_AGENT_TELEMETRY=0`) ne sont posées que sur le `Command` du
-  superviseur, jamais sur le processus IDE.
+  `PRIME_AGENT_TELEMETRY=0`, `PRIME_AGENT_KERNEL_VENV=<agent_dir>/kernel-venv`)
+  ne sont posées que sur le `Command` du superviseur, jamais sur le
+  processus IDE ; les workers en héritent. Le venv du noyau n'est donc plus
+  `~/.prime/agent/kernel-venv`, partagé avec une installation séparée de
+  Prime : la première cellule le construit avec `uv` (un peu plus lente).
 - **Daemon paresseux** : lancé à la première session Prime
   (`ensure_daemon_running`, calqué sur pa-cli).
 - **Chat Prime** (`src-tauri/src/prime_session.rs`, `src/components/chat/PrimeChatPane.tsx`) :

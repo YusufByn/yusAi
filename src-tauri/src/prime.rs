@@ -27,6 +27,12 @@ const AGENT_DIR_ENV: &str = pa_daemon::paths::AGENT_DIR_ENV;
 const PACKAGE_DIR_ENV: &str = "PI_PACKAGE_DIR";
 /// Interrupteur de télémétrie de Prime (pa-telemetry/src/env.rs:27-33).
 const TELEMETRY_ENV: &str = "PRIME_AGENT_TELEMETRY";
+/// Venv du noyau Python. Sans elle, Prime prend `~/.prime/agent/kernel-venv`
+/// (pa-core/src/kernel/bootstrap/venv/layout.rs:20-29), partagé avec une
+/// installation séparée de Prime qui pourrait le reconstruire à une autre
+/// version du runtime. Les workers l'héritent du superviseur
+/// (pa-daemon/src/supervisor/supervision.rs:433-447).
+const KERNEL_VENV_ENV: &str = "PRIME_AGENT_KERNEL_VENV";
 
 /// Budget de démarrage du superviseur (pa-cli: `DAEMON_STARTUP_TIMEOUT_MS`).
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -166,11 +172,12 @@ pub fn daemon_socket_path() -> PathBuf {
 /// modèles autorisés n'en dépend pas (model_allowlist.rs:31-91). La
 /// télémétrie de session des workers se coupe au `Create`
 /// (prime_session.rs).
-fn supervisor_env(agent_dir: &Path) -> Vec<(&'static str, OsString)> {
+fn supervisor_env(agent_dir: &Path, kernel_venv: &Path) -> Vec<(&'static str, OsString)> {
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut env = vec![
         (AGENT_DIR_ENV, agent_dir.as_os_str().to_owned()),
         (TELEMETRY_ENV, OsString::from("0")),
+        (KERNEL_VENV_ENV, kernel_venv.as_os_str().to_owned()),
     ];
     #[cfg(debug_assertions)]
     env.push((PACKAGE_DIR_ENV, dev_package_dir().into_os_string()));
@@ -224,17 +231,36 @@ pub async fn ensure_daemon_running(
 /// [`ensure_daemon_running`] avec un exécutable et un dossier d'état
 /// explicites (tests). Équivalent de `ensure_daemon_running` /
 /// `ensure_daemon_running_with` de pa-cli/src/interactive_mode/daemon.rs:61-117.
+/// Le venv du noyau est `<agent_dir>/kernel-venv`.
 pub async fn ensure_daemon_running_with(
     exe: &Path,
     socket_path: &Path,
     agent_dir: &Path,
+) -> Result<(DaemonClient, UnboundedReceiver<DaemonClientEvent>)> {
+    ensure_daemon_running_with_kernel_venv(
+        exe,
+        socket_path,
+        agent_dir,
+        &agent_dir.join("kernel-venv"),
+    )
+    .await
+}
+
+/// [`ensure_daemon_running_with`] avec un venv de noyau explicite : les
+/// tests qui exécutent des cellules gardent un venv stable d'un passage à
+/// l'autre au lieu d'en construire un par dossier temporaire.
+pub async fn ensure_daemon_running_with_kernel_venv(
+    exe: &Path,
+    socket_path: &Path,
+    agent_dir: &Path,
+    kernel_venv: &Path,
 ) -> Result<(DaemonClient, UnboundedReceiver<DaemonClientEvent>)> {
     match probe_daemon(socket_path).await {
         DaemonProbe::Current => return DaemonClient::connect_with_retry(socket_path).await,
         DaemonProbe::Stale(client) => shutdown_stale_daemon(*client, socket_path).await?,
         DaemonProbe::Absent => {}
     }
-    spawn_supervisor_detached(exe, socket_path, agent_dir)?;
+    spawn_supervisor_detached(exe, socket_path, agent_dir, kernel_venv)?;
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     loop {
         match probe_daemon(socket_path).await {
@@ -304,7 +330,12 @@ async fn shutdown_stale_daemon(client: DaemonClient, socket_path: &Path) -> Resu
 /// (pa-cli/src/interactive_mode/daemon.rs:177-212), avec le dossier d'état
 /// et l'env de [`supervisor_env`]. Le stderr du superviseur va dans
 /// `<agent_dir>/yusai-supervisor.log`.
-fn spawn_supervisor_detached(exe: &Path, socket_path: &Path, agent_dir: &Path) -> Result<()> {
+fn spawn_supervisor_detached(
+    exe: &Path,
+    socket_path: &Path,
+    agent_dir: &Path,
+    kernel_venv: &Path,
+) -> Result<()> {
     std::fs::create_dir_all(agent_dir)
         .with_context(|| format!("create the Prime agent dir {}", agent_dir.display()))?;
     let stderr = std::fs::OpenOptions::new()
@@ -320,7 +351,7 @@ fn spawn_supervisor_detached(exe: &Path, socket_path: &Path, agent_dir: &Path) -
         .arg("--agent-dir")
         .arg(agent_dir)
         .current_dir(agent_dir)
-        .envs(supervisor_env(agent_dir))
+        .envs(supervisor_env(agent_dir, kernel_venv))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
@@ -352,4 +383,22 @@ async fn ping(socket_path: PathBuf) -> Result<()> {
     println!("hello: {}", client.hello());
     client.close();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supervisor_env_isolates_state_telemetry_and_kernel_venv() {
+        let env = supervisor_env(Path::new("/agent"), Path::new("/venv"));
+        let value = |key: &str| {
+            env.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(value(AGENT_DIR_ENV), Some(OsString::from("/agent")));
+        assert_eq!(value(TELEMETRY_ENV), Some(OsString::from("0")));
+        assert_eq!(value(KERNEL_VENV_ENV), Some(OsString::from("/venv")));
+    }
 }
