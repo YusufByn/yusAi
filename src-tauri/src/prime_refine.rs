@@ -54,6 +54,9 @@ use crate::prime_lessons::{
 pub enum RefineOrigin {
     /// Le bouton « Retenir ».
     Retain,
+    /// La fermeture d'une conversation (`prime_close`), ou sa reprise au
+    /// démarrage suivant.
+    Close,
 }
 
 impl RefineOrigin {
@@ -61,6 +64,7 @@ impl RefineOrigin {
     pub fn actor(self) -> &'static str {
         match self {
             Self::Retain => "refine:retain",
+            Self::Close => "refine:close",
         }
     }
 }

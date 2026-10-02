@@ -2414,6 +2414,195 @@ async fn a_refine_and_a_turn_can_overlap() {
     stop_scripted_thread(client, &session, &root).await;
 }
 
+/// Le dernier état (`session_state`) écrit dans le fichier d'un fil.
+fn last_session_state(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|row| row["type"] == "session_state")
+        .and_then(|row| row["state"]["status"].as_str().map(str::to_string))
+}
+
+/// Fermeture d'une conversation : la fermeture courte refine sans tuer ; la
+/// mise en veille tue le worker (fil `archived`), et le fil se rouvre avec
+/// son modèle et son niveau de réflexion ; une refine de veille qui échoue
+/// n'empêche pas le `Kill` et laisse `pending = 1`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_refines_then_puts_the_worker_to_sleep_and_the_thread_reopens() {
+    let _alone = REFINE_TESTS.lock().await;
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::{AppStore, LessonScope};
+    use sinew_desktop_lib::prime_close::{close_conversation, CloseAction};
+    use sinew_desktop_lib::prime_lessons::ThreadContext;
+    use sinew_desktop_lib::prime_session::{
+        kill_session, open_thread, prompt, session_config, set_thinking_level, thread_path,
+    };
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let plan = serde_json::json!({
+        "summary": "close",
+        "rationale": "trajectory evidence",
+        "expectedOutcome": "reused",
+        "edits": [{ "action": "create", "kind": "memory", "id": "yusai-close",
+                    "title": "Fermeture", "content": "Une leçon de fermeture." }],
+    });
+    // Chaque worker lit le script depuis le début : le worker rouvert reçoit
+    // « ok » à son premier appel, qui n'est pas un plan de refine.
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({
+            "engine": "faux",
+            "reasoning": true,
+            "responses": [{ "text": "ok" }, { "text": plan.to_string() }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-close").unwrap();
+    let config = serde_json::json!({
+        "cwd": workspace.to_string_lossy(),
+        "script": script.to_string_lossy(),
+    });
+    let opened = open_thread(&client, config.clone(), &path)
+        .await
+        .expect("thread opened");
+    let session = opened.active_session_id.clone();
+    prompt(&client, &session, "salut")
+        .await
+        .expect("prompt admitted");
+    let turn = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(turn.is_ok(), "turn ended");
+    tokio::spawn(async move { while events.recv().await.is_some() {} });
+    // Ce que compte `prime_prompt`.
+    store.note_user_turn("conv-close").unwrap();
+    set_thinking_level(&client, &session, "high")
+        .await
+        .expect("thinking level set");
+    let before = session_config(&client, &session).await.unwrap();
+    let thread = ThreadContext {
+        conversation_id: "conv-close".to_string(),
+        workspace_id: workspace.to_string_lossy().into_owned(),
+    };
+    let close = |session: String, action: CloseAction| {
+        let (client, socket_path, store, agent_dir, thread) = (
+            &client,
+            socket_path.clone(),
+            store.clone(),
+            agent_dir.clone(),
+            thread.clone(),
+        );
+        async move {
+            close_conversation(
+                client,
+                &socket_path,
+                store,
+                agent_dir,
+                &session,
+                thread,
+                action,
+                || false,
+            )
+            .await
+        }
+    };
+
+    // Fermeture courte : refine, le worker reste.
+    let outcome = close(session.clone(), CloseAction::Refine).await;
+    let run = outcome.refine.expect("a turn to refine").expect("refined");
+    assert!(!outcome.killed);
+    let report = run.report.expect("imported");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    let history = store.lesson_events(&report.created[0]).unwrap();
+    assert_eq!(history[0].actor, "refine:close");
+    let state = store.refine_state("conv-close").unwrap();
+    assert_eq!(state.user_turns_since_refine, 0);
+    assert!(!state.pending);
+    assert!(
+        session_config(&client, &session).await.is_ok(),
+        "still alive"
+    );
+
+    // Mise en veille sans nouveau tour : pas de refine, le worker est tué.
+    let outcome = close(session.clone(), CloseAction::Sleep).await;
+    assert!(outcome.refine.is_none());
+    assert!(outcome.killed);
+    assert!(session_config(&client, &session).await.is_err(), "killed");
+    assert_eq!(last_session_state(&path).as_deref(), Some("archived"));
+
+    // Le fil se rouvre depuis son fichier, modèle et niveau restaurés.
+    let reopened = open_thread(&client, config.clone(), &path)
+        .await
+        .expect("thread reopened");
+    assert_ne!(reopened.active_session_id, session);
+    assert!(reopened
+        .messages
+        .iter()
+        .any(|message| message.to_string().contains("salut")));
+    let after = session_config(&client, &reopened.active_session_id)
+        .await
+        .unwrap();
+    assert_eq!(after.thinking_level.as_deref(), Some("high"));
+    assert_eq!(
+        after
+            .model
+            .as_ref()
+            .map(|model| (&model.provider, &model.id)),
+        before
+            .model
+            .as_ref()
+            .map(|model| (&model.provider, &model.id))
+    );
+    assert_ne!(last_session_state(&path).as_deref(), Some("archived"));
+
+    // Mise en veille dont la refine échoue : tué quand même, `pending = 1`.
+    store.note_user_turn("conv-close").unwrap();
+    let outcome = close(reopened.active_session_id.clone(), CloseAction::Sleep).await;
+    assert!(outcome.refine_failed(), "outcome: {outcome:?}");
+    assert!(outcome.killed);
+    let state = store.refine_state("conv-close").unwrap();
+    assert!(state.pending);
+    assert_eq!(state.user_turns_since_refine, 1);
+    assert_eq!(last_session_state(&path).as_deref(), Some("archived"));
+    let scope = LessonScope {
+        workspace_id: thread.workspace_id.clone(),
+        project_type: None,
+    };
+    assert_eq!(store.applicable_lessons(&scope).unwrap().len(), 1);
+
+    let _ = kill_session(&client, &reopened.active_session_id).await;
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `uv` construit le venv du noyau (pa-core/src/kernel/bootstrap/venv/uv.rs:85-101).
 fn uv_available() -> bool {
     let on_path = std::env::var_os("PATH")

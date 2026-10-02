@@ -206,7 +206,17 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   l'auteur `refine:retain` ; pendant une refine de la file, le relais
   n'importe rien pour la session (`refine_in_flight`), la file importe la
   sienne puis rattrape les autres. Vérifié dans un banc d'essai navigateur
-  (IPC simulé), pas encore dans l'app.
+  (IPC simulé), pas encore dans l'app. Fermeture (`src-tauri/src/prime_close.rs`) :
+  le panneau signale son affichage par fenêtre (`prime_set_displayed`, une
+  fenêtre détruite n'affiche plus rien), le relais suit les tours
+  (`agent_start` / `agent_end`), `prime_prompt` compte les tours
+  utilisateur (`note_user_turn`). Toutes les 60 s, un relevé décide
+  (`close_action`) : 10 min cachée et 3 tours → refine `refine:close` ;
+  90 min cachée et sans activité (ni tour, ni sous-agent `running`) →
+  refine s'il y a un tour, puis `Kill` (sauf si la conversation a repris
+  entre-temps). Refine ratée → `pending = 1`, et pas de nouvel essai de
+  fermeture courte avant un prompt. Test e2e
+  `closing_refines_then_puts_the_worker_to_sleep_and_the_thread_reopens`.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

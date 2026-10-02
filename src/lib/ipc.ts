@@ -765,6 +765,12 @@ export const api = {
   primeRetain(activeSessionId: string, instructions: string | null) {
     return invoke<PrimeImportReport>("prime_retain", { activeSessionId, instructions });
   },
+  // Le panneau Prime de la conversation est (ou n'est plus) affiché dans
+  // cette fenêtre : une conversation affichée nulle part finit fermée
+  // (prime_close.rs).
+  primeSetDisplayed(conversationId: string, displayed: boolean) {
+    return invoke<void>("prime_set_displayed", { conversationId, displayed });
+  },
   primeAbort(activeSessionId: string) {
     return invoke<void>("prime_abort", { activeSessionId });
   },

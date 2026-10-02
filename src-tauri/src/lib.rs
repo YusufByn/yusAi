@@ -105,6 +105,7 @@ mod models;
 mod platform;
 pub mod prime;
 pub mod prime_auth;
+pub mod prime_close;
 pub mod prime_diffs;
 pub mod prime_guidance;
 pub mod prime_lessons;
@@ -248,11 +249,13 @@ pub fn run() {
             }
             start_remote_if_enabled(app.handle());
             prime_session::reap_orphans_at_startup(app.handle().clone());
+            prime_session::start_close_timer(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::Destroyed => {
                 remove_window_workspace(&window.app_handle(), window.label().to_string());
+                prime_session::forget_window(window.app_handle(), window.label());
             }
             tauri::WindowEvent::Focused(true) => {
                 focus_window_workspace(&window.app_handle(), window.label().to_string());
@@ -404,6 +407,7 @@ pub fn run() {
             prime_session::prime_create_session,
             prime_session::prime_prompt,
             prime_session::prime_retain,
+            prime_session::prime_set_displayed,
             prime_session::prime_abort,
             prime_session::prime_close_session,
             prime_session::prime_rlm_children,

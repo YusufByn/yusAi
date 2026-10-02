@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use pa_tui::daemon_client::{DaemonClient, DaemonClientEvent};
@@ -28,6 +28,7 @@ use serde_json::{json, Map, Value};
 use sinew_app::tool_run::FileChange;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::prime_close::{close_action, close_conversation, CloseTracker, SCAN_EVERY};
 use crate::prime_diffs::PrimeDiffs;
 use crate::prime_guidance::{with_guidance, Guidance};
 use crate::prime_lessons::{
@@ -46,10 +47,14 @@ pub struct PrimeState {
     client: Mutex<Option<DaemonClient>>,
     sessions: StdMutex<HashMap<String, ThreadContext>>,
     diffs: StdMutex<PrimeDiffs>,
+    /// Affichage et activité, pour la fermeture des conversations.
+    close: CloseTracker,
 }
 
 impl PrimeState {
     fn track(&self, active_session_id: &str, thread: ThreadContext) {
+        self.close
+            .session_opened(active_session_id, &thread.conversation_id, Instant::now());
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.insert(active_session_id.to_string(), thread);
         }
@@ -66,6 +71,7 @@ impl PrimeState {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.remove(active_session_id);
         }
+        self.close.session_closed(active_session_id);
         self.with_diffs(|diffs| diffs.forget(active_session_id));
     }
 
@@ -846,6 +852,13 @@ fn spawn_event_relay(
                     match &payload {
                         PrimeEventPayload::SessionEvent { active_session_id, event } => {
                             state.with_diffs(|diffs| diffs.observe(active_session_id, event));
+                            match event["type"].as_str() {
+                                Some("agent_start") => state.close.turn_started(active_session_id),
+                                Some("agent_end") => {
+                                    state.close.turn_ended(active_session_id, Instant::now());
+                                }
+                                _ => {}
+                            }
                             if event["type"] == "tool_execution_end" {
                                 guard_global_harness(&app, &state, active_session_id);
                             }
@@ -856,7 +869,7 @@ fn spawn_event_relay(
                             }
                         }
                         PrimeEventPayload::SessionClosed { active_session_id, .. } => {
-                            state.with_diffs(|diffs| diffs.forget(active_session_id));
+                            state.untrack(active_session_id);
                         }
                         PrimeEventPayload::Disconnected { .. } => {
                             state.with_diffs(PrimeDiffs::clear);
@@ -1120,7 +1133,131 @@ pub async fn prime_prompt(
     let client = connected_client(&app, &state).await.map_err(error_text)?;
     prompt(&client, &active_session_id, &message)
         .await
-        .map_err(error_text)
+        .map_err(error_text)?;
+    // Un nouveau tour utilisateur, compté pour la fermeture.
+    state
+        .close
+        .user_prompted(&active_session_id, Instant::now());
+    if let (Some(thread), Some(store)) = (
+        state.thread(&active_session_id),
+        app.try_state::<crate::DesktopState>()
+            .map(|desktop| desktop.store.clone()),
+    ) {
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = store.note_user_turn(&thread.conversation_id) {
+                tracing::warn!(error = %error, "prime user turn not counted");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Le panneau Prime d'une conversation est (ou n'est plus) affiché dans la
+/// fenêtre appelante.
+#[tauri::command]
+pub fn prime_set_displayed(
+    window: tauri::Window,
+    state: State<'_, PrimeState>,
+    conversation_id: String,
+    displayed: bool,
+) {
+    state
+        .close
+        .set_displayed(&conversation_id, window.label(), displayed, Instant::now());
+}
+
+/// Une fenêtre détruite n'affiche plus aucune conversation.
+pub fn forget_window(app: &AppHandle, label: &str) {
+    if let Some(state) = app.try_state::<PrimeState>() {
+        state.close.forget_window(label, Instant::now());
+    }
+}
+
+/// Le minuteur de fermeture : toutes les [`SCAN_EVERY`], les conversations
+/// à fermer (voir `prime_close`).
+pub fn start_close_timer(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(SCAN_EVERY).await;
+            scan_for_closes(&app).await;
+        }
+    });
+}
+
+async fn scan_for_closes(app: &AppHandle) {
+    let state = app.state::<PrimeState>();
+    let Some(store) = app
+        .try_state::<crate::DesktopState>()
+        .map(|desktop| desktop.store.clone())
+    else {
+        return;
+    };
+    for (active_session_id, conversation_id) in state.close.sessions() {
+        let Some(snapshot) = state.close.snapshot(&active_session_id) else {
+            continue;
+        };
+        let turns = {
+            let store = store.clone();
+            tauri::async_runtime::spawn_blocking(move || store.refine_state(&conversation_id))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map_or(0, |refine| refine.user_turns_since_refine)
+        };
+        let now = Instant::now();
+        if close_action(now, &snapshot, turns, false).is_none() {
+            continue;
+        }
+        // Les sous-agents vivants, demandés seulement maintenant.
+        let Ok(client) = connected_client(app, &state).await else {
+            return;
+        };
+        let subagents_running = rlm_children(&client, &active_session_id)
+            .await
+            .map(|children| children.iter().any(|child| child.status == "running"))
+            .unwrap_or(true);
+        let Some(action) = close_action(now, &snapshot, turns, subagents_running) else {
+            continue;
+        };
+        let Some(thread) = state.thread(&active_session_id) else {
+            continue;
+        };
+        if !state.close.begin_close(&active_session_id) {
+            continue;
+        }
+        let (app, store) = (app.clone(), store.clone());
+        tauri::async_runtime::spawn(async move {
+            let watched = (app.clone(), active_session_id.clone());
+            let back_in_use = move || {
+                watched
+                    .0
+                    .state::<PrimeState>()
+                    .close
+                    .snapshot(&watched.1)
+                    .is_some_and(|now| now.hidden_since.is_none() || now.turn_running)
+            };
+            tracing::info!(?action, session = %active_session_id, "closing prime conversation");
+            let outcome = close_conversation(
+                &client,
+                &crate::prime::daemon_socket_path(),
+                store,
+                crate::prime::agent_dir(),
+                &active_session_id,
+                thread,
+                action,
+                back_in_use,
+            )
+            .await;
+            let state = app.state::<PrimeState>();
+            if outcome.killed {
+                state.untrack(&active_session_id);
+            } else {
+                state
+                    .close
+                    .end_close(&active_session_id, outcome.refine_failed());
+            }
+        });
+    }
 }
 
 #[tauri::command]

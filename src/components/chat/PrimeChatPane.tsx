@@ -419,6 +419,16 @@ export function PrimeChatPane({
     return creating;
   }, [workspacePath, conversationId]);
 
+  // A conversation shown in no window is eventually closed by the backend
+  // (refine, then its worker is killed after 90 idle minutes, prime_close.rs).
+  useEffect(() => {
+    if (!active) return;
+    void api.primeSetDisplayed(conversationId, true).catch(console.error);
+    return () => {
+      void api.primeSetDisplayed(conversationId, false).catch(console.error);
+    };
+  }, [active, conversationId]);
+
   useEffect(() => {
     if (!active || sessionIdRef.current || creatingRef.current) return;
     void ensureSession().catch((err) => {
