@@ -324,6 +324,8 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   fil pour la refine du démarrage). Correctif (`prime_snapshot.rs`) :
   `open_thread` retire ces variables des photos du fil (sous-agents
   compris) avant chaque `Create` et les note écartées dans le manifeste.
+  Test e2e avec vrai noyau `reopening_a_thread_never_empties_a_file_its_kernel_wrote`
+  (échoue sans le nettoyage : fichier vidé).
   Limite : une relance du noyau en cours de session passe sans nous. Une
   skill que Prime ne charge pas (vide, sans description) reste dans
   l'onglet Skills, « Invalid » avec la raison, et n'est pas passée.

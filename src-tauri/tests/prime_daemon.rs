@@ -2678,6 +2678,173 @@ async fn a_python_skill_of_our_folders_runs_in_the_kernel() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Le tour d'une session jusqu'à `agent_end` : la fin de sa dernière
+/// cellule.
+async fn run_turn_cell(
+    client: &pa_tui::daemon_client::DaemonClient,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<pa_tui::daemon_client::DaemonClientEvent>,
+    session: &str,
+    text: &str,
+) -> serde_json::Value {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    sinew_desktop_lib::prime_session::prompt(client, session, text)
+        .await
+        .expect("prompt admitted");
+    let mut cell = None;
+    // La première construction du venv peut prendre quelques minutes.
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        while let Some(event) = events.recv().await {
+            let DaemonClientEvent::SessionEvent {
+                active_session_id,
+                event,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if active_session_id != session {
+                continue;
+            }
+            if event["type"] == "tool_execution_end" {
+                cell = Some(event.clone());
+            }
+            if event["type"] == "agent_end" {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "turn ended, cell: {cell:?}");
+    cell.expect("the cell ran")
+}
+
+/// Le bug de `resume-diff` : une cellule écrit un fichier avec
+/// `with open(chemin, "w") as f`, le noyau garde `f` dans sa photo, et la
+/// restauration de la photo à la réouverture du fil le vidait
+/// (`open(chemin, "w")` par dill). `open_thread` retire `f` de la photo :
+/// le fichier reste intact, et le manifeste dit pourquoi `f` manque.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn reopening_a_thread_never_empties_a_file_its_kernel_wrote() {
+    use sinew_desktop_lib::prime::ensure_daemon_running_with_kernel_venv;
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, thread_path};
+
+    if !uv_available() {
+        eprintln!("uv not found; skipping the live-kernel snapshot e2e");
+        return;
+    }
+    let kernel_venv = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prime-kernel-venv");
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let note = workspace.join("SKILL.md");
+    let script = |name: &str, code: String| {
+        let path = root.join(name);
+        std::fs::write(
+            &path,
+            serde_json::json!({ "engine": "faux", "responses": [
+                { "content": [{ "type": "toolCall", "name": "ipython", "arguments": { "code": code } }] },
+                { "text": "fini" },
+            ] })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    };
+    let write = script(
+        "write.json",
+        format!(
+            "path = {:?}\nwith open(path, \"w\") as f:\n    f.write(\"contenu gardé\")\nprint(f.closed)",
+            note.to_string_lossy()
+        ),
+    );
+    let read = script(
+        "read.json",
+        format!(
+            "print(repr(open({:?}).read()), 'f' in globals(), 'path' in globals())",
+            note.to_string_lossy()
+        ),
+    );
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) =
+        ensure_daemon_running_with_kernel_venv(&exe, &socket_path, &agent_dir, &kernel_venv)
+            .await
+            .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-snapshot").unwrap();
+    let config = |script: &PathBuf| {
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        })
+    };
+
+    let opened = open_thread(&client, config(&write), &path)
+        .await
+        .expect("thread opened");
+    let cell = run_turn_cell(&client, &mut events, &opened.active_session_id, "écris").await;
+    assert_ne!(cell["isError"], true, "cell failed: {cell}");
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), "contenu gardé");
+    kill_session(&client, &opened.active_session_id)
+        .await
+        .expect("session killed");
+    // La photo du noyau garde `f` (écrite à la fermeture du noyau).
+    let artifacts = agent_dir.join("session-artifacts").join("conv-snapshot");
+    let manifest_path = artifacts.join("kernel-state.json");
+    let manifest = |path: &std::path::Path| -> serde_json::Value {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let saved_f = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let saved = manifest(&manifest_path)["savedNames"].clone();
+            if saved
+                .as_array()
+                .is_some_and(|names| names.iter().any(|name| name == "f"))
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+    assert!(saved_f.is_ok(), "manifest: {}", manifest(&manifest_path));
+
+    let reopened = open_thread(&client, config(&read), &path)
+        .await
+        .expect("thread reopened");
+    let cell = run_turn_cell(&client, &mut events, &reopened.active_session_id, "relis").await;
+    assert_ne!(cell["isError"], true, "cell failed: {cell}");
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), "contenu gardé");
+    let output = cell.to_string();
+    assert!(output.contains("contenu gardé"), "cell: {output}");
+    // `path` revient, `f` non.
+    assert!(output.contains("False True"), "cell: {output}");
+    let skipped = manifest(&manifest_path)["skipped"].to_string();
+    assert!(
+        skipped.contains("file object dropped by yusAi")
+            || !artifacts.join("kernel-state.dill").exists(),
+        "manifest: {}",
+        manifest(&manifest_path)
+    );
+
+    kill_session(&client, &reopened.active_session_id)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Une skill markdown de yusAi qui porte le nom d'une skill Python de Prime
 /// la masque : passée au `Create`, `edit` n'existe plus dans le noyau. yusAi
 /// l'écarte donc, et le modèle lit la consigne de la renommer.
