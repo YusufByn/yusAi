@@ -34,7 +34,7 @@ const OPENAI_RESPONSES_IMAGE_MODEL: &str = "gpt-6-astra";
 const NANO_BANANA_MODEL: &str = "gemini-3.1-flash-image-preview";
 const NANO_BANANA_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent";
-const OPENAI_SUBSCRIPTION_IMAGE_INSTRUCTIONS: &str = "You are Sinew, a concise coding assistant. When the user asks for an image, immediately call the image_generation tool with their prompt. Do not reply with text.";
+const OPENAI_SUBSCRIPTION_IMAGE_INSTRUCTIONS: &str = "You are yusAi, a concise coding assistant. When the user asks for an image, immediately call the image_generation tool with their prompt. Do not reply with text.";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const USER_AGENT: &str = "sinew/0.1";
 

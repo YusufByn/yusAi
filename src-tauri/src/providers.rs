@@ -709,7 +709,7 @@ pub(super) fn openai_login_success_html() -> String {
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Sinew connected</title>
+    <title>yusAi connected</title>
     <style>
       body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0b0d;color:#f4f4f5;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
       main{max-width:420px;padding:32px;text-align:center}
@@ -717,7 +717,7 @@ pub(super) fn openai_login_success_html() -> String {
       p{margin:0;color:#a1a1aa;line-height:1.5}
     </style>
   </head>
-  <body><main><h1>OpenAI is connected</h1><p>You can close this tab and return to Sinew.</p></main></body>
+  <body><main><h1>OpenAI is connected</h1><p>You can close this tab and return to yusAi.</p></main></body>
 </html>"#
         .to_string()
 }
@@ -727,7 +727,7 @@ pub(super) fn anthropic_login_success_html() -> String {
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Sinew connected</title>
+    <title>yusAi connected</title>
     <style>
       body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0b0d;color:#f4f4f5;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
       main{max-width:420px;padding:32px;text-align:center}
@@ -735,7 +735,7 @@ pub(super) fn anthropic_login_success_html() -> String {
       p{margin:0;color:#a1a1aa;line-height:1.5}
     </style>
   </head>
-  <body><main><h1>Anthropic is connected</h1><p>You can close this tab and return to Sinew.</p></main></body>
+  <body><main><h1>Anthropic is connected</h1><p>You can close this tab and return to yusAi.</p></main></body>
 </html>"#
         .to_string()
 }
@@ -745,7 +745,7 @@ pub(super) fn google_login_success_html() -> String {
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Sinew connected</title>
+    <title>yusAi connected</title>
     <style>
       body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0b0d;color:#f4f4f5;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
       main{max-width:420px;padding:32px;text-align:center}
@@ -753,7 +753,7 @@ pub(super) fn google_login_success_html() -> String {
       p{margin:0;color:#a1a1aa;line-height:1.5}
     </style>
   </head>
-  <body><main><h1>Google is connected</h1><p>You can close this tab and return to Sinew.</p></main></body>
+  <body><main><h1>Google is connected</h1><p>You can close this tab and return to yusAi.</p></main></body>
 </html>"#
         .to_string()
 }
@@ -765,7 +765,7 @@ pub(super) fn openai_login_error_html(message: &str) -> String {
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Sinew connection failed</title>
+    <title>yusAi connection failed</title>
     <style>
       body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0b0d;color:#f4f4f5;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
       main{{max-width:480px;padding:32px;text-align:center}}

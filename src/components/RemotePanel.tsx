@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/react";
 import { api } from "../lib/ipc";
+import { APP_NAME } from "../branding";
 import type { RemoteDevice, RemoteStatus } from "../types";
 
 type Props = {
@@ -112,7 +113,7 @@ export function RemotePanel({ initialStatus = null, onStatusChange }: Props) {
           <div className="remote-panel__head-text">
             <h1>Remote</h1>
             <p>
-              Drive Sinew chat from a paired phone over remote.sinew-ide.com.
+              Drive {APP_NAME} chat from a paired phone over remote.sinew-ide.com.
               Messages stay end-to-end encrypted between this PC and your devices.
             </p>
           </div>

@@ -653,7 +653,7 @@ fn repository_snapshot_for_repo(
 fn ensure_git_available() -> Result<PathBuf> {
     resolve_executable("git").ok_or_else(|| {
         anyhow::anyhow!(
-            "Git is not installed or could not be found. Install Git and restart Sinew."
+            "Git is not installed or could not be found. Install Git and restart yusAi."
         )
     })
 }

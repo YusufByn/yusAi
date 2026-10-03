@@ -46,7 +46,9 @@ pub const MCP_OAUTH_CALLBACK_PATH: &str = "/mcp/oauth/callback";
 const OAUTH_REDIRECT_URI: &str = "http://localhost:1458/mcp/oauth/callback";
 const OAUTH_AUTH_FILE: &str = "mcp-auth.json";
 const OAUTH_REFRESH_SKEW_MS: i64 = 60_000;
-const OAUTH_CLIENT_NAME: &str = "Sinew";
+// Envoyé seulement à l'enregistrement d'un client (nouvelle connexion) ;
+// une connexion existante rafraîchit avec son `client_id` enregistré.
+const OAUTH_CLIENT_NAME: &str = "yusAi";
 const OAUTH_CLIENT_URI: &str = "https://github.com/Paseru/sinew";
 const OAUTH_CLIENT_ID: &str = "sinew-mcp-client";
 #[cfg(windows)]

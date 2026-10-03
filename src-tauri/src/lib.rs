@@ -148,6 +148,13 @@ pub fn run() {
 
     let store = AppStore::open_default().expect("unable to open app store");
     prime_session::adopt_prime_threads(&store);
+    match store.replace_system_prompt(OLD_DEFAULT_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT) {
+        Ok(0) => {}
+        Ok(replaced) => tracing::info!(replaced, "default system prompt renamed"),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "default system prompt not renamed")
+        }
+    }
     let openrouter_models = store.load_openrouter_models().unwrap_or_default();
     let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
     // Même construction que `AnthropicProvider::from_default_sources`, en

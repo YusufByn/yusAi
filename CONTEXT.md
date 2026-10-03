@@ -342,6 +342,23 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   démarrage (`prime_session::adopt_prime_threads`, marqué
   `prime.threadsAdopted` dans `app_settings`) : fil Prime et aucun message
   Sinew → Prime ; les deux → Sinew.
+- **« Sinew » devient « yusAi » dans les libellés** (commit 12c) : bascule
+  de moteur, texte de Remote, titres de fenêtre et menu du Dock
+  (`APP_NAME` de `state.rs`, comme celui de `src/branding.ts`),
+  notification Remote, erreur Git, pages de retour OAuth (fournisseurs et
+  MCP), prompt système par défaut et instructions de secours (OpenAI,
+  image), note du `CLAUDE.md` créé, `APP_TITLE` d'OpenRouter,
+  `OAUTH_CLIENT_NAME` de MCP (envoyé seulement à l'enregistrement d'une
+  nouvelle connexion ; les connexions existantes rafraîchissent avec leur
+  `client_id`, pas de réautorisation). Inchangés : `dev.hyrak.sinew`, le
+  binaire `Sinew`, les crates, `productName` « YusAi », l'id interne
+  `sinew` du moteur, les clés `sinew.*`, les User-Agent, le lien GitHub
+  `Paseru/sinew`. Au démarrage, une conversation dont le prompt système
+  stocké est exactement l'ancien prompt par défaut passe au nouveau
+  (`AppStore::replace_system_prompt`). Ce prompt stocké n'est pas celui
+  que reçoit le modèle : les tours, le contexte et la compaction prennent
+  `state.system_prompt` (`turns.rs:75-76`, `swarm.rs:266-267`), le même
+  pour toutes les conversations.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
@@ -578,7 +595,6 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
    enfants meurent avec le parent : après un redémarrage, il faudrait
    rouvrir leur fichier (`<agent_dir>/session-artifacts/<session du
    parent>/<enfant>/`, `pa-daemon/src/rlm_children.rs:869-882`).
-   Renommer « Sinew » en « yusAi ».
 4. Fermer une seule fenêtre ne tue pas ses sessions avant la sortie de l'app.
    Inversement, deux fenêtres sur la même conversation partagent la session :
    en fermer une la tue, l'autre la rouvre depuis le fichier.

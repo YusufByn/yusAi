@@ -20,7 +20,7 @@ use crate::{
 const API_BASE_URL: &str = "https://api.openai.com/v1";
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub(crate) const USER_AGENT: &str = "sinew/0.1";
-const FALLBACK_INSTRUCTIONS: &str = "You are Sinew, a concise coding assistant.";
+const FALLBACK_INSTRUCTIONS: &str = "You are yusAi, a concise coding assistant.";
 
 #[derive(Clone)]
 pub struct OpenAiConfig {

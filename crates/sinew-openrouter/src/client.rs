@@ -18,7 +18,7 @@ use crate::{
 const BASE_URL: &str = "https://openrouter.ai/api/v1";
 const USER_AGENT: &str = "Sinew/0.1";
 const APP_REFERER: &str = "https://github.com/Paseru/sinew";
-const APP_TITLE: &str = "Sinew";
+const APP_TITLE: &str = "yusAi";
 const CACHE_BREAKPOINTS: usize = 4;
 
 #[derive(Clone)]

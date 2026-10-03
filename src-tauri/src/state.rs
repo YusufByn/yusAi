@@ -1,6 +1,16 @@
 use crate::*;
 
-pub(super) const DEFAULT_SYSTEM_PROMPT: &str = "You are Sinew, a coding assistant. You build context by examining the codebase first without making assumptions or jumping to conclusions. ALWAYS check for a dedicated tool that fits the task before falling back to the shell/bash tool. You keep your responses concise without repeating yourself.";
+/// Nom de l'app dans les libellés visibles (comme `APP_NAME` de
+/// `src/branding.ts`) ; le binaire, l'identifiant et les crates gardent
+/// « Sinew ».
+pub(super) const APP_NAME: &str = "yusAi";
+
+/// Prompt système par défaut d'avant le renommage : une conversation qui
+/// l'a gardé tel quel passe au nouveau au démarrage
+/// (`AppStore::replace_system_prompt`).
+pub(super) const OLD_DEFAULT_SYSTEM_PROMPT: &str = "You are Sinew, a coding assistant. You build context by examining the codebase first without making assumptions or jumping to conclusions. ALWAYS check for a dedicated tool that fits the task before falling back to the shell/bash tool. You keep your responses concise without repeating yourself.";
+
+pub(super) const DEFAULT_SYSTEM_PROMPT: &str = "You are yusAi, a coding assistant. You build context by examining the codebase first without making assumptions or jumping to conclusions. ALWAYS check for a dedicated tool that fits the task before falling back to the shell/bash tool. You keep your responses concise without repeating yourself.";
 pub(super) const WORKSPACE_INSTRUCTIONS_FILE: &str = "AGENTS.md";
 pub(super) const WORKSPACE_DESIGN_FILE: &str = "DESIGN.md";
 pub(super) const AGENT_EVENT_NAME: &str = "agent-event";

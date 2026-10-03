@@ -899,6 +899,18 @@ impl AppStore {
         Ok(())
     }
 
+    /// Remplace le prompt système des conversations qui ont exactement
+    /// `old` ; un prompt différent reste tel quel. Rend le nombre de
+    /// conversations changées.
+    pub fn replace_system_prompt(&self, old: &str, new: &str) -> Result<usize> {
+        let conn = self.connection()?;
+        conn.execute(
+            "update conversations set system_prompt = ?2 where system_prompt = ?1",
+            params![old, new],
+        )
+        .context("unable to replace conversation system prompts")
+    }
+
     /// Rattrapage, une seule fois : une conversation d'avant le moteur par
     /// conversation qui a un fil Prime (`has_thread`) et aucun message
     /// Sinew passe en Prime ; avec les deux, elle reste en Sinew (ce
@@ -2218,6 +2230,36 @@ mod tests {
             assert!(store
                 .set_conversation_engine("/work/b", &old.id, ChatEngine::Sinew)
                 .is_err());
+            Ok(())
+        })();
+        let _ = fs::remove_file(&store.path);
+        result
+    }
+
+    #[test]
+    fn only_an_untouched_default_system_prompt_is_replaced() -> Result<()> {
+        let store = temp_store("system-prompt");
+        let result = (|| -> Result<()> {
+            store.migrate()?;
+            let model = ModelRef::new("test", "model");
+            let default = store.create_conversation("/work/a", &model, "You are Old.")?;
+            let custom = store.create_conversation("/work/a", &model, "You are Old. Be brief.")?;
+            assert_eq!(
+                store.replace_system_prompt("You are Old.", "You are New.")?,
+                1
+            );
+            let prompt = |id: &str| -> Result<String> {
+                Ok(store
+                    .load_conversation("/work/a", id)?
+                    .unwrap()
+                    .system_prompt)
+            };
+            assert_eq!(prompt(&default.id)?, "You are New.");
+            assert_eq!(prompt(&custom.id)?, "You are Old. Be brief.");
+            assert_eq!(
+                store.replace_system_prompt("You are Old.", "You are New.")?,
+                0
+            );
             Ok(())
         })();
         let _ = fs::remove_file(&store.path);

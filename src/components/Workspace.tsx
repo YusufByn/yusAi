@@ -2343,7 +2343,7 @@ function ChatEngineToggle({
   onChange: (engine: ChatEngine) => void;
 }) {
   const engines: { id: ChatEngine; label: string }[] = [
-    { id: "sinew", label: "Sinew" },
+    { id: "sinew", label: APP_NAME },
     { id: "prime", label: "Prime" },
   ];
   return (

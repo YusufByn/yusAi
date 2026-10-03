@@ -631,7 +631,7 @@ fn mcp_login_success_html(server_name: &str) -> String {
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Sinew MCP connected</title>
+    <title>yusAi MCP connected</title>
     <style>
       body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#0a0b0d;color:#f4f4f5;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
       main{{max-width:420px;padding:32px;text-align:center}}
@@ -639,7 +639,7 @@ fn mcp_login_success_html(server_name: &str) -> String {
       p{{margin:0;color:#a1a1aa;line-height:1.5}}
     </style>
   </head>
-  <body><main><h1>{server_name} is connected</h1><p>You can close this tab and return to Sinew.</p></main></body>
+  <body><main><h1>{server_name} is connected</h1><p>You can close this tab and return to yusAi.</p></main></body>
 </html>"#
     )
 }

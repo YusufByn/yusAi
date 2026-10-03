@@ -1065,7 +1065,7 @@ impl RemoteRuntime {
                 .send_relay(RelayClientFrame::PcPush {
                     subscription,
                     payload: RemotePushPayload {
-                        title: "Sinew".to_string(),
+                        title: APP_NAME.to_string(),
                         body: "Response ready".to_string(),
                         conversation_id: conversation_id.to_string(),
                     },

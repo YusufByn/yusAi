@@ -25,7 +25,7 @@ const DESIGN_SYSTEM_TEMPLATE: &str =
     "This is the design system of our project :\n\n'Paste design system here'";
 const CLAUDE_FILE_NAME: &str = "claude.md";
 const CLAUDE_FILE_TEMPLATE: &str =
-    "Note: Sinew does not use this CLAUDE.md file as its reference instructions. Use AGENTS.md instead.\n";
+    "Note: yusAi does not use this CLAUDE.md file as its reference instructions. Use AGENTS.md instead.\n";
 const IGNORED_DIRS: &[&str] = &[
     ".git",
     ".history",
