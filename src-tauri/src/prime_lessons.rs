@@ -881,6 +881,79 @@ pub fn import_thread_outcomes(
     reports
 }
 
+/// Rattrapage au démarrage, sur tous nos fils : les refines de leurs lignes
+/// `refinement_outcome` / `refinement_notice` pas encore importées le sont
+/// (refines faites quand rien n'écoutait, ou d'avant la capture des
+/// notices), sans rouvrir les conversations. La conversation est le nom du
+/// fichier ; son projet vient de la table des conversations, sinon du `cwd`
+/// de l'en-tête du fil. Seules les lignes qui contiennent `"refinement_`
+/// sont lues en JSON.
+pub fn import_all_thread_outcomes(store: &AppStore, agent_dir: &Path) -> Vec<ImportReport> {
+    let threads = agent_dir.join(crate::prime_session::THREADS_DIR);
+    let Ok(entries) = std::fs::read_dir(&threads) else {
+        return Vec::new();
+    };
+    let mut reports = Vec::new();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(conversation_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let (header_cwd, rows) = match thread_refinement_rows(&path) {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(error = %error, file = %path.display(), "prime thread not caught up");
+                continue;
+            }
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        let workspace_id = store
+            .conversation_workspace_id(conversation_id)
+            .ok()
+            .flatten()
+            .or(header_cwd);
+        let Some(workspace_id) = workspace_id else {
+            tracing::warn!(file = %path.display(), "prime thread without a project, not caught up");
+            continue;
+        };
+        let thread = ThreadContext {
+            conversation_id: conversation_id.to_string(),
+            workspace_id,
+        };
+        reports.extend(import_thread_outcomes(store, agent_dir, &thread, &rows));
+    }
+    reports
+}
+
+/// Le `cwd` de l'en-tête d'un fil et ses lignes de refine.
+fn thread_refinement_rows(path: &Path) -> Result<(Option<String>, Vec<Value>)> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut header_cwd = None;
+    let mut rows = Vec::new();
+    for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
+        let line = line.with_context(|| format!("read {}", path.display()))?;
+        if index == 0 {
+            header_cwd = serde_json::from_str::<Value>(&line)
+                .ok()
+                .and_then(|header| text(header.get("cwd")));
+        }
+        if !line.contains("\"refinement_") {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str::<Value>(&line) {
+            if refinement_outcome_details(&row).is_some() {
+                rows.push(row);
+            }
+        }
+    }
+    Ok((header_cwd, rows))
+}
+
 /// Les `details` d'un message `custom` `refinement_outcome` ou
 /// `refinement_notice` : mêmes champs (`refinementId`, `summary`, `scope`,
 /// `edits`, `rollbackOf`), plus `source` pour la notice
@@ -1888,6 +1961,70 @@ mod tests {
         assert_eq!(proposals[0].kind, ProposalKind::Promote);
         assert_eq!(proposals[0].target_level, Some(LessonLevel::Global));
         assert_eq!(proposals[0].lesson_id.as_ref(), Some(&lesson.id));
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    /// Au démarrage, les refines jamais importées de tous les fils entrent
+    /// en base, avec le projet de la conversation (ou le `cwd` du fil), et
+    /// leurs entrées quittent le harness ; un second passage ne fait rien.
+    #[test]
+    fn startup_imports_the_refines_left_in_every_thread() {
+        let (store, agent_dir) = import_fixture(&[
+            ("memory", "vendor", "Ne pas modifier vendor/."),
+            ("prompt", "conventions", "Répondre en français."),
+            ("memory", "orphan", "Une entrée sans refine connue."),
+        ]);
+        let conversation = store
+            .create_conversation(
+                "/work/a",
+                &sinew_core::ModelRef::new("test", "model"),
+                "system",
+            )
+            .unwrap();
+        let threads = agent_dir.join(crate::prime_session::THREADS_DIR);
+        let write = |name: &str, lines: Vec<Value>| {
+            let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+            std::fs::write(threads.join(name), text.join("\n") + "\nnot json\n").unwrap();
+        };
+        let mut row = notice(
+            "refine_1",
+            "local",
+            vec![create_edit("memory", "vendor", "Ne pas modifier vendor/.")],
+        );
+        row["type"] = json!("custom_message");
+        write(
+            &format!("{}.jsonl", conversation.id),
+            vec![json!({ "type": "session", "cwd": "/elsewhere" }), row],
+        );
+        // Une conversation absente de la base : le projet vient du fil.
+        let mut prompt_edit = create_edit("prompt", "conventions", "Répondre en français.");
+        prompt_edit["title"] = json!("Conventions");
+        let mut other = notice("refine_2", "local", vec![prompt_edit]);
+        other["type"] = json!("custom_message");
+        write(
+            "conv-gone.jsonl",
+            vec![json!({ "type": "session", "cwd": "/work/b" }), other],
+        );
+
+        let reports = import_all_thread_outcomes(&store, &agent_dir);
+        assert_eq!(reports.len(), 2, "reports: {reports:?}");
+        let lessons_of = |workspace: &str| {
+            store
+                .applicable_lessons(&LessonScope {
+                    workspace_id: workspace.to_string(),
+                    project_type: None,
+                })
+                .unwrap()
+                .into_iter()
+                .map(|lesson| lesson.content)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lessons_of("/work/a"), vec!["Ne pas modifier vendor/."]);
+        assert_eq!(lessons_of("/work/b"), vec!["Répondre en français."]);
+        // Seule l'entrée sans refine reste dans le harness.
+        assert_eq!(harness_ids(&agent_dir, "memory"), vec!["orphan"]);
+        assert!(harness_ids(&agent_dir, "prompt").is_empty());
+        assert!(import_all_thread_outcomes(&store, &agent_dir).is_empty());
         let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }
 }

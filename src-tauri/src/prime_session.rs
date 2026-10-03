@@ -648,7 +648,9 @@ pub fn on_exit(app: &AppHandle) {
     }
 }
 
-/// Démarrage de l'IDE : les refines mises en attente à la dernière sortie,
+/// Démarrage de l'IDE : d'abord les refines des fils jamais importées
+/// (`import_all_thread_outcomes`, sans daemon) ; puis les refines mises en
+/// attente à la dernière sortie,
 /// et celles des conversations qui ont un tour non retenu (sortie par
 /// Ctrl+C ou plantage, sans `on_exit`), partent en arrière-plan, une à la
 /// fois (voir `prime_close`). Rien à faire, rien n'est lancé.
@@ -660,6 +662,26 @@ pub fn refine_pending_at_startup(app: AppHandle) {
         else {
             return;
         };
+        // D'abord les refines des fils jamais importées : leurs entrées
+        // quittent le harness partagé avant que les refines en attente ne le
+        // relisent.
+        let caught_up = {
+            let store = store.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::prime_lessons::import_all_thread_outcomes(&store, &crate::prime::agent_dir())
+            })
+            .await
+        };
+        match caught_up {
+            Ok(reports) if !reports.is_empty() => {
+                tracing::info!(
+                    ?reports,
+                    "prime refines caught up from the threads at startup"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(error = %error, "prime threads not caught up"),
+        }
         let pending = {
             let store = store.clone();
             tauri::async_runtime::spawn_blocking(move || store.refines_due_at_start()).await

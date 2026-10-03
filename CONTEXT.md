@@ -429,7 +429,10 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   (`pa-daemon/src/agent_engine/turn/boundary.rs:216-229`) : la capture lit
   donc aussi les notices (auteur `refine:agent`, « Model »), unique par
   `refinementId`. `rlm.harness.create_*` en local échoue (pas de
-  `RLM_SESSION_DIR`) et l'erreur suggère `global_=True`.
+  `RLM_SESSION_DIR`) et l'erreur suggère `global_=True`. Au démarrage,
+  avant les refines en attente, `import_all_thread_outcomes` importe les
+  refines jamais importées de tous les fils (conversation = nom du fichier,
+  projet = table des conversations, sinon `cwd` du fil), sans daemon.
   Une refine d'une autre conversation peut voir nos `yl_…` amorcés : son
   import ignore les edits sur des leçons qui ne s'appliquent pas à sa
   conversation (`LessonTarget::Elsewhere`).
