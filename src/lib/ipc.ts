@@ -824,6 +824,15 @@ export const api = {
   primeUndoRefine(refinementId: string) {
     return invoke<UndoReport>("prime_undo_refine", { refinementId });
   },
+  primeSetSkillLevel(workspacePath: string, dir: string, level: LessonLevel) {
+    return invoke<string>("prime_set_skill_level", { workspacePath, dir, level });
+  },
+  primeArchiveSkill(dir: string) {
+    return invoke<string>("prime_archive_skill", { dir });
+  },
+  primeRestoreSkill(workspacePath: string, dir: string) {
+    return invoke<string>("prime_restore_skill", { workspacePath, dir });
+  },
   primeAbort(activeSessionId: string) {
     return invoke<void>("prime_abort", { activeSessionId });
   },

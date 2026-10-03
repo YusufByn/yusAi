@@ -977,6 +977,35 @@ export type LessonsOverview = {
   proposals: ProposalView[];
   lessons: LessonView[];
   refines: RefineView[];
+  // yusAi skills of the project's levels, in config.skills order, then the
+  // disabled ones (prime_review.rs, SkillView).
+  skills: SkillView[];
+  archivedSkills: ArchivedSkill[];
+};
+
+// A skill in the yusAi skill folders (prime_skills.rs, YusaiSkill).
+export type YusaiSkill = {
+  name: string;
+  description: string;
+  level: LessonLevel;
+  // The project path or the type name; null for global.
+  owner: string | null;
+  dir: string;
+  file: string;
+  python: { importName: string; distribution: string } | null;
+  createdMs: number;
+  // The proposal whose acceptance wrote it.
+  proposalId: string | null;
+};
+
+export type SkillView = YusaiSkill & {
+  // Why it stays out of sessions (Python name conflict).
+  disabled: string | null;
+};
+
+export type ArchivedSkill = {
+  skill: YusaiSkill;
+  from: { dir: string; level: LessonLevel; owner: string | null; archivedMs: number };
 };
 
 // Ce qu'une refine a fait dans le magasin des leçons (prime_lessons.rs,

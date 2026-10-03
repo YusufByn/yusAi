@@ -399,12 +399,19 @@ pub fn thread_skills(
     }
     let ours = our_skills(&sources.data_dir);
     let prime = prime_skills(sources, Path::new(workspace_id));
-    let mut chain = vec![project_dir];
-    if let Some(project_type) = project_type {
-        chain.push(type_skills_dir(&sources.data_dir, project_type));
-    }
-    chain.push(global_skills_dir(&sources.data_dir));
+    let chain = chain_dirs(&sources.data_dir, workspace_id, project_type);
     select_skills(&ours, &prime, &chain)
+}
+
+/// Les dossiers de niveau d'un projet, dans l'ordre de `config.skills` :
+/// projet, type confirmé, global.
+pub fn chain_dirs(data_dir: &Path, workspace_id: &str, project_type: Option<&str>) -> Vec<PathBuf> {
+    let mut chain = vec![project_skills_dir(data_dir, workspace_id)];
+    if let Some(project_type) = project_type {
+        chain.push(type_skills_dir(data_dir, project_type));
+    }
+    chain.push(global_skills_dir(data_dir));
+    chain
 }
 
 /// La sélection, sans effet : les skills de `ours` rangées dans `chain`

@@ -6427,6 +6427,13 @@ textarea {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.prime-lessons__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
 .prime-lessons__toggle {
   display: inline-flex;
   align-items: center;
@@ -6474,6 +6481,11 @@ textarea {
   flex: 0 0 auto;
   color: var(--text-3);
   font-size: 11px;
+}
+.prime-lessons__warning {
+  color: var(--danger);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
 }
 .prime-lessons__title {
   min-width: 0;

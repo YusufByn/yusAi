@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
 import type {
+  ArchivedSkill,
   Lesson,
   LessonEventView,
   LessonKind,
@@ -11,16 +12,18 @@ import type {
   ProposalView,
   RefineDetail,
   RefineView,
+  SkillView,
   UndoReport,
 } from "../../types";
 
 // The "Lessons" view of the Prime chat (prime_review.rs): pending proposals
-// of every project (Review), the project's lessons (Lessons) and the
-// refines imported for it, refine by refine (Refines). Every action is
+// of every project (Review), the project's lessons (Lessons), its yusAi
+// skills (Skills, prime_skills.rs) and the refines imported for it, refine
+// by refine (Refines). Every action is
 // recorded in the lesson history with the author "user"; moving a lesson
 // yourself counts as validation.
 
-type Tab = "review" | "lessons" | "refines";
+type Tab = "review" | "lessons" | "skills" | "refines";
 
 type Props = {
   workspacePath: string;
@@ -38,28 +41,31 @@ export function PrimeLessonsView({ workspacePath, refreshKey, onChanged }: Props
   const [overview, setOverview] = useState<LessonsOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Re-reads the view; returns the read error, if any.
   const load = useCallback(async () => {
     try {
       setOverview(await api.primeLessonsOverview(workspacePath));
-      setError(null);
+      return null;
     } catch (err) {
-      setError(String(err));
+      return String(err);
     }
   }, [workspacePath]);
 
   useEffect(() => {
-    void load();
+    void load().then(setError);
   }, [load, refreshKey]);
 
+  // A refused action keeps its error on screen after the re-read.
   const act: Act = useCallback(
     async (action) => {
+      let failure: string | null = null;
       try {
         await action();
-        setError(null);
       } catch (err) {
-        setError(String(err));
+        failure = String(err);
       }
-      await load();
+      const readError = await load();
+      setError(failure ?? readError);
       onChanged();
     },
     [load, onChanged],
@@ -68,6 +74,7 @@ export function PrimeLessonsView({ workspacePath, refreshKey, onChanged }: Props
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "review", label: "Review", count: overview?.proposals.length },
     { id: "lessons", label: "Lessons" },
+    { id: "skills", label: "Skills" },
     { id: "refines", label: "Refines" },
   ];
 
@@ -94,6 +101,7 @@ export function PrimeLessonsView({ workspacePath, refreshKey, onChanged }: Props
         {!overview && !error && <div className="prime-chat__status">Loading…</div>}
         {overview && tab === "review" && <ReviewTab overview={overview} act={act} />}
         {overview && tab === "lessons" && <LessonsTab overview={overview} act={act} />}
+        {overview && tab === "skills" && <SkillsTab overview={overview} act={act} />}
         {overview && tab === "refines" && <RefinesTab overview={overview} act={act} />}
       </div>
     </div>
@@ -221,6 +229,163 @@ function SkillText({ payload }: { payload: Record<string, unknown> }) {
         {stringField(entry, "content") ?? stringField(payload, "content") ?? ""}
       </div>
       {target && <code className="prime-lessons__code">{target}</code>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Skills
+
+// Skills reach a thread when it opens (config.skills): project first, then
+// the confirmed type, then global. A Python skill whose name another skill
+// already holds stays out ("Disabled").
+function SkillsTab({ overview, act }: { overview: LessonsOverview; act: Act }) {
+  const [showArchived, setShowArchived] = useState(false);
+  const groups: { level: LessonLevel; label: string }[] = [
+    { level: "project", label: "Project" },
+    {
+      level: "type",
+      label: overview.projectType ? `Type: ${overview.projectType}` : "Type",
+    },
+    { level: "global", label: "Global" },
+  ];
+  return (
+    <div className="prime-lessons__list">
+      <div className="prime-lessons__toolbar">
+        <label className="prime-lessons__toggle">
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(event) => setShowArchived(event.target.checked)}
+          />
+          Show archived
+        </label>
+        <span className="prime-lessons__meta">Changes reach threads when they reopen.</span>
+      </div>
+      {overview.skills.length === 0 && <Empty text="No yusAi skills for this project yet." />}
+      {groups.map(({ level, label }) => {
+        const inGroup = overview.skills.filter((skill) => skill.level === level);
+        if (inGroup.length === 0) return null;
+        return (
+          <section key={level} className="prime-lessons__group">
+            <h3 className="prime-lessons__group-title">{label}</h3>
+            {inGroup.map((skill) => (
+              <SkillRow key={skill.dir} skill={skill} overview={overview} act={act} />
+            ))}
+          </section>
+        );
+      })}
+      {showArchived && overview.archivedSkills.length > 0 && (
+        <section className="prime-lessons__group">
+          <h3 className="prime-lessons__group-title">Archived</h3>
+          {overview.archivedSkills.map((archived) => (
+            <ArchivedSkillRow
+              key={archived.skill.dir}
+              archived={archived}
+              overview={overview}
+              act={act}
+            />
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function SkillRow({
+  skill,
+  overview,
+  act,
+}: {
+  skill: SkillView;
+  overview: LessonsOverview;
+  act: Act;
+}) {
+  const levels: { level: LessonLevel; label: string; disabled: boolean; title?: string }[] = [
+    { level: "project", label: "To project", disabled: false },
+    {
+      level: "type",
+      label: overview.projectType ? `To type ${overview.projectType}` : "To type",
+      disabled: !overview.projectType,
+      title: overview.projectType ? undefined : "Choose the project's type first",
+    },
+    { level: "global", label: "To global", disabled: false },
+  ];
+  return (
+    <div className="prime-lessons__card">
+      <div className="prime-lessons__card-head">
+        <span className="prime-lessons__badge" data-kind="skill">
+          {skill.python ? "Python" : "Markdown"}
+        </span>
+        <span className="prime-lessons__title">{skill.name}</span>
+        {skill.python && <code className="prime-lessons__code">{skill.python.importName}</code>}
+        {skill.disabled && <span className="prime-lessons__flag">Disabled</span>}
+        {skill.proposalId && <span className="prime-lessons__flag">From a refine</span>}
+      </div>
+      <div className="prime-lessons__body">{skill.description}</div>
+      {skill.disabled && (
+        <div className="prime-lessons__warning">
+          {skill.disabled}. Rename one of the two skills (folder, SKILL.md name, Python package).
+        </div>
+      )}
+      <div className="prime-lessons__actions">
+        {levels
+          .filter((entry) => entry.level !== skill.level)
+          .map((entry) => (
+            <ActionButton
+              key={entry.level}
+              label={entry.label}
+              disabled={entry.disabled}
+              title={entry.title}
+              onClick={() =>
+                void act(() => api.primeSetSkillLevel(overview.workspaceId, skill.dir, entry.level))
+              }
+            />
+          ))}
+        <ActionButton
+          label="Show folder"
+          title={skill.dir}
+          onClick={() => void api.revealAbsolutePath(skill.file).catch(console.error)}
+        />
+        <ActionButton
+          label="Archive"
+          danger
+          onClick={() => void act(() => api.primeArchiveSkill(skill.dir))}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ArchivedSkillRow({
+  archived,
+  overview,
+  act,
+}: {
+  archived: ArchivedSkill;
+  overview: LessonsOverview;
+  act: Act;
+}) {
+  return (
+    <div className="prime-lessons__card" data-archived="true">
+      <div className="prime-lessons__card-head">
+        <span className="prime-lessons__badge" data-kind="skill">
+          {archived.skill.python ? "Python" : "Markdown"}
+        </span>
+        <span className="prime-lessons__title">{archived.skill.name}</span>
+        <span className="prime-lessons__flag">
+          {levelLabel(archived.from.level)} · archived {formatDate(archived.from.archivedMs)}
+        </span>
+      </div>
+      <div className="prime-lessons__body">{archived.skill.description}</div>
+      <div className="prime-lessons__actions">
+        <ActionButton
+          label="Restore"
+          title={archived.from.dir}
+          onClick={() =>
+            void act(() => api.primeRestoreSkill(overview.workspaceId, archived.skill.dir))
+          }
+        />
+      </div>
     </div>
   );
 }

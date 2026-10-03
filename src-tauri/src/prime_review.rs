@@ -37,6 +37,21 @@ pub struct LessonsOverview {
     pub proposals: Vec<ProposalView>,
     pub lessons: Vec<LessonView>,
     pub refines: Vec<RefineView>,
+    /// Les skills de yusAi des niveaux du projet (projet, type confirmé,
+    /// global), dans l'ordre de `config.skills`, les écartées ensuite.
+    pub skills: Vec<SkillView>,
+    /// Les skills archivées de ces niveaux, les plus récentes d'abord.
+    pub archived_skills: Vec<prime_skills::ArchivedSkill>,
+}
+
+/// Une skill de yusAi vue du projet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillView {
+    #[serde(flatten)]
+    pub skill: prime_skills::YusaiSkill,
+    /// Pourquoi elle reste hors des sessions (conflit de nom Python).
+    pub disabled: Option<String>,
 }
 
 /// Une proposition en attente, avec sa leçon et son projet.
@@ -105,7 +120,39 @@ pub fn lessons_overview(
 ) -> Result<LessonsOverview> {
     let mut titles = Titles::new(store);
     let project_type = store.confirmed_project_type(workspace_id)?;
-    let injected = crate::prime_guidance::thread_guidance(store, sources, workspace_id)?.injected;
+    let guidance = crate::prime_guidance::thread_guidance(store, sources, workspace_id)?;
+    let injected = guidance.injected;
+    let ours = prime_skills::our_skills(&sources.data_dir);
+    let mut skills: Vec<SkillView> = guidance
+        .skills
+        .iter()
+        .filter_map(|file| {
+            ours.iter()
+                .find(|skill| skill.file.display().to_string() == *file)
+        })
+        .map(|skill| SkillView {
+            skill: skill.clone(),
+            disabled: None,
+        })
+        .collect();
+    skills.extend(
+        guidance
+            .disabled_skills
+            .into_iter()
+            .map(|disabled| SkillView {
+                disabled: Some(disabled.conflict.english()),
+                skill: disabled.skill,
+            }),
+    );
+    let chain = prime_skills::chain_dirs(&sources.data_dir, workspace_id, project_type.as_deref());
+    let archived_skills = prime_skills::archived_skills(&sources.data_dir)
+        .into_iter()
+        .filter(|archived| {
+            chain
+                .iter()
+                .any(|level| archived.from.dir.parent() == Some(level.as_path()))
+        })
+        .collect();
     let lessons = store
         .project_lessons(
             &LessonScope {
@@ -166,6 +213,8 @@ pub fn lessons_overview(
         proposals,
         lessons,
         refines,
+        skills,
+        archived_skills,
     })
 }
 
@@ -296,16 +345,7 @@ fn accept_skill(
         .and_then(|import| import.split('.').next().map(str::to_string))
         .filter(|import| !import.is_empty());
     // Une skill Python de yusAi visible du projet porte déjà cet import.
-    let chain = [
-        Some(prime_skills::project_skills_dir(
-            &sources.data_dir,
-            &workspace_id,
-        )),
-        project_type
-            .as_deref()
-            .map(|project_type| prime_skills::type_skills_dir(&sources.data_dir, project_type)),
-        Some(prime_skills::global_skills_dir(&sources.data_dir)),
-    ];
+    let chain = prime_skills::chain_dirs(&sources.data_dir, &workspace_id, project_type.as_deref());
     let ours = prime_skills::our_skills(&sources.data_dir);
     let existing = import.as_deref().and_then(|import| {
         ours.iter().find(|skill| {
@@ -315,7 +355,6 @@ fn accept_skill(
                 .is_some_and(|python| python.import_name == import)
                 && chain
                     .iter()
-                    .flatten()
                     .any(|level| skill.dir.parent() == Some(level.as_path()))
         })
     });
@@ -327,7 +366,6 @@ fn accept_skill(
                 skill.name == name
                     && chain
                         .iter()
-                        .flatten()
                         .any(|level| skill.dir.parent() == Some(level.as_path()))
             })
         });
@@ -1274,6 +1312,58 @@ mod tests {
             "{error}"
         );
         assert!(global_fmt.is_dir() && notes.is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_overview_lists_the_project_skills_with_their_conflicts() {
+        let (store, root, _) = fixture();
+        let sources = test_sources(&root);
+        let a = prime_skills::project_skills_dir(&root, "/work/a");
+        prime_skills::ensure_owner_dir(&a, "/work/a").unwrap();
+        let b = prime_skills::project_skills_dir(&root, "/work/b");
+        prime_skills::ensure_owner_dir(&b, "/work/b").unwrap();
+        let global = prime_skills::global_skills_dir(&root);
+        skill_folder(&global, "fmt", true);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        skill_folder(&a, "fmt", true);
+        skill_folder(&a, "notes", false);
+        skill_folder(&b, "other", false);
+        let old = skill_folder(&a, "old", false);
+        prime_skills::archive_skill(&root, &old).unwrap();
+        let old_b = skill_folder(&b, "old-b", false);
+        prime_skills::archive_skill(&root, &old_b).unwrap();
+
+        let overview = lessons_overview(&store, &sources, "/work/a").unwrap();
+        let skills: Vec<(&str, LessonLevel, Option<&str>)> = overview
+            .skills
+            .iter()
+            .map(|view| {
+                (
+                    view.skill.name.as_str(),
+                    view.skill.level,
+                    view.disabled.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            skills,
+            vec![
+                ("notes", LessonLevel::Project, None),
+                ("fmt", LessonLevel::Global, None),
+                (
+                    "fmt",
+                    LessonLevel::Project,
+                    Some("Python import name `fmt` is taken by the global skill `fmt`")
+                ),
+            ]
+        );
+        let archived: Vec<&str> = overview
+            .archived_skills
+            .iter()
+            .map(|archived| archived.skill.name.as_str())
+            .collect();
+        assert_eq!(archived, vec!["old"]);
         let _ = std::fs::remove_dir_all(root);
     }
 }

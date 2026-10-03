@@ -295,6 +295,15 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   son id de proposition, même déplacée), restaure une skill archivée,
   laisse une skill qui existait avant. Commandes `prime_set_skill_level`,
   `prime_archive_skill`, `prime_restore_skill` (vue : 11c).
+- **Skills par niveau, 11c** : onglet « Skills » de la vue Lessons
+  (`PrimeLessonsView.tsx`) : skills des niveaux du projet (projet, type
+  confirmé, global) dans l'ordre de `config.skills`, Python ou Markdown,
+  « Disabled » et la raison (conflit de nom Python, en anglais :
+  `Conflict::english`), « From a refine » ; actions To project / To type /
+  To global, Show folder, Archive ; « Show archived » : skills archivées
+  de ces niveaux, Restore. Les messages de refus d'une action restent
+  affichés après la relecture de la vue (avant : effacés aussitôt, pour
+  toutes les actions de la vue). Vérifié dans le banc d'essai.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
