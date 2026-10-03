@@ -236,7 +236,11 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   affichée en italique ; la choisir la confirme. Seul un type confirmé
   compte pour les leçons (`confirmed_project_type` : injection, amorçage,
   import) ; il est pris en compte à la prochaine ouverture d'un fil et à la
-  prochaine refine.
+  prochaine refine. Vue « Lessons » (commit 10, lecture :
+  `src-tauri/src/prime_review.rs`) : sqlite v12 garde avec chaque refine
+  importée son projet, son déclencheur, son résumé, ses edits écartées et
+  son annulation, et le projet de chaque proposition ; les refines d'avant
+  la v12 sont retrouvées par leur conversation, sans résumé.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

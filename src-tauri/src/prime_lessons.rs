@@ -43,7 +43,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sinew_app::store::{
     normalize_project_type, AppStore, InsertLessonOutcome, Lesson, LessonKind, LessonLevel,
-    LessonOrigin, LessonScope, LessonStatus, NewLesson, NewProposal, ProposalKind,
+    LessonOrigin, LessonScope, LessonStatus, NewImportedRefinement, NewLesson, NewProposal,
+    ProposalKind,
 };
 
 /// Préfixe des ids de nos leçons, tels qu'amorcés dans le harness de Prime.
@@ -358,11 +359,15 @@ pub fn import_refinement_outcome_as(
         ..ImportReport::default()
     };
     let touched = apply_ops(store, thread, import.ops, &origin, global, &mut report);
-    store.mark_refinement_imported(
-        &report.refinement_id,
-        Some(&thread.conversation_id),
-        &report.failed,
-    )?;
+    store.mark_refinement_imported(&NewImportedRefinement {
+        refinement_id: report.refinement_id.clone(),
+        conversation_id: Some(thread.conversation_id.clone()),
+        workspace_id: Some(thread.workspace_id.clone()),
+        actor: origin.actor.clone(),
+        summary: Some(import.summary.clone()).filter(|summary| !summary.is_empty()),
+        skipped: report.skipped.clone(),
+        failures: report.failed.clone(),
+    })?;
 
     let harness = refine_harness_file(agent_dir, global);
     match remove_harness_entries(&harness, &touched) {
@@ -422,7 +427,7 @@ fn apply_ops(
                     }
                 };
                 if promote {
-                    match propose_global(store, &lesson_id, origin) {
+                    match propose_global(store, &lesson_id, &thread.workspace_id, origin) {
                         Ok(Some(proposal)) => report.proposals.push(proposal),
                         Ok(None) => {}
                         Err(error) => {
@@ -459,6 +464,7 @@ fn apply_ops(
                 kind,
                 target_level,
                 payload,
+                workspace_id: Some(thread.workspace_id.clone()),
                 conversation_id: origin.conversation_id.clone(),
                 refinement_id: origin.refinement_id.clone(),
             }) {
@@ -576,11 +582,15 @@ pub fn import_global_harness_writes(
         // Seulement des entrées écartées (vides, inconnues) : pas de trace.
         return Ok(None);
     }
-    store.mark_refinement_imported(
-        &refinement_id,
-        Some(&thread.conversation_id),
-        &report.failed,
-    )?;
+    store.mark_refinement_imported(&NewImportedRefinement {
+        refinement_id: refinement_id.clone(),
+        conversation_id: Some(thread.conversation_id.clone()),
+        workspace_id: Some(thread.workspace_id.clone()),
+        actor: origin.actor.clone(),
+        summary: Some("Direct writes of the model to the global harness".to_string()),
+        skipped: report.skipped.clone(),
+        failures: report.failed.clone(),
+    })?;
     match remove_harness_entries(&file, &touched) {
         Ok(removed) => report.removed_entries = removed,
         Err(error) => tracing::warn!(
@@ -597,6 +607,7 @@ pub fn import_global_harness_writes(
 fn propose_global(
     store: &AppStore,
     lesson_id: &str,
+    workspace_id: &str,
     origin: &LessonOrigin,
 ) -> Result<Option<String>> {
     let Some(lesson) = store.lesson(lesson_id)? else {
@@ -621,6 +632,7 @@ fn propose_global(
         kind: ProposalKind::Promote,
         target_level: Some(LessonLevel::Global),
         payload: json!({ "reason": "global refine requested in the conversation" }),
+        workspace_id: Some(workspace_id.to_string()),
         conversation_id: origin.conversation_id.clone(),
         refinement_id: origin.refinement_id.clone(),
     })?;
@@ -1691,8 +1703,19 @@ mod tests {
                 .actor
                 .clone()
         };
-        let retained = outcome(vec![create_edit("memory", "a", "Lancer cargo test.")]);
+        let mut retained = outcome(vec![
+            create_edit("memory", "a", "Lancer cargo test."),
+            json!({ "action": "create", "kind": "plan", "id": "p", "content": "x", "applied": true }),
+        ]);
+        retained["summary"] = json!("Tests du projet");
         assert_eq!(actor_of(&retained, "refine:retain"), "refine:retain");
+        // La refine garde son déclencheur, son résumé, son projet et ce
+        // qu'elle a écarté (vue « Refines »).
+        let imported = store.imported_refinement("refine_1").unwrap().unwrap();
+        assert_eq!(imported.actor.as_deref(), Some("refine:retain"));
+        assert_eq!(imported.summary.as_deref(), Some("Tests du projet"));
+        assert_eq!(imported.workspace_id.as_deref(), Some("/work/a"));
+        assert_eq!(imported.skipped, vec!["create plan:p: unknown kind"]);
         let mut caught_up = outcome(vec![create_edit("memory", "b", "Relire le diff.")]);
         caught_up["refinementId"] = json!("refine_2");
         assert_eq!(actor_of(&caught_up, REFINE_ACTOR), "refine");

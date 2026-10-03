@@ -111,6 +111,7 @@ pub mod prime_guidance;
 pub mod prime_lessons;
 pub mod prime_project;
 pub mod prime_refine;
+pub mod prime_review;
 pub mod prime_session;
 mod providers;
 mod remote;
@@ -412,6 +413,10 @@ pub fn run() {
             prime_session::prime_set_displayed,
             prime_session::prime_project_type,
             prime_session::prime_set_project_type,
+            prime_session::prime_lessons_overview,
+            prime_session::prime_refine_detail,
+            prime_session::prime_lesson_history,
+            prime_session::prime_pending_proposal_count,
             prime_session::prime_abort,
             prime_session::prime_close_session,
             prime_session::prime_rlm_children,

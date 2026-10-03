@@ -28,7 +28,7 @@ mod lessons;
 pub use lessons::{
     normalize_lesson_text, normalize_project_type, InsertLessonOutcome, Lesson, LessonEvent,
     ImportedRefinement, LessonKind, LessonLevel, LessonOrigin, LessonProposal, LessonScope,
-    LessonStatus, NewLesson,
+    LessonStatus, NewImportedRefinement, NewLesson,
     NewProposal, ProjectTypeSetting, ProjectTypeSource, ProposalKind, ProposalStatus, RefineState,
 };
 
@@ -1531,6 +1531,18 @@ impl AppStore {
         Ok(())
     }
 
+    /// Le titre d'une conversation, si elle existe encore.
+    pub fn conversation_title(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "select title from conversations where id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("unable to load conversation title")
+    }
+
     /// Le projet (`workspace_id`) d'une conversation, quel qu'il soit.
     pub fn conversation_workspace_id(&self, id: &str) -> Result<Option<String>> {
         let conn = self.connection()?;
@@ -1569,7 +1581,7 @@ impl AppStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap_or(0);
 
-        if version >= 11 {
+        if version >= 12 {
             return Ok(());
         }
 
@@ -1623,9 +1635,10 @@ impl AppStore {
                 .context("unable to clear legacy turn checkpoints")?;
         }
         // v10 : leçons Prime retenues par yusAi ; v11 : échecs d'import des
-        // refines (store/lessons.rs).
+        // refines ; v12 : détail des refines et projet des propositions
+        // (store/lessons.rs).
         lessons::ensure_lessons_tables(&conn)?;
-        conn.pragma_update(None, "user_version", 11)
+        conn.pragma_update(None, "user_version", 12)
             .context("unable to set sqlite schema version")?;
         Ok(())
     }

@@ -94,27 +94,50 @@ pub(super) fn ensure_lessons_tables(conn: &Connection) -> Result<()> {
         "#,
     )
     .context("unable to create lesson tables")?;
-    ensure_refinement_failures_column(conn)
+    // v11 : les opérations d'une refine qui ont échoué à l'import.
+    ensure_column(
+        conn,
+        "prime_imported_refinements",
+        "failures_json",
+        "text not null default '[]'",
+    )?;
+    // v12 : de quoi montrer chaque refine (projet, déclencheur, résumé,
+    // edits écartées, annulation) et le projet de chaque proposition.
+    ensure_column(conn, "prime_imported_refinements", "workspace_id", "text")?;
+    ensure_column(conn, "prime_imported_refinements", "actor", "text")?;
+    ensure_column(conn, "prime_imported_refinements", "summary", "text")?;
+    ensure_column(
+        conn,
+        "prime_imported_refinements",
+        "skipped_json",
+        "text not null default '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "prime_imported_refinements",
+        "undone_at_ms",
+        "integer",
+    )?;
+    ensure_column(conn, "lesson_proposals", "workspace_id", "text")
 }
 
-/// v11 : les opérations d'une refine qui ont échoué à l'import.
-fn ensure_refinement_failures_column(conn: &Connection) -> Result<()> {
+/// Ajoute une colonne si la table ne l'a pas encore (migrations v11, v12).
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
     let mut statement = conn
-        .prepare("pragma table_info(prime_imported_refinements)")
-        .context("unable to inspect imported refinements")?;
+        .prepare(&format!("pragma table_info({table})"))
+        .with_context(|| format!("unable to inspect {table}"))?;
     let has_column = statement
         .query_map([], |row| row.get::<_, String>(1))
-        .context("unable to inspect imported refinements")?
+        .with_context(|| format!("unable to inspect {table}"))?
         .collect::<rusqlite::Result<Vec<String>>>()
-        .context("unable to inspect imported refinements")?
+        .with_context(|| format!("unable to inspect {table}"))?
         .iter()
-        .any(|name| name == "failures_json");
+        .any(|name| name == column);
     if !has_column {
-        conn.execute_batch(
-            "alter table prime_imported_refinements
-                add column failures_json text not null default '[]';",
-        )
-        .context("unable to add refinement failures column")?;
+        conn.execute_batch(&format!(
+            "alter table {table} add column {column} {definition};"
+        ))
+        .with_context(|| format!("unable to add {table}.{column}"))?;
     }
     Ok(())
 }
@@ -346,6 +369,8 @@ pub struct LessonProposal {
     pub target_level: Option<LessonLevel>,
     pub payload: Value,
     pub status: ProposalStatus,
+    /// Le projet d'où vient la proposition (absent avant la v12).
+    pub workspace_id: Option<String>,
     pub conversation_id: Option<String>,
     pub refinement_id: Option<String>,
     pub created_at_ms: i64,
@@ -358,6 +383,7 @@ pub struct NewProposal {
     pub kind: ProposalKind,
     pub target_level: Option<LessonLevel>,
     pub payload: Value,
+    pub workspace_id: Option<String>,
     pub conversation_id: Option<String>,
     pub refinement_id: Option<String>,
 }
@@ -378,13 +404,37 @@ pub struct ProjectTypeSetting {
     pub source: ProjectTypeSource,
 }
 
-/// Une refine de Prime déjà importée, et ce qui a échoué à l'import.
+/// Une refine de Prime déjà importée : d'où elle vient, ce qu'elle a
+/// écarté et ce qui a échoué à l'import. Les champs ajoutés en v12 sont
+/// vides pour les refines importées avant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedRefinement {
     pub refinement_id: String,
     pub conversation_id: Option<String>,
+    pub workspace_id: Option<String>,
+    /// Le déclencheur, comme l'auteur de l'historique des leçons
+    /// (`refine:retain`, `refine:close`, `refine`, `harness:global`…).
+    pub actor: Option<String>,
+    /// Le résumé de Prime.
+    pub summary: Option<String>,
     pub imported_at_ms: i64,
+    /// Edits écartées dès la conversion, avec leur raison.
+    pub skipped: Vec<String>,
+    pub failures: Vec<String>,
+    /// Annulée par l'utilisateur (« Undo »).
+    pub undone_at_ms: Option<i64>,
+}
+
+/// Une refine à noter comme importée.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewImportedRefinement {
+    pub refinement_id: String,
+    pub conversation_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub actor: String,
+    pub summary: Option<String>,
+    pub skipped: Vec<String>,
     pub failures: Vec<String>,
 }
 
@@ -582,6 +632,185 @@ fn record_event(
     Ok(())
 }
 
+fn lessons_for_scope(
+    conn: &Connection,
+    scope: &LessonScope,
+    include_archived: bool,
+) -> Result<Vec<Lesson>> {
+    let keys = applicable_scope_keys(scope);
+    let mut lessons = Vec::new();
+    let status = if include_archived {
+        ""
+    } else {
+        " and status = 'active'"
+    };
+    let mut statement = conn
+        .prepare(&format!(
+            "select {LESSON_COLUMNS} from lessons
+             where scope_key = ?1{status}
+             order by updated_at_ms desc, id"
+        ))
+        .context("unable to prepare lesson query")?;
+    for key in &keys {
+        let rows = statement
+            .query_map(params![key], lesson_from_row)
+            .context("unable to query lessons")?;
+        for row in rows {
+            lessons.push(finish_lesson(row.context("unable to read lesson row")?)?);
+        }
+    }
+    // Tri stable : l'ordre projet, type, global reste sous l'épinglage.
+    lessons.sort_by_key(|lesson| !lesson.pinned);
+    Ok(lessons)
+}
+
+fn lesson_events_where(
+    conn: &Connection,
+    clause: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<LessonEvent>> {
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, lesson_id, at_ms, action, actor, conversation_id, refinement_id,
+                    before_json, after_json
+             from lesson_events where {clause} order by id"
+        ))
+        .context("unable to prepare lesson history query")?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok((
+                LessonEvent {
+                    id: row.get(0)?,
+                    lesson_id: row.get(1)?,
+                    at_ms: row.get(2)?,
+                    action: row.get(3)?,
+                    actor: row.get(4)?,
+                    conversation_id: row.get(5)?,
+                    refinement_id: row.get(6)?,
+                    before: None,
+                    after: None,
+                },
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        })
+        .context("unable to query lesson history")?;
+    let parse = |text: Option<String>| -> Result<Option<Value>> {
+        text.map(|text| serde_json::from_str(&text))
+            .transpose()
+            .context("unable to parse lesson snapshot")
+    };
+    let mut events = Vec::new();
+    for row in rows {
+        let (mut event, before, after) = row.context("unable to read lesson event")?;
+        event.before = parse(before)?;
+        event.after = parse(after)?;
+        events.push(event);
+    }
+    Ok(events)
+}
+
+fn proposals_where(
+    conn: &Connection,
+    clause: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<LessonProposal>> {
+    let mut statement = conn
+        .prepare(&format!(
+            "select id, lesson_id, kind, target_level, payload_json, status, workspace_id,
+                    conversation_id, refinement_id, created_at_ms, decided_at_ms
+             from lesson_proposals where {clause} order by created_at_ms, id"
+        ))
+        .context("unable to prepare proposal query")?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok((
+                (
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ),
+                (
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                ),
+            ))
+        })
+        .context("unable to query proposals")?;
+    let mut proposals = Vec::new();
+    for row in rows {
+        let (
+            (id, lesson_id, kind, target, payload, status),
+            (workspace_id, conversation_id, refinement_id, created_at_ms, decided_at_ms),
+        ) = row.context("unable to read proposal")?;
+        proposals.push(LessonProposal {
+            id,
+            lesson_id,
+            kind: ProposalKind::parse(&kind)?,
+            target_level: target.as_deref().map(LessonLevel::parse).transpose()?,
+            payload: serde_json::from_str(&payload).context("unable to parse proposal")?,
+            status: ProposalStatus::parse(&status)?,
+            workspace_id,
+            conversation_id,
+            refinement_id,
+            created_at_ms,
+            decided_at_ms,
+        });
+    }
+    Ok(proposals)
+}
+
+fn imported_refinements_where(
+    conn: &Connection,
+    clause: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<ImportedRefinement>> {
+    let mut statement = conn
+        .prepare(&format!(
+            "select refinement_id, conversation_id, workspace_id, actor, summary,
+                    imported_at_ms, skipped_json, failures_json, undone_at_ms
+             from prime_imported_refinements where {clause}
+             order by imported_at_ms desc, refinement_id"
+        ))
+        .context("unable to prepare imported refinement query")?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok((
+                ImportedRefinement {
+                    refinement_id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    workspace_id: row.get(2)?,
+                    actor: row.get(3)?,
+                    summary: row.get(4)?,
+                    imported_at_ms: row.get(5)?,
+                    skipped: Vec::new(),
+                    failures: Vec::new(),
+                    undone_at_ms: row.get(8)?,
+                },
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .context("unable to query imported refinements")?;
+    let mut refinements = Vec::new();
+    for row in rows {
+        let (mut refinement, skipped, failures) =
+            row.context("unable to read imported refinement")?;
+        refinement.skipped =
+            serde_json::from_str(&skipped).context("unable to parse skipped edits")?;
+        refinement.failures =
+            serde_json::from_str(&failures).context("unable to parse refinement failures")?;
+        refinements.push(refinement);
+    }
+    Ok(refinements)
+}
+
 fn project_type_of(conn: &Connection, workspace_id: &str) -> Result<Option<ProjectTypeSetting>> {
     conn.query_row(
         "select project_type, type_source from prime_projects where workspace_id = ?1",
@@ -676,27 +905,7 @@ impl AppStore {
     /// Les leçons actives qui s'appliquent à un projet : épinglées d'abord,
     /// puis projet, type, global ; les plus récentes d'abord dans un niveau.
     pub fn applicable_lessons(&self, scope: &LessonScope) -> Result<Vec<Lesson>> {
-        let conn = self.connection()?;
-        let keys = applicable_scope_keys(scope);
-        let mut lessons = Vec::new();
-        let mut statement = conn
-            .prepare(&format!(
-                "select {LESSON_COLUMNS} from lessons
-                 where scope_key = ?1 and status = 'active'
-                 order by updated_at_ms desc, id"
-            ))
-            .context("unable to prepare lesson query")?;
-        for key in &keys {
-            let rows = statement
-                .query_map(params![key], lesson_from_row)
-                .context("unable to query lessons")?;
-            for row in rows {
-                lessons.push(finish_lesson(row.context("unable to read lesson row")?)?);
-            }
-        }
-        // Tri stable : l'ordre projet, type, global reste sous l'épinglage.
-        lessons.sort_by_key(|lesson| !lesson.pinned);
-        Ok(lessons)
+        lessons_for_scope(&self.connection()?, scope, false)
     }
 
     /// Nouvelle version d'une leçon (titre et contenu), tracée avec l'avant
@@ -847,46 +1056,7 @@ impl AppStore {
 
     /// L'historique d'une leçon, du plus ancien au plus récent.
     pub fn lesson_events(&self, lesson_id: &str) -> Result<Vec<LessonEvent>> {
-        let conn = self.connection()?;
-        let mut statement = conn
-            .prepare(
-                "select id, lesson_id, at_ms, action, actor, conversation_id, refinement_id,
-                        before_json, after_json
-                 from lesson_events where lesson_id = ?1 order by id",
-            )
-            .context("unable to prepare lesson history query")?;
-        let rows = statement
-            .query_map(params![lesson_id], |row| {
-                Ok((
-                    LessonEvent {
-                        id: row.get(0)?,
-                        lesson_id: row.get(1)?,
-                        at_ms: row.get(2)?,
-                        action: row.get(3)?,
-                        actor: row.get(4)?,
-                        conversation_id: row.get(5)?,
-                        refinement_id: row.get(6)?,
-                        before: None,
-                        after: None,
-                    },
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                ))
-            })
-            .context("unable to query lesson history")?;
-        let parse = |text: Option<String>| -> Result<Option<Value>> {
-            text.map(|text| serde_json::from_str(&text))
-                .transpose()
-                .context("unable to parse lesson snapshot")
-        };
-        let mut events = Vec::new();
-        for row in rows {
-            let (mut event, before, after) = row.context("unable to read lesson event")?;
-            event.before = parse(before)?;
-            event.after = parse(after)?;
-            events.push(event);
-        }
-        Ok(events)
+        lesson_events_where(&self.connection()?, "lesson_id = ?1", params![lesson_id])
     }
 
     pub fn create_lesson_proposal(&self, proposal: &NewProposal) -> Result<LessonProposal> {
@@ -898,6 +1068,7 @@ impl AppStore {
             target_level: proposal.target_level,
             payload: proposal.payload.clone(),
             status: ProposalStatus::Pending,
+            workspace_id: proposal.workspace_id.clone(),
             conversation_id: proposal.conversation_id.clone(),
             refinement_id: proposal.refinement_id.clone(),
             created_at_ms: now_ms(),
@@ -905,15 +1076,16 @@ impl AppStore {
         };
         conn.execute(
             "insert into lesson_proposals
-                (id, lesson_id, kind, target_level, payload_json, status, conversation_id,
-                 refinement_id, created_at_ms, decided_at_ms)
-             values (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8, null)",
+                (id, lesson_id, kind, target_level, payload_json, status, workspace_id,
+                 conversation_id, refinement_id, created_at_ms, decided_at_ms)
+             values (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8, ?9, null)",
             params![
                 created.id,
                 created.lesson_id,
                 created.kind.as_str(),
                 created.target_level.map(LessonLevel::as_str),
                 serde_json::to_string(&created.payload).context("unable to serialize proposal")?,
+                created.workspace_id,
                 created.conversation_id,
                 created.refinement_id,
                 created.created_at_ms,
@@ -923,60 +1095,10 @@ impl AppStore {
         Ok(created)
     }
 
-    /// Les propositions en attente, les plus anciennes d'abord.
+    /// Les propositions en attente, de tous les projets, les plus anciennes
+    /// d'abord.
     pub fn pending_lesson_proposals(&self) -> Result<Vec<LessonProposal>> {
-        let conn = self.connection()?;
-        let mut statement = conn
-            .prepare(
-                "select id, lesson_id, kind, target_level, payload_json, status, conversation_id,
-                        refinement_id, created_at_ms, decided_at_ms
-                 from lesson_proposals where status = 'pending' order by created_at_ms, id",
-            )
-            .context("unable to prepare proposal query")?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
-                ))
-            })
-            .context("unable to query proposals")?;
-        let mut proposals = Vec::new();
-        for row in rows {
-            let (
-                id,
-                lesson_id,
-                kind,
-                target,
-                payload,
-                status,
-                conversation,
-                refinement,
-                at,
-                decided,
-            ) = row.context("unable to read proposal")?;
-            proposals.push(LessonProposal {
-                id,
-                lesson_id,
-                kind: ProposalKind::parse(&kind)?,
-                target_level: target.as_deref().map(LessonLevel::parse).transpose()?,
-                payload: serde_json::from_str(&payload).context("unable to parse proposal")?,
-                status: ProposalStatus::parse(&status)?,
-                conversation_id: conversation,
-                refinement_id: refinement,
-                created_at_ms: at,
-                decided_at_ms: decided,
-            });
-        }
-        Ok(proposals)
+        proposals_where(&self.connection()?, "status = 'pending'", [])
     }
 
     /// Clôt une proposition en attente (son effet sur la leçon est appliqué
@@ -1011,26 +1133,27 @@ impl AppStore {
         .map(|found| found.is_some())
     }
 
-    /// Note qu'une refine de Prime a été importée, avec les opérations qui
-    /// ont échoué ; `false` si elle l'était déjà (l'import est idempotent
-    /// par `refinementId`).
-    pub fn mark_refinement_imported(
-        &self,
-        refinement_id: &str,
-        conversation_id: Option<&str>,
-        failures: &[String],
-    ) -> Result<bool> {
+    /// Note qu'une refine de Prime a été importée ; `false` si elle l'était
+    /// déjà (l'import est idempotent par `refinementId`).
+    pub fn mark_refinement_imported(&self, refinement: &NewImportedRefinement) -> Result<bool> {
         let conn = self.connection()?;
         let inserted = conn
             .execute(
                 "insert or ignore into prime_imported_refinements
-                    (refinement_id, conversation_id, imported_at_ms, failures_json)
-                 values (?1, ?2, ?3, ?4)",
+                    (refinement_id, conversation_id, workspace_id, actor, summary,
+                     imported_at_ms, skipped_json, failures_json)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
-                    refinement_id,
-                    conversation_id,
+                    refinement.refinement_id,
+                    refinement.conversation_id,
+                    refinement.workspace_id,
+                    refinement.actor,
+                    refinement.summary,
                     now_ms(),
-                    serde_json::to_string(failures).context("unable to serialize failures")?
+                    serde_json::to_string(&refinement.skipped)
+                        .context("unable to serialize skipped edits")?,
+                    serde_json::to_string(&refinement.failures)
+                        .context("unable to serialize failures")?
                 ],
             )
             .context("unable to record imported refinement")?;
@@ -1039,30 +1162,50 @@ impl AppStore {
 
     pub fn imported_refinement(&self, refinement_id: &str) -> Result<Option<ImportedRefinement>> {
         let conn = self.connection()?;
-        conn.query_row(
-            "select conversation_id, imported_at_ms, failures_json
-             from prime_imported_refinements where refinement_id = ?1",
-            params![refinement_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
+        Ok(imported_refinements_where(&conn, "refinement_id = ?1", params![refinement_id])?.pop())
+    }
+
+    /// Les refines importées pour un projet, les plus récentes d'abord.
+    /// Celles d'avant la v12 (sans projet noté) sont retrouvées par leur
+    /// conversation.
+    pub fn project_refinements(&self, workspace_id: &str) -> Result<Vec<ImportedRefinement>> {
+        let conn = self.connection()?;
+        imported_refinements_where(
+            &conn,
+            "workspace_id = ?1
+             or (workspace_id is null
+                 and conversation_id in (select id from conversations where workspace_id = ?1))",
+            params![workspace_id],
         )
-        .optional()
-        .context("unable to read imported refinement")?
-        .map(|(conversation_id, imported_at_ms, failures)| {
-            Ok(ImportedRefinement {
-                refinement_id: refinement_id.to_string(),
-                conversation_id,
-                imported_at_ms,
-                failures: serde_json::from_str(&failures)
-                    .context("unable to parse refinement failures")?,
-            })
-        })
-        .transpose()
+    }
+
+    /// Les événements de leçons causés par une refine, dans l'ordre.
+    pub fn refinement_events(&self, refinement_id: &str) -> Result<Vec<LessonEvent>> {
+        lesson_events_where(
+            &self.connection()?,
+            "refinement_id = ?1",
+            params![refinement_id],
+        )
+    }
+
+    /// Les propositions ouvertes par une refine, quel que soit leur état.
+    pub fn refinement_proposals(&self, refinement_id: &str) -> Result<Vec<LessonProposal>> {
+        proposals_where(
+            &self.connection()?,
+            "refinement_id = ?1",
+            params![refinement_id],
+        )
+    }
+
+    /// Les leçons d'un projet (le sien, son type, le global), archivées
+    /// comprises si demandé, dans l'ordre d'[`Self::applicable_lessons`]
+    /// pour les actives.
+    pub fn project_lessons(
+        &self,
+        scope: &LessonScope,
+        include_archived: bool,
+    ) -> Result<Vec<Lesson>> {
+        lessons_for_scope(&self.connection()?, scope, include_archived)
     }
 
     pub fn project_type(&self, workspace_id: &str) -> Result<Option<ProjectTypeSetting>> {
@@ -1318,14 +1461,14 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_idempotent_and_sets_version_11() {
+    fn migration_is_idempotent_and_sets_version_12() {
         let (store, path) = temp_store();
         store.migrate().unwrap();
         let conn = store.connection().unwrap();
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1582,6 +1725,7 @@ mod tests {
                 kind: ProposalKind::Promote,
                 target_level: Some(LessonLevel::Global),
                 payload: serde_json::json!({ "reason": "écrit en global par le modèle" }),
+                workspace_id: Some("/work/a".to_string()),
                 conversation_id: Some("conv-1".to_string()),
                 refinement_id: None,
             })
@@ -1601,31 +1745,148 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn record(refinement_id: &str) -> NewImportedRefinement {
+        NewImportedRefinement {
+            refinement_id: refinement_id.to_string(),
+            actor: "refine".to_string(),
+            ..NewImportedRefinement::default()
+        }
+    }
+
     #[test]
     fn refinements_import_once() {
         let (store, path) = temp_store();
         assert!(!store.is_refinement_imported("refine_1").unwrap());
         assert!(store
-            .mark_refinement_imported("refine_1", Some("conv-1"), &[])
+            .mark_refinement_imported(&NewImportedRefinement {
+                conversation_id: Some("conv-1".to_string()),
+                workspace_id: Some("/work/a".to_string()),
+                actor: "refine:retain".to_string(),
+                summary: Some("Tests".to_string()),
+                skipped: vec!["delete memory:x: not one of our active lessons".to_string()],
+                ..record("refine_1")
+            })
             .unwrap());
         assert!(store.is_refinement_imported("refine_1").unwrap());
         assert!(store
-            .mark_refinement_imported("refine_2", None, &["update yl_x: collision".to_string()])
+            .mark_refinement_imported(&NewImportedRefinement {
+                failures: vec!["update yl_x: collision".to_string()],
+                ..record("refine_2")
+            })
             .unwrap());
         let imported = store.imported_refinement("refine_2").unwrap().unwrap();
         assert_eq!(imported.failures, vec!["update yl_x: collision"]);
-        assert_eq!(
-            store
-                .imported_refinement("refine_1")
-                .unwrap()
-                .unwrap()
-                .failures,
-            Vec::<String>::new()
-        );
+        let first = store.imported_refinement("refine_1").unwrap().unwrap();
+        assert_eq!(first.failures, Vec::<String>::new());
+        assert_eq!(first.actor.as_deref(), Some("refine:retain"));
+        assert_eq!(first.summary.as_deref(), Some("Tests"));
+        assert_eq!(first.workspace_id.as_deref(), Some("/work/a"));
+        assert_eq!(first.skipped.len(), 1);
+        assert_eq!(first.undone_at_ms, None);
         assert_eq!(store.imported_refinement("refine_3").unwrap(), None);
-        assert!(!store
-            .mark_refinement_imported("refine_1", Some("conv-1"), &[])
-            .unwrap());
+        assert!(!store.mark_refinement_imported(&record("refine_1")).unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_refine_shows_its_events_and_proposals() {
+        let (store, path) = temp_store();
+        let refined = LessonOrigin {
+            actor: "refine:retain".to_string(),
+            conversation_id: Some("conv-1".to_string()),
+            refinement_id: Some("refine_1".to_string()),
+        };
+        let lesson = match store
+            .insert_lesson(&project_lesson("/work/a", "Lancer cargo test."), &refined)
+            .unwrap()
+        {
+            InsertLessonOutcome::Created(lesson) => lesson,
+            other => panic!("not created: {other:?}"),
+        };
+        store
+            .update_lesson(
+                &lesson.id,
+                "Tests",
+                "Lancer cargo nextest.",
+                &LessonOrigin::user(),
+            )
+            .unwrap();
+        store
+            .create_lesson_proposal(&NewProposal {
+                lesson_id: Some(lesson.id.clone()),
+                kind: ProposalKind::Promote,
+                target_level: Some(LessonLevel::Global),
+                payload: serde_json::json!({}),
+                workspace_id: Some("/work/a".to_string()),
+                conversation_id: Some("conv-1".to_string()),
+                refinement_id: Some("refine_1".to_string()),
+            })
+            .unwrap();
+        let events = store.refinement_events("refine_1").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "created");
+        let proposals = store.refinement_proposals("refine_1").unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].workspace_id.as_deref(), Some("/work/a"));
+        assert!(store.refinement_events("refine_2").unwrap().is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_project_lists_its_refines_newest_first() {
+        let (store, path) = temp_store();
+        let mark = |id: &str, workspace: Option<&str>, conversation: Option<&str>| {
+            store
+                .mark_refinement_imported(&NewImportedRefinement {
+                    workspace_id: workspace.map(str::to_string),
+                    conversation_id: conversation.map(str::to_string),
+                    ..record(id)
+                })
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        // Une refine d'avant la v12 : retrouvée par sa conversation.
+        let model = crate::store::ModelRef::new("test", "model");
+        let conversation = store
+            .create_conversation("/work/a", &model, "system")
+            .unwrap();
+        mark("refine_old", None, Some(&conversation.id));
+        mark("refine_a", Some("/work/a"), Some("conv-x"));
+        mark("refine_b", Some("/work/b"), None);
+        let ids: Vec<String> = store
+            .project_refinements("/work/a")
+            .unwrap()
+            .into_iter()
+            .map(|refinement| refinement.refinement_id)
+            .collect();
+        assert_eq!(ids, vec!["refine_a", "refine_old"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_project_lists_its_archived_lessons_on_request() {
+        let (store, path) = temp_store();
+        let scope = LessonScope {
+            workspace_id: "/work/a".to_string(),
+            project_type: None,
+        };
+        let lesson = match store
+            .insert_lesson(
+                &project_lesson("/work/a", "Lancer cargo test."),
+                &LessonOrigin::user(),
+            )
+            .unwrap()
+        {
+            InsertLessonOutcome::Created(lesson) => lesson,
+            other => panic!("not created: {other:?}"),
+        };
+        store
+            .archive_lesson(&lesson.id, &LessonOrigin::user())
+            .unwrap();
+        assert!(store.project_lessons(&scope, false).unwrap().is_empty());
+        let all = store.project_lessons(&scope, true).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, LessonStatus::Archived);
         let _ = std::fs::remove_file(path);
     }
 

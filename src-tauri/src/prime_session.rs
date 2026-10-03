@@ -1295,6 +1295,62 @@ pub async fn prime_set_project_type(
     .map_err(error_text)
 }
 
+/// La vue « Lessons » d'un projet (voir `prime_review`).
+#[tauri::command]
+pub async fn prime_lessons_overview(
+    app: AppHandle,
+    workspace_path: String,
+) -> Result<crate::prime_review::LessonsOverview, String> {
+    let store = app_store(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_review::lessons_overview(&store, &crate::prime::data_dir(), &workspace_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(error_text)
+}
+
+/// Le détail d'une refine de la vue « Lessons ».
+#[tauri::command]
+pub async fn prime_refine_detail(
+    app: AppHandle,
+    refinement_id: String,
+) -> Result<crate::prime_review::RefineDetail, String> {
+    let store = app_store(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_review::refine_detail(&store, &refinement_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(error_text)
+}
+
+/// L'historique d'une leçon de la vue « Lessons ».
+#[tauri::command]
+pub async fn prime_lesson_history(
+    app: AppHandle,
+    lesson_id: String,
+) -> Result<Vec<crate::prime_review::EventView>, String> {
+    let store = app_store(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_review::lesson_history(&store, &lesson_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(error_text)
+}
+
+/// Le nombre de propositions en attente, tous projets (badge « Lessons »).
+#[tauri::command]
+pub async fn prime_pending_proposal_count(app: AppHandle) -> Result<usize, String> {
+    let store = app_store(&app)?;
+    tauri::async_runtime::spawn_blocking(move || store.pending_lesson_proposals())
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|proposals| proposals.len())
+        .map_err(error_text)
+}
+
 fn app_store(app: &AppHandle) -> Result<sinew_app::store::AppStore, String> {
     app.try_state::<crate::DesktopState>()
         .map(|desktop| desktop.store.clone())
