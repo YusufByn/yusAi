@@ -229,7 +229,8 @@ export function Workspace({
   const createConversation = useCallback(async () => {
     const seq = ++navigationSeqRef.current;
     try {
-      const next = await api.createConversation(workspacePath);
+      // Une nouvelle conversation s'ouvre en Prime.
+      const next = await api.createConversation(workspacePath, "prime");
       if (seq !== navigationSeqRef.current) return;
       if (next.workspace.path !== workspacePath) return;
       activeConvIdRef.current = next.activeConversation.id;
@@ -1741,16 +1742,35 @@ export function Workspace({
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalFullHeight, setTerminalFullHeight] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(INITIAL_TERMINAL_HEIGHT);
-  // Chat engine: Sinew by default. Each conversation gets its own Prime
-  // pane (and daemon session) the first time Prime is shown for it; panes
-  // stay mounted (hidden) so sessions survive toggling and switching
-  // conversations, and unmount when the conversation is deleted or the
-  // workspace changes.
-  const [chatEngine, setChatEngine] = useState<ChatEngine>("sinew");
+  // Chat engine: each conversation keeps its own (`chatEngine` in the
+  // store). New conversations from the "new conversation" button open in
+  // Prime; the others (first one of a workspace, "implement plan fresh",
+  // Remote) in Sinew. The toggle switches the active conversation only.
+  // Each conversation gets its own Prime pane (and daemon session) the
+  // first time Prime is shown for it; panes stay mounted (hidden) so
+  // sessions survive toggling and switching conversations, and unmount
+  // when the conversation is deleted or the workspace changes.
+  const chatEngine: ChatEngine =
+    conversations.find((conversation) => conversation.id === activeConv.id)
+      ?.chatEngine ?? "sinew";
   const [primeConversationIds, setPrimeConversationIds] = useState<string[]>([]);
-  const selectChatEngine = useCallback((engine: ChatEngine) => {
-    setChatEngine(engine);
-  }, []);
+  const selectChatEngine = useCallback(
+    (engine: ChatEngine) => {
+      const conversationId = activeConv.id;
+      setConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === conversationId
+            ? { ...conversation, chatEngine: engine }
+            : conversation,
+        ),
+      );
+      api
+        .setConversationEngine(workspacePath, conversationId, engine)
+        .then(setConversations)
+        .catch(console.error);
+    },
+    [workspacePath, activeConv.id],
+  );
   useEffect(() => {
     setPrimeConversationIds([]);
   }, [workspacePath]);

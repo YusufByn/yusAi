@@ -703,10 +703,12 @@ impl RemoteRuntime {
                 Ok(serde_json::to_value(conversations)?)
             }
             RemotePhoneCommand::CreateConversation => {
+                // En Sinew : Remote ne pilote que le chat Sinew.
                 let bootstrap = conversations::create_conversation(
                     state,
-                    WorkspaceInput {
+                    CreateConversationInput {
                         workspace_path: workspace_path.clone(),
+                        engine: ChatEngine::Sinew,
                     },
                 )
                 .await

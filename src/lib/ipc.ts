@@ -5,6 +5,7 @@ import type {
   ActiveTurnSummary,
   AgentMode,
   AnthropicProviderStatus,
+  ChatEngine,
   ChatMessage,
   ClipboardImageAttachment,
   ContextEstimate,
@@ -319,9 +320,19 @@ export const api = {
       input: { workspacePath },
     });
   },
-  createConversation(workspacePath: string) {
+  // Sans moteur, la conversation est créée en Sinew.
+  createConversation(workspacePath: string, engine?: ChatEngine) {
     return invoke<WorkspaceBootstrap>("create_conversation", {
-      input: { workspacePath },
+      input: { workspacePath, engine },
+    });
+  },
+  setConversationEngine(
+    workspacePath: string,
+    conversationId: string,
+    engine: ChatEngine,
+  ) {
+    return invoke<ConversationSummary[]>("set_conversation_engine", {
+      input: { workspacePath, conversationId, engine },
     });
   },
   loadConversation(workspacePath: string, conversationId: string) {

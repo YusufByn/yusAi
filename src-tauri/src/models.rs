@@ -227,6 +227,24 @@ pub(super) struct StopAgentSwarmInput {
     pub(super) team_name: Option<String>,
 }
 
+/// Sans `engine`, la conversation est en Sinew : seul le bouton « nouvelle
+/// conversation » du front la crée en Prime.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CreateConversationInput {
+    pub(super) workspace_path: String,
+    #[serde(default)]
+    pub(super) engine: ChatEngine,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetConversationEngineInput {
+    pub(super) workspace_path: String,
+    pub(super) conversation_id: String,
+    pub(super) engine: ChatEngine,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RenameConversationInput {

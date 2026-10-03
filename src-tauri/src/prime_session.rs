@@ -1749,6 +1749,21 @@ pub async fn prime_set_thinking_level(
         .map_err(error_text)
 }
 
+/// Au démarrage, une seule fois : une conversation d'avant le moteur par
+/// conversation qui a un fil Prime et aucun message Sinew s'ouvre en Prime
+/// (`AppStore::adopt_prime_threads`). Un échec laisse tout en Sinew.
+pub fn adopt_prime_threads(store: &sinew_app::AppStore) {
+    let agent_dir = crate::prime::agent_dir();
+    let has_thread = |conversation_id: &str| {
+        thread_path(&agent_dir, conversation_id).is_ok_and(|path| path.is_file())
+    };
+    match store.adopt_prime_threads(has_thread) {
+        Ok(0) => {}
+        Ok(adopted) => tracing::info!(adopted, "prime threads adopted"),
+        Err(error) => tracing::warn!(error = %format!("{error:#}"), "prime threads not adopted"),
+    }
+}
+
 /// Supprime le fil Prime d'une conversation yusAi supprimée. Sans fichier,
 /// rien à faire : le daemon n'est pas lancé pour ça.
 pub async fn delete_conversation_thread(app: &AppHandle, conversation_id: &str) -> Result<()> {

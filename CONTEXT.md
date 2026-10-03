@@ -330,6 +330,18 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   Limite : une relance du noyau en cours de session passe sans nous. Une
   skill que Prime ne charge pas (vide, sans description) reste dans
   l'onglet Skills, « Invalid » avec la raison, et n'est pas passée.
+- **Moteur par conversation** (commit 12b) : avant, un `useState`
+  global à la fenêtre (Sinew au lancement, la bascule changeait toutes les
+  conversations). Maintenant colonne `conversations.chat_engine`
+  (`sinew` | `prime`, schéma v13, `sinew` par défaut), lue dans
+  `ConversationSummary.chatEngine` ; la bascule change la conversation
+  active (`set_conversation_engine`, sans réordonner la liste). Prime pour
+  le bouton « nouvelle conversation » (et la conversation recréée quand la
+  dernière est supprimée) ; Sinew pour la première conversation d'un
+  workspace, « Implement plan fresh » et Remote. Rattrapage unique au
+  démarrage (`prime_session::adopt_prime_threads`, marqué
+  `prime.threadsAdopted` dans `app_settings`) : fil Prime et aucun message
+  Sinew → Prime ; les deux → Sinew.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
@@ -542,6 +554,10 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
     nôtres (même limite que Prime seul entre deux dépôts) ;
   - changer le type d'un projet ne renomme pas le type : leçons et skills
     de l'ancien type restent à ce type (pour les autres projets qui l'ont).
+- **Remote ne voit que Sinew** : le téléphone lit et écrit l'historique
+  Sinew ; une conversation en Prime y apparaît vide (ou sans ses tours
+  Prime), et un message envoyé depuis le téléphone part en Sinew. Une
+  conversation créée depuis le téléphone est en Sinew.
 - Prime se présente avec une version Claude Code figée dans vendor
   (`claude-cli/2.1.281`) : un modèle qui exige plus récent serait refusé.
 

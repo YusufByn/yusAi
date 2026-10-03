@@ -45,7 +45,7 @@ use sinew_app::{
     subagent_system_prompt, system_prompt_for_mode_with_plan_prompt, system_prompt_with_todo,
     todo_list_from_history, tool_settings_view, trash_workspace_entry,
     validate_turn_checkpoints_restorable, write_workspace_file, AgentEvent, AgentMode, AppStore,
-    BashTool, ConversationEvent, ConversationSummary, CreateImageTool, EditFileTool, GlobTool,
+    BashTool, ChatEngine, ConversationEvent, ConversationSummary, CreateImageTool, EditFileTool, GlobTool,
     GoalWorkflowState, GrepTool, HttpRequestTool, ImportedEntry, InstalledSkill, LogsTool,
     McpOAuthLoginPlan, McpOAuthOutcome, McpOAuthStatus, McpSettings, McpToolRegistry,
     ModeModelSettings, OpenRouterModelRecord, PlanArtifactState, PlanWorkflowState, QuestionTool,
@@ -147,6 +147,7 @@ pub fn run() {
         .try_init();
 
     let store = AppStore::open_default().expect("unable to open app store");
+    prime_session::adopt_prime_threads(&store);
     let openrouter_models = store.load_openrouter_models().unwrap_or_default();
     let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
     // Même construction que `AnthropicProvider::from_default_sources`, en
@@ -329,6 +330,7 @@ pub fn run() {
             conversations::create_conversation,
             conversations::load_conversation,
             conversations::rename_conversation,
+            conversations::set_conversation_engine,
             conversations::delete_conversation,
             conversations::set_conversation_mode,
             conversations::set_conversation_model_preference,

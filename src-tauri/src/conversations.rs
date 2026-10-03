@@ -16,16 +16,17 @@ pub(super) async fn list_conversations(
 #[tauri::command]
 pub(super) async fn create_conversation(
     state: State<'_, DesktopState>,
-    input: WorkspaceInput,
+    input: CreateConversationInput,
 ) -> std::result::Result<WorkspaceBootstrap, String> {
     let workspace_root =
         normalize_workspace_root(&input.workspace_path).map_err(error_to_string)?;
     state
         .store
-        .create_conversation(
+        .create_conversation_with_engine(
             &workspace_root.display().to_string(),
             &state.default_model,
             &state.system_prompt,
+            input.engine,
         )
         .map_err(error_to_string)?;
     state
@@ -49,6 +50,24 @@ pub(super) async fn load_conversation(
         )
         .map_err(error_to_string)?
         .ok_or_else(|| "conversation not found".to_string())
+}
+
+#[tauri::command]
+pub(super) async fn set_conversation_engine(
+    state: State<'_, DesktopState>,
+    input: SetConversationEngineInput,
+) -> std::result::Result<Vec<ConversationSummary>, String> {
+    let workspace_root =
+        normalize_workspace_root(&input.workspace_path).map_err(error_to_string)?;
+    let workspace_id = workspace_root.display().to_string();
+    state
+        .store
+        .set_conversation_engine(&workspace_id, &input.conversation_id, input.engine)
+        .map_err(error_to_string)?;
+    state
+        .store
+        .list_conversations(&workspace_id)
+        .map_err(error_to_string)
 }
 
 #[tauri::command]

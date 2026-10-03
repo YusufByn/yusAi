@@ -103,6 +103,8 @@ export type ConversationSummary = {
   id: string;
   title: string;
   updatedAtMs: number;
+  // Moteur de la conversation, gardé en base (colonne `chat_engine`).
+  chatEngine: ChatEngine;
 };
 
 export type SavedConversation = {

@@ -70,7 +70,39 @@ pub struct ConversationSummary {
     pub id: String,
     pub title: String,
     pub updated_at_ms: i64,
+    pub chat_engine: ChatEngine,
 }
+
+/// Moteur qui affiche une conversation : le chat historique ou Prime Agent
+/// (fil `yusai-threads/<id>.jsonl` côté src-tauri). Les conversations
+/// d'avant la colonne sont en `Sinew`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatEngine {
+    #[default]
+    Sinew,
+    Prime,
+}
+
+impl ChatEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            ChatEngine::Sinew => "sinew",
+            ChatEngine::Prime => "prime",
+        }
+    }
+
+    fn from_column(value: &str) -> Self {
+        match value {
+            "prime" => ChatEngine::Prime,
+            _ => ChatEngine::Sinew,
+        }
+    }
+}
+
+/// Réglage qui marque le rattrapage du moteur fait
+/// ([`AppStore::adopt_prime_threads`]).
+const PRIME_THREADS_ADOPTED_KEY: &str = "prime.threadsAdopted";
 
 #[derive(Debug, Clone)]
 pub struct TurnCheckpointRecord {
@@ -756,6 +788,21 @@ impl AppStore {
         default_model: &ModelRef,
         default_system: &str,
     ) -> Result<SavedConversation> {
+        self.create_conversation_with_engine(
+            workspace_id,
+            default_model,
+            default_system,
+            ChatEngine::Sinew,
+        )
+    }
+
+    pub fn create_conversation_with_engine(
+        &self,
+        workspace_id: &str,
+        default_model: &ModelRef,
+        default_system: &str,
+        engine: ChatEngine,
+    ) -> Result<SavedConversation> {
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
         let title = DEFAULT_CONVERSATION_TITLE.to_string();
@@ -770,8 +817,8 @@ impl AppStore {
         let mode_model_settings_json = serde_json::to_string(&mode_model_settings)?;
         let conn = self.connection()?;
         conn.execute(
-            "insert into conversations (id, workspace_id, title, title_initialized, model_json, mode_model_settings_json, system_prompt, todo_list_json, plan_workflow_json, goal_workflow_json, created_at_ms, updated_at_ms)
-             values (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "insert into conversations (id, workspace_id, title, title_initialized, model_json, mode_model_settings_json, system_prompt, todo_list_json, plan_workflow_json, goal_workflow_json, created_at_ms, updated_at_ms, chat_engine)
+             values (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 &id,
                 workspace_id,
@@ -784,6 +831,7 @@ impl AppStore {
                 goal_workflow_json,
                 now,
                 now,
+                engine.as_str(),
             ],
         )
         .context("unable to insert conversation")?;
@@ -806,7 +854,7 @@ impl AppStore {
         let conn = self.connection()?;
         let mut statement = conn
             .prepare(
-                "select id, title, updated_at_ms from conversations
+                "select id, title, updated_at_ms, chat_engine from conversations
                  where workspace_id = ?1
                  order by updated_at_ms desc",
             )
@@ -818,6 +866,7 @@ impl AppStore {
                     id: row.get(0)?,
                     title: row.get(1)?,
                     updated_at_ms: row.get(2)?,
+                    chat_engine: ChatEngine::from_column(&row.get::<_, String>(3)?),
                 })
             })
             .context("unable to read conversation list")?;
@@ -827,6 +876,67 @@ impl AppStore {
             conversations.push(row.context("bad conversation row")?);
         }
         Ok(conversations)
+    }
+
+    /// Change le moteur d'une conversation, sans toucher à sa date (la
+    /// liste ne se réordonne pas).
+    pub fn set_conversation_engine(
+        &self,
+        workspace_id: &str,
+        id: &str,
+        engine: ChatEngine,
+    ) -> Result<()> {
+        let conn = self.connection()?;
+        let changed = conn
+            .execute(
+                "update conversations set chat_engine = ?3 where workspace_id = ?1 and id = ?2",
+                params![workspace_id, id, engine.as_str()],
+            )
+            .context("unable to set conversation engine")?;
+        if changed == 0 {
+            anyhow::bail!("conversation not found");
+        }
+        Ok(())
+    }
+
+    /// Rattrapage, une seule fois : une conversation d'avant le moteur par
+    /// conversation qui a un fil Prime (`has_thread`) et aucun message
+    /// Sinew passe en Prime ; avec les deux, elle reste en Sinew (ce
+    /// qu'elle montrait au lancement). Rend le nombre de conversations
+    /// passées en Prime.
+    pub fn adopt_prime_threads(&self, has_thread: impl Fn(&str) -> bool) -> Result<usize> {
+        if self
+            .load_json_setting::<bool>(PRIME_THREADS_ADOPTED_KEY)?
+            .unwrap_or(false)
+        {
+            return Ok(0);
+        }
+        let conn = self.connection()?;
+        let without_messages: Vec<String> = {
+            let mut statement = conn
+                .prepare(
+                    "select id from conversations c
+                     where chat_engine = 'sinew'
+                       and not exists (select 1 from messages m where m.conversation_id = c.id)",
+                )
+                .context("unable to prepare engine backfill query")?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .context("unable to read conversations without messages")?;
+            rows.collect::<rusqlite::Result<_>>()
+                .context("bad conversation row")?
+        };
+        let mut adopted = 0;
+        for id in without_messages.iter().filter(|id| has_thread(id)) {
+            adopted += conn
+                .execute(
+                    "update conversations set chat_engine = 'prime' where id = ?1",
+                    params![id],
+                )
+                .context("unable to set conversation engine")?;
+        }
+        self.save_json_setting(PRIME_THREADS_ADOPTED_KEY, &true)?;
+        Ok(adopted)
     }
 
     pub fn load_conversation(
@@ -1581,7 +1691,7 @@ impl AppStore {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap_or(0);
 
-        if version >= 12 {
+        if version >= 13 {
             return Ok(());
         }
 
@@ -1628,6 +1738,8 @@ impl AppStore {
         ensure_conversations_goal_workflow_column(&conn)?;
         ensure_conversations_mode_model_settings_column(&conn)?;
         ensure_conversations_title_initialized_column(&conn)?;
+        // v13 : moteur par conversation.
+        ensure_conversations_chat_engine_column(&conn)?;
         ensure_app_settings_table(&conn)?;
         ensure_turn_checkpoints_table(&conn)?;
         if version < 8 {
@@ -1638,7 +1750,7 @@ impl AppStore {
         // refines ; v12 : détail des refines et projet des propositions
         // (store/lessons.rs).
         lessons::ensure_lessons_tables(&conn)?;
-        conn.pragma_update(None, "user_version", 12)
+        conn.pragma_update(None, "user_version", 13)
             .context("unable to set sqlite schema version")?;
         Ok(())
     }
@@ -1726,6 +1838,17 @@ fn ensure_conversations_title_initialized_column(conn: &Connection) -> Result<()
         "#,
     )
     .context("unable to add conversation title initialization column")?;
+    Ok(())
+}
+
+fn ensure_conversations_chat_engine_column(conn: &Connection) -> Result<()> {
+    if conversation_has_column(conn, "chat_engine")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "alter table conversations add column chat_engine text not null default 'sinew';",
+    )
+    .context("unable to add conversation chat engine column")?;
     Ok(())
 }
 
@@ -2040,6 +2163,115 @@ mod tests {
             Ok(())
         })();
         let _ = std::fs::remove_file(path);
+        result
+    }
+
+    fn temp_store(name: &str) -> AppStore {
+        let path =
+            std::env::temp_dir().join(format!("sinew-store-{name}-{}.sqlite3", Uuid::new_v4()));
+        AppStore { path }
+    }
+
+    fn engines(store: &AppStore, workspace: &str) -> Result<Vec<(String, ChatEngine)>> {
+        Ok(store
+            .list_conversations(workspace)?
+            .into_iter()
+            .map(|summary| (summary.id, summary.chat_engine))
+            .collect())
+    }
+
+    #[test]
+    fn a_conversation_keeps_its_engine() -> Result<()> {
+        let store = temp_store("engine");
+        let result = (|| -> Result<()> {
+            store.migrate()?;
+            let model = ModelRef::new("test", "model");
+            let old = store.create_conversation("/work/a", &model, "system")?;
+            let new = store.create_conversation_with_engine(
+                "/work/a",
+                &model,
+                "system",
+                ChatEngine::Prime,
+            )?;
+            let order = engines(&store, "/work/a")?;
+            assert_eq!(order.len(), 2);
+            assert!(order.contains(&(old.id.clone(), ChatEngine::Sinew)));
+            assert!(order.contains(&(new.id.clone(), ChatEngine::Prime)));
+
+            // La bascule change le moteur sans réordonner la liste.
+            store.set_conversation_engine("/work/a", &old.id, ChatEngine::Prime)?;
+            store.set_conversation_engine("/work/a", &new.id, ChatEngine::Sinew)?;
+            let switched: Vec<_> = engines(&store, "/work/a")?;
+            assert_eq!(
+                switched.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                order.iter().map(|(id, _)| id).collect::<Vec<_>>()
+            );
+            assert!(switched.contains(&(old.id.clone(), ChatEngine::Prime)));
+            assert!(switched.contains(&(new.id.clone(), ChatEngine::Sinew)));
+
+            // Un tour Sinew enregistré ne le remet pas à zéro.
+            let mut saved = store.load_conversation("/work/a", &old.id)?.unwrap();
+            saved.history.push(message(Role::User, "Bonjour", None));
+            store.save_conversation(&saved)?;
+            assert!(engines(&store, "/work/a")?.contains(&(old.id.clone(), ChatEngine::Prime)));
+
+            assert!(store
+                .set_conversation_engine("/work/b", &old.id, ChatEngine::Sinew)
+                .is_err());
+            Ok(())
+        })();
+        let _ = fs::remove_file(&store.path);
+        result
+    }
+
+    #[test]
+    fn conversations_from_before_the_engine_column_are_sinew() -> Result<()> {
+        let store = temp_store("engine-migration");
+        let result = (|| -> Result<()> {
+            store.migrate()?;
+            let model = ModelRef::new("test", "model");
+            let conversation = store.create_conversation("/work/a", &model, "system")?;
+            let conn = store.connection()?;
+            conn.execute_batch("alter table conversations drop column chat_engine;")?;
+            conn.pragma_update(None, "user_version", 12)?;
+            store.migrate()?;
+            assert_eq!(
+                engines(&store, "/work/a")?,
+                vec![(conversation.id, ChatEngine::Sinew)]
+            );
+            Ok(())
+        })();
+        let _ = fs::remove_file(&store.path);
+        result
+    }
+
+    #[test]
+    fn only_a_conversation_with_a_prime_thread_and_no_sinew_message_turns_prime() -> Result<()> {
+        let store = temp_store("engine-adopt");
+        let result = (|| -> Result<()> {
+            store.migrate()?;
+            let model = ModelRef::new("test", "model");
+            let prime_only = store.create_conversation("/work/a", &model, "system")?;
+            let mut both = store.create_conversation("/work/a", &model, "system")?;
+            both.history.push(message(Role::User, "Bonjour", None));
+            store.save_conversation(&both)?;
+            let sinew_empty = store.create_conversation("/work/a", &model, "system")?;
+            let with_thread = [prime_only.id.clone(), both.id.clone()];
+            let has_thread = |id: &str| with_thread.iter().any(|thread| thread == id);
+
+            assert_eq!(store.adopt_prime_threads(has_thread)?, 1);
+            let after = engines(&store, "/work/a")?;
+            assert!(after.contains(&(prime_only.id.clone(), ChatEngine::Prime)));
+            assert!(after.contains(&(both.id.clone(), ChatEngine::Sinew)));
+            assert!(after.contains(&(sinew_empty.id.clone(), ChatEngine::Sinew)));
+
+            // Une seule fois : un choix fait ensuite par l'utilisateur reste.
+            store.set_conversation_engine("/work/a", &prime_only.id, ChatEngine::Sinew)?;
+            assert_eq!(store.adopt_prime_threads(has_thread)?, 0);
+            assert!(engines(&store, "/work/a")?.contains(&(prime_only.id, ChatEngine::Sinew)));
+            Ok(())
+        })();
+        let _ = fs::remove_file(&store.path);
         result
     }
 

@@ -1553,14 +1553,14 @@ mod tests {
     }
 
     #[test]
-    fn migration_is_idempotent_and_sets_version_12() {
+    fn migration_is_idempotent_and_sets_version_13() {
         let (store, path) = temp_store();
         store.migrate().unwrap();
         let conn = store.connection().unwrap();
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let _ = std::fs::remove_file(path);
     }
 
