@@ -966,6 +966,8 @@ export type UndoReport = {
   reverted: string[];
   restored: string[];
   rejectedProposals: number;
+  archivedSkills: string[];
+  restoredSkills: string[];
   skipped: string[];
 };
 

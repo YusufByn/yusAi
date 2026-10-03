@@ -162,6 +162,8 @@ fn edit_op(
             payload: json!({
                 "action": action,
                 "id": id,
+                "title": edit.get("title").cloned().unwrap_or(Value::Null),
+                "content": edit.get("content").cloned().unwrap_or(Value::Null),
                 "entry": edit.get("after").or_else(|| edit.get("before")).cloned().unwrap_or(Value::Null),
                 "reference": edit.get("reference").cloned().unwrap_or(Value::Null),
                 "arguments": edit.get("arguments").cloned().unwrap_or(Value::Null),
@@ -1104,6 +1106,8 @@ mod tests {
         assert_eq!(payload["action"], "create");
         assert_eq!(payload["reference"]["import"], "fmt");
         assert_eq!(payload["entry"]["content"], "Formater le code.");
+        assert_eq!(payload["title"], "Format");
+        assert_eq!(payload["content"], "Formater le code.");
     }
 
     #[test]

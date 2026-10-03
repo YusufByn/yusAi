@@ -1404,7 +1404,12 @@ pub async fn prime_accept_proposal(
     target_level: Option<sinew_app::store::LessonLevel>,
 ) -> Result<(), String> {
     with_store(&app, move |store| {
-        crate::prime_review::accept_proposal(store, &proposal_id, target_level)
+        crate::prime_review::accept_proposal(
+            store,
+            &crate::prime_skills::SkillSources::app(),
+            &proposal_id,
+            target_level,
+        )
     })
     .await
 }
@@ -1490,9 +1495,62 @@ pub async fn prime_undo_refine(
     refinement_id: String,
 ) -> Result<crate::prime_review::UndoReport, String> {
     with_store(&app, move |store| {
-        crate::prime_review::undo_refine(store, &refinement_id)
+        crate::prime_review::undo_refine(
+            store,
+            &crate::prime_skills::SkillSources::app(),
+            &refinement_id,
+        )
     })
     .await
+}
+
+/// Range une skill de yusAi à un autre niveau, vu du projet affiché.
+#[tauri::command]
+pub async fn prime_set_skill_level(
+    app: AppHandle,
+    workspace_path: String,
+    dir: String,
+    level: sinew_app::store::LessonLevel,
+) -> Result<String, String> {
+    with_store(&app, move |store| {
+        crate::prime_review::set_skill_level(
+            store,
+            &crate::prime_skills::SkillSources::app(),
+            &workspace_path,
+            Path::new(&dir),
+            level,
+        )
+        .map(|dir| dir.display().to_string())
+    })
+    .await
+}
+
+/// Archive une skill de yusAi.
+#[tauri::command]
+pub async fn prime_archive_skill(dir: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_skills::archive_skill(&crate::prime::data_dir(), Path::new(&dir))
+            .map(|dir| dir.display().to_string())
+            .map_err(error_text)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Remet une skill archivée à sa place, si ses noms sont encore libres.
+#[tauri::command]
+pub async fn prime_restore_skill(workspace_path: String, dir: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::prime_skills::restore_skill(
+            &crate::prime_skills::SkillSources::app(),
+            Path::new(&workspace_path),
+            Path::new(&dir),
+        )
+        .map(|dir| dir.display().to_string())
+        .map_err(error_text)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn app_store(app: &AppHandle) -> Result<sinew_app::store::AppStore, String> {

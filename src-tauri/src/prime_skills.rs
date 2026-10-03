@@ -28,20 +28,34 @@
 //! pas) ; entre les nôtres, le niveau le plus haut gagne (global, type,
 //! projet), puis le dossier le plus ancien. Une perdante n'est pas passée au
 //! `Create` : jamais installée, elle ne déloge personne.
+//!
+//! Ce que fait yusAi lui-même (écrire une skill acceptée, changer de
+//! niveau, restaurer) est refusé si le nom est déjà pris, à ce niveau ou en
+//! Python n'importe où : pas de nouveau conflit de notre fait. Une skill
+//! écrite par l'acceptation d'une proposition porte l'id de la proposition
+//! dans son front matter (`metadata.yusai-proposal`), qui la retrouve après
+//! un déplacement (« Undo » d'une refine). L'archive range une skill sous
+//! `archive/<date>-<nom>/`, avec `.yusai-archived` (son ancien dossier).
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+
+use anyhow::{anyhow, bail, Context, Result};
 
 use pa_core::packages::{
     BundledSkillsDir, MissingSourceAction, PackageManager, PackageManagerOptions,
 };
 use pa_core::settings::SettingsManager;
+use pa_core::skills::frontmatter::parse_frontmatter;
 use pa_core::skills::{load_skills, load_skills_from_dir, LoadSkillsOptions, Skill};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sinew_app::store::{normalize_project_type, LessonLevel};
 
 const SKILLS_DIR: &str = "prime-skills";
 const OWNER_FILE: &str = ".yusai-owner";
+const ARCHIVED_FILE: &str = ".yusai-archived";
+/// La clé du front matter qui lie une skill à la proposition acceptée.
+const PROPOSAL_KEY: &str = "yusai-proposal";
 
 /// Les dossiers qui décident des skills d'une session.
 #[derive(Debug, Clone)]
@@ -93,6 +107,39 @@ pub fn global_skills_dir(data_dir: &Path) -> PathBuf {
     skills_root(data_dir).join("global")
 }
 
+/// Le dossier des skills archivées, hors du relevé.
+pub fn archive_dir(data_dir: &Path) -> PathBuf {
+    skills_root(data_dir).join("archive")
+}
+
+/// Le dossier d'un niveau vu du projet `workspace_id` (de type confirmé
+/// `project_type`), créé avec son propriétaire.
+pub fn level_dir(
+    data_dir: &Path,
+    level: LessonLevel,
+    workspace_id: &str,
+    project_type: Option<&str>,
+) -> Result<PathBuf> {
+    let (dir, owner) = match level {
+        LessonLevel::Project => (
+            project_skills_dir(data_dir, workspace_id),
+            Some(workspace_id),
+        ),
+        LessonLevel::Type => {
+            let project_type =
+                project_type.ok_or_else(|| anyhow!("choose the project's type first"))?;
+            (type_skills_dir(data_dir, project_type), Some(project_type))
+        }
+        LessonLevel::Global => (global_skills_dir(data_dir), None),
+    };
+    match owner {
+        Some(owner) => ensure_owner_dir(&dir, owner),
+        None => std::fs::create_dir_all(&dir),
+    }
+    .with_context(|| format!("unable to create {}", dir.display()))?;
+    Ok(dir)
+}
+
 /// Crée le dossier d'un projet ou d'un type avec son fichier de
 /// propriétaire.
 pub fn ensure_owner_dir(dir: &Path, owner: &str) -> std::io::Result<()> {
@@ -113,15 +160,93 @@ pub struct PythonNames {
     pub distribution: String,
 }
 
+/// Le nom Python que deux skills se disputent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "name")]
+pub enum SharedName {
+    Import(String),
+    Distribution(String),
+}
+
 impl PythonNames {
-    fn shares_with(&self, other: &PythonNames) -> Option<String> {
+    fn shares_with(&self, other: &PythonNames) -> Option<SharedName> {
         if self.import_name == other.import_name {
-            Some(format!("nom d'import Python `{}`", self.import_name))
+            Some(SharedName::Import(self.import_name.clone()))
         } else if self.distribution == other.distribution {
-            Some(format!("distribution Python `{}`", self.distribution))
+            Some(SharedName::Distribution(self.distribution.clone()))
         } else {
             None
         }
+    }
+}
+
+/// Une skill Python qui en déloge une autre, ou la refuse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conflict {
+    pub shared: SharedName,
+    /// Le nom de la skill qui garde ce nom.
+    pub holder: String,
+    /// Son niveau chez yusAi ; `None` : une skill de Prime.
+    pub holder_level: Option<LessonLevel>,
+    /// Son projet ou son type chez yusAi.
+    pub holder_owner: Option<String>,
+    pub holder_dir: PathBuf,
+}
+
+impl Conflict {
+    fn with_ours(shared: SharedName, holder: &YusaiSkill) -> Self {
+        Self {
+            shared,
+            holder: holder.name.clone(),
+            holder_level: Some(holder.level),
+            holder_owner: holder.owner.clone(),
+            holder_dir: holder.dir.clone(),
+        }
+    }
+
+    /// Pour le modèle : « nom d'import Python `fmt` déjà pris par la skill
+    /// `fmt` du niveau global ».
+    pub fn french(&self) -> String {
+        let shared = match &self.shared {
+            SharedName::Import(name) => format!("nom d'import Python `{name}`"),
+            SharedName::Distribution(name) => format!("distribution Python `{name}`"),
+        };
+        let place = match (self.holder_level, self.holder_owner.as_deref()) {
+            (None, _) => format!("de Prime ({})", self.holder_dir.display()),
+            (Some(LessonLevel::Global), _) => "du niveau global".to_string(),
+            (Some(LessonLevel::Type), Some(owner)) => format!("du type {owner}"),
+            (Some(LessonLevel::Type), None) => "d'un type".to_string(),
+            (Some(LessonLevel::Project), Some(owner)) => format!("du projet {owner}"),
+            (Some(LessonLevel::Project), None) => "d'un projet".to_string(),
+        };
+        format!("{shared} déjà pris par la skill `{}` {place}", self.holder)
+    }
+
+    /// Pour la vue et les erreurs : « Python import name `fmt` is taken by
+    /// the global skill `fmt` ».
+    pub fn english(&self) -> String {
+        let shared = match &self.shared {
+            SharedName::Import(name) => format!("Python import name `{name}`"),
+            SharedName::Distribution(name) => format!("Python distribution `{name}`"),
+        };
+        let holder = match (self.holder_level, self.holder_owner.as_deref()) {
+            (None, _) => format!(
+                "the Prime skill `{}` ({})",
+                self.holder,
+                self.holder_dir.display()
+            ),
+            (Some(LessonLevel::Global), _) => format!("the global skill `{}`", self.holder),
+            (Some(LessonLevel::Type), Some(owner)) => {
+                format!("the skill `{}` of type {owner}", self.holder)
+            }
+            (Some(LessonLevel::Type), None) => format!("the type skill `{}`", self.holder),
+            (Some(LessonLevel::Project), Some(owner)) => {
+                format!("the skill `{}` of project {owner}", self.holder)
+            }
+            (Some(LessonLevel::Project), None) => format!("the project skill `{}`", self.holder),
+        };
+        format!("{shared} is taken by {holder}")
     }
 }
 
@@ -141,6 +266,8 @@ pub struct YusaiSkill {
     pub file: PathBuf,
     pub python: Option<PythonNames>,
     pub created_ms: u64,
+    /// La proposition dont l'acceptation l'a écrite.
+    pub proposal_id: Option<String>,
 }
 
 /// Une skill de yusAi écartée d'une session.
@@ -148,7 +275,7 @@ pub struct YusaiSkill {
 #[serde(rename_all = "camelCase")]
 pub struct DisabledSkill {
     pub skill: YusaiSkill,
-    pub reason: String,
+    pub conflict: Conflict,
 }
 
 /// Les skills de yusAi pour une session.
@@ -202,6 +329,7 @@ pub fn skills_in(dir: &Path, level: LessonLevel, owner: Option<String>) -> Vec<Y
                 level,
                 owner: owner.clone(),
                 created_ms: created_ms(&dir),
+                proposal_id: proposal_id(&skill.file_path),
                 file: skill.file_path,
                 dir,
             }
@@ -289,9 +417,9 @@ pub fn select_skills(ours: &[YusaiSkill], prime: &[Skill], chain: &[PathBuf]) ->
             .filter(|skill| skill.dir.parent() == Some(level_dir.as_path()))
         {
             match conflict(skill, ours, prime) {
-                Some(reason) => selected.disabled.push(DisabledSkill {
+                Some(conflict) => selected.disabled.push(DisabledSkill {
                     skill: skill.clone(),
-                    reason,
+                    conflict,
                 }),
                 None => selected.files.push(skill.file.display().to_string()),
             }
@@ -300,34 +428,35 @@ pub fn select_skills(ours: &[YusaiSkill], prime: &[Skill], chain: &[PathBuf]) ->
     selected
 }
 
-/// Pourquoi une skill de yusAi perd un conflit Python, s'il y en a un.
-pub fn conflict(skill: &YusaiSkill, ours: &[YusaiSkill], prime: &[Skill]) -> Option<String> {
+/// Le conflit Python qu'une skill de yusAi perd, s'il y en a un.
+pub fn conflict(skill: &YusaiSkill, ours: &[YusaiSkill], prime: &[Skill]) -> Option<Conflict> {
     let names = skill.python.as_ref()?;
-    for other in prime {
-        let (Some(other_names), Some(python)) = (python_names(other), other.python.as_ref()) else {
-            continue;
-        };
-        if same_dir(&python.package_path, &skill.dir) {
-            continue;
+    prime_conflict(names, &skill.dir, prime).or_else(|| {
+        ours.iter()
+            .filter(|other| !same_dir(&other.dir, &skill.dir) && outranks(other, skill))
+            .find_map(|other| {
+                let shared = names.shares_with(other.python.as_ref()?)?;
+                Some(Conflict::with_ours(shared, other))
+            })
+    })
+}
+
+/// Une skill Python de Prime (hors du dossier `dir`) qui porte déjà un de
+/// ces noms.
+fn prime_conflict(names: &PythonNames, dir: &Path, prime: &[Skill]) -> Option<Conflict> {
+    prime.iter().find_map(|other| {
+        let python = other.python.as_ref()?;
+        if same_dir(&python.package_path, dir) {
+            return None;
         }
-        if let Some(shared) = names.shares_with(&other_names) {
-            return Some(format!(
-                "{shared} déjà pris par la skill `{}` de Prime ({})",
-                other.name,
-                python.package_path.display()
-            ));
-        }
-    }
-    ours.iter()
-        .filter(|other| !same_dir(&other.dir, &skill.dir) && outranks(other, skill))
-        .find_map(|other| {
-            let shared = names.shares_with(other.python.as_ref()?)?;
-            Some(format!(
-                "{shared} déjà pris par la skill `{}` {}",
-                other.name,
-                place(other)
-            ))
+        Some(Conflict {
+            shared: names.shares_with(&python_names(other)?)?,
+            holder: other.name.clone(),
+            holder_level: None,
+            holder_owner: None,
+            holder_dir: python.package_path.clone(),
         })
+    })
 }
 
 /// `a` passe avant `b` : niveau plus haut, puis dossier plus ancien.
@@ -343,15 +472,263 @@ fn outranks(a: &YusaiSkill, b: &YusaiSkill) -> bool {
     rank(a) < rank(b)
 }
 
-/// « du niveau global », « du type rust », « du projet /chemin ».
-pub fn place(skill: &YusaiSkill) -> String {
-    match (skill.level, skill.owner.as_deref()) {
-        (LessonLevel::Global, _) => "du niveau global".to_string(),
-        (LessonLevel::Type, Some(owner)) => format!("du type {owner}"),
-        (LessonLevel::Type, None) => "d'un type".to_string(),
-        (LessonLevel::Project, Some(owner)) => format!("du projet {owner}"),
-        (LessonLevel::Project, None) => "d'un projet".to_string(),
+/// La skill de yusAi d'un dossier (hors archive).
+pub fn find_skill(data_dir: &Path, dir: &Path) -> Result<YusaiSkill> {
+    our_skills(data_dir)
+        .into_iter()
+        .find(|skill| same_dir(&skill.dir, dir))
+        .ok_or_else(|| anyhow!("no yusAi skill in {}", dir.display()))
+}
+
+/// Refuse un nom déjà pris : même nom de skill dans `level_dir`, ou un nom
+/// Python porté par une autre skill de yusAi (archive exclue) ou par une
+/// skill que Prime charge pour le projet `cwd`. `itself` : le dossier de
+/// la skill qu'on déplace ou restaure.
+pub fn check_free(
+    sources: &SkillSources,
+    cwd: &Path,
+    name: &str,
+    python: Option<&PythonNames>,
+    level_dir: &Path,
+    itself: Option<&Path>,
+) -> Result<()> {
+    let is_itself = |dir: &Path| itself.is_some_and(|itself| same_dir(itself, dir));
+    let taken = level_dir.join(name);
+    if taken.exists() && !is_itself(&taken) {
+        bail!(
+            "a skill named `{name}` already exists there ({})",
+            taken.display()
+        );
     }
+    let Some(names) = python else {
+        return Ok(());
+    };
+    if let Some(conflict) = our_skills(&sources.data_dir)
+        .iter()
+        .filter(|other| !is_itself(&other.dir))
+        .find_map(|other| {
+            let shared = names.shares_with(other.python.as_ref()?)?;
+            Some(Conflict::with_ours(shared, other))
+        })
+        .or_else(|| prime_conflict(names, itself.unwrap_or(&taken), &prime_skills(sources, cwd)))
+    {
+        bail!("{}; rename one of them first", conflict.english());
+    }
+    Ok(())
+}
+
+/// Range la skill du dossier `dir` dans `target` (un dossier de niveau).
+/// Renvoie son nouveau dossier.
+pub fn move_skill(
+    sources: &SkillSources,
+    cwd: &Path,
+    dir: &Path,
+    target: &Path,
+) -> Result<PathBuf> {
+    let skill = find_skill(&sources.data_dir, dir)?;
+    let name = folder_name(&skill.dir)?;
+    let destination = target.join(&name);
+    if skill
+        .dir
+        .parent()
+        .is_some_and(|parent| same_dir(parent, target))
+    {
+        return Ok(skill.dir);
+    }
+    check_free(
+        sources,
+        cwd,
+        &name,
+        skill.python.as_ref(),
+        target,
+        Some(&skill.dir),
+    )?;
+    std::fs::rename(&skill.dir, &destination).with_context(|| {
+        format!(
+            "unable to move {} to {}",
+            skill.dir.display(),
+            destination.display()
+        )
+    })?;
+    Ok(destination)
+}
+
+/// Où une skill archivée était rangée.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedFrom {
+    pub dir: PathBuf,
+    pub level: LessonLevel,
+    pub owner: Option<String>,
+    pub archived_ms: u64,
+}
+
+/// Une skill de l'archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedSkill {
+    pub skill: YusaiSkill,
+    pub from: ArchivedFrom,
+}
+
+/// Archive la skill du dossier `dir`. Renvoie son dossier dans l'archive.
+pub fn archive_skill(data_dir: &Path, dir: &Path) -> Result<PathBuf> {
+    let skill = find_skill(data_dir, dir)?;
+    let archived_ms = now_ms();
+    let archive = archive_dir(data_dir);
+    std::fs::create_dir_all(&archive)
+        .with_context(|| format!("unable to create {}", archive.display()))?;
+    let destination = archive.join(format!("{archived_ms}-{}", folder_name(&skill.dir)?));
+    std::fs::rename(&skill.dir, &destination)
+        .with_context(|| format!("unable to archive {}", skill.dir.display()))?;
+    let from = ArchivedFrom {
+        dir: skill.dir,
+        level: skill.level,
+        owner: skill.owner,
+        archived_ms,
+    };
+    std::fs::write(
+        destination.join(ARCHIVED_FILE),
+        serde_json::to_vec_pretty(&from)?,
+    )
+    .context("unable to note where the skill came from")?;
+    Ok(destination)
+}
+
+/// Les skills de l'archive, les plus récentes d'abord.
+pub fn archived_skills(data_dir: &Path) -> Vec<ArchivedSkill> {
+    let mut archived: Vec<ArchivedSkill> = subdirs(&archive_dir(data_dir))
+        .into_iter()
+        .filter_map(|dir| {
+            let from: ArchivedFrom =
+                serde_json::from_slice(&std::fs::read(dir.join(ARCHIVED_FILE)).ok()?).ok()?;
+            let skill = skills_in(&dir, from.level, from.owner.clone())
+                .into_iter()
+                .find(|skill| skill.dir == dir)?;
+            Some(ArchivedSkill { skill, from })
+        })
+        .collect();
+    archived.sort_by_key(|entry| std::cmp::Reverse(entry.from.archived_ms));
+    archived
+}
+
+/// Remet une skill archivée à sa place, si son nom y est encore libre et
+/// si son nom Python n'est pas pris ailleurs entre-temps. Renvoie son
+/// dossier.
+pub fn restore_skill(sources: &SkillSources, cwd: &Path, archived: &Path) -> Result<PathBuf> {
+    let entry = archived_skills(&sources.data_dir)
+        .into_iter()
+        .find(|entry| same_dir(&entry.skill.dir, archived))
+        .ok_or_else(|| anyhow!("no archived skill in {}", archived.display()))?;
+    let destination = entry.from.dir.clone();
+    let level = destination
+        .parent()
+        .ok_or_else(|| anyhow!("no level folder for {}", destination.display()))?;
+    let name = folder_name(&destination)?;
+    check_free(
+        sources,
+        cwd,
+        &name,
+        entry.skill.python.as_ref(),
+        level,
+        None,
+    )?;
+    match &entry.from.owner {
+        Some(owner) if entry.from.level != LessonLevel::Global => ensure_owner_dir(level, owner),
+        _ => std::fs::create_dir_all(level),
+    }
+    .with_context(|| format!("unable to create {}", level.display()))?;
+    std::fs::rename(archived, &destination)
+        .with_context(|| format!("unable to restore {}", destination.display()))?;
+    let _ = std::fs::remove_file(destination.join(ARCHIVED_FILE));
+    Ok(destination)
+}
+
+/// Une skill markdown nouvelle : `<level_dir>/<name>/SKILL.md`, liée à la
+/// proposition `proposal_id`. Le nom doit être libre (voir [`check_free`]).
+pub fn write_skill(
+    level_dir: &Path,
+    name: &str,
+    description: &str,
+    body: &str,
+    proposal_id: &str,
+) -> Result<PathBuf> {
+    if !is_valid_skill_name(name) {
+        bail!("invalid skill name `{name}`");
+    }
+    let dir = level_dir.join(name);
+    if dir.exists() {
+        bail!(
+            "a skill named `{name}` already exists there ({})",
+            dir.display()
+        );
+    }
+    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let description: String = description.chars().take(1024).collect();
+    if description.is_empty() {
+        bail!("the skill `{name}` needs a description");
+    }
+    // Une chaîne JSON est une chaîne YAML entre guillemets valide.
+    let text = format!(
+        "---\nname: {name}\ndescription: {}\nmetadata:\n  {PROPOSAL_KEY}: {}\n---\n\n{}\n",
+        serde_json::to_string(&description)?,
+        serde_json::to_string(proposal_id)?,
+        body.trim()
+    );
+    std::fs::create_dir_all(&dir).with_context(|| format!("unable to create {}", dir.display()))?;
+    std::fs::write(dir.join("SKILL.md"), text)
+        .with_context(|| format!("unable to write {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Un nom de skill selon Prime : minuscules, chiffres, tirets simples, 64
+/// caractères au plus (pa-core/src/skills/discovery.rs, `validate_skill_name`).
+pub fn is_valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+}
+
+/// Un nom de skill tiré d'un texte libre : `Format Code_v2` → `format-code-v2`.
+pub fn skill_name_from(text: &str) -> Option<String> {
+    let mut name = String::new();
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            name.push(ch);
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    let name: String = name.chars().take(64).collect();
+    let name = name.trim_end_matches('-').to_string();
+    is_valid_skill_name(&name).then_some(name)
+}
+
+fn proposal_id(skill_file: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(skill_file).ok()?;
+    let (frontmatter, _) = parse_frontmatter(&text);
+    frontmatter
+        .get("metadata")?
+        .get(PROPOSAL_KEY)?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn folder_name(dir: &Path) -> Result<String> {
+    dir.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow!("no folder name in {}", dir.display()))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 fn python_names(skill: &Skill) -> Option<PythonNames> {
@@ -588,10 +965,10 @@ mod tests {
         write_skill(&other, "fmt", None);
 
         let skills = thread_skills(&sources, &workspace_id, None);
-        let disabled: Vec<(&str, &str)> = skills
+        let disabled: Vec<(&str, String)> = skills
             .disabled
             .iter()
-            .map(|disabled| (disabled.skill.name.as_str(), disabled.reason.as_str()))
+            .map(|disabled| (disabled.skill.name.as_str(), disabled.conflict.french()))
             .collect();
         assert_eq!(disabled.len(), 2, "{disabled:?}");
         assert_eq!(disabled[0].0, "fmt");
@@ -685,7 +1062,10 @@ mod tests {
             disabled,
             vec!["agent-tool", "agents-tool", "repo-tool", "websearch"]
         );
-        assert!(skills.disabled[0].reason.contains("de Prime"));
+        assert!(skills.disabled[0].conflict.french().contains("de Prime"));
+        assert!(skills.disabled[0].conflict.english().starts_with(
+            "Python import name `agent_tool` is taken by the Prime skill `agent-tool`"
+        ));
         assert_eq!(names(&skills.files), vec!["global/free-tool".to_string()]);
         let _ = std::fs::remove_dir_all(root);
     }

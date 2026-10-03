@@ -1186,6 +1186,33 @@ impl AppStore {
         Ok(())
     }
 
+    /// Accepte une proposition et garde ce que l'acceptation a fait dans
+    /// `payload.accepted` (une proposition de skill : le dossier écrit,
+    /// déplacé ou archivé, pour « Undo »).
+    pub fn accept_proposal_with_outcome(&self, id: &str, outcome: Value) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction()
+            .context("unable to start proposal transaction")?;
+        let mut proposal = proposals_where(&tx, "id = ?1 and status = 'pending'", params![id])?
+            .pop()
+            .ok_or_else(|| anyhow!("no pending proposal {id}"))?;
+        if !proposal.payload.is_object() {
+            proposal.payload = Value::Object(serde_json::Map::new());
+        }
+        proposal.payload["accepted"] = outcome;
+        tx.execute(
+            "update lesson_proposals
+             set status = 'accepted', decided_at_ms = ?2, payload_json = ?3
+             where id = ?1",
+            params![id, now_ms(), proposal.payload.to_string()],
+        )
+        .context("unable to accept lesson proposal")?;
+        tx.commit()
+            .context("unable to commit proposal transaction")?;
+        Ok(())
+    }
+
     pub fn is_refinement_imported(&self, refinement_id: &str) -> Result<bool> {
         let conn = self.connection()?;
         conn.query_row(
@@ -1806,6 +1833,34 @@ mod tests {
         assert!(store.pending_lesson_proposals().unwrap().is_empty());
         assert!(store
             .decide_lesson_proposal(&proposal.id, ProposalStatus::Rejected)
+            .is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_accepted_skill_proposal_keeps_what_its_acceptance_did() {
+        let (store, path) = temp_store();
+        let proposal = store
+            .create_lesson_proposal(&NewProposal {
+                lesson_id: None,
+                kind: ProposalKind::Skill,
+                target_level: None,
+                payload: serde_json::json!({ "id": "fmt" }),
+                workspace_id: Some("/work/a".to_string()),
+                conversation_id: None,
+                refinement_id: Some("r1".to_string()),
+            })
+            .unwrap();
+        store
+            .accept_proposal_with_outcome(&proposal.id, serde_json::json!({ "written": "/s/fmt" }))
+            .unwrap();
+        let accepted = store.lesson_proposal(&proposal.id).unwrap().unwrap();
+        assert_eq!(accepted.status, ProposalStatus::Accepted);
+        assert_eq!(accepted.payload["id"], "fmt");
+        assert_eq!(accepted.payload["accepted"]["written"], "/s/fmt");
+        assert!(accepted.decided_at_ms.is_some());
+        assert!(store
+            .accept_proposal_with_outcome(&proposal.id, serde_json::json!({}))
             .is_err());
         let _ = std::fs::remove_file(path);
     }

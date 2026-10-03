@@ -277,6 +277,24 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   (`get_resource_snapshot`, après une première lecture du prompt système :
   la session se construit paresseusement), skill Python importée par une
   cellule avec vrai noyau.
+- **Skills par niveau, 11b** (`prime_review.rs`, `prime_skills.rs`) :
+  accepter une proposition de skill (« To project / To type / To global »
+  dans Review). L'entrée `skill` du harness n'a qu'une référence Python et
+  un texte. Si l'import est une skill Python de yusAi visible du projet :
+  gardée (déplacée si un niveau est choisi). Sinon : skill markdown écrite
+  au niveau choisi, front matter `metadata.yusai-proposal: <id>`, avec la
+  forme d'appel et les arguments si l'import existe chez Prime (nommée
+  `<nom>-usage` si une skill de Prime porte déjà ce nom, pour ne pas la
+  masquer), sinon la procédure seule et une note « module pas installé ».
+  Proposition de suppression : archive la skill visée. Ce que l'acceptation
+  a fait reste dans `payload.accepted` (`written`, `existing`, `movedTo`,
+  `archived`), sans migration. Changer de niveau, archiver
+  (`archive/<ms>-<nom>/` + `.yusai-archived`), restaurer : refusés si le nom
+  est pris au niveau visé ou si un nom Python est pris ailleurs (archive
+  exclue). « Undo » d'une refine : archive la skill écrite (retrouvée par
+  son id de proposition, même déplacée), restaure une skill archivée,
+  laisse une skill qui existait avant. Commandes `prime_set_skill_level`,
+  `prime_archive_skill`, `prime_restore_skill` (vue : 11c).
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

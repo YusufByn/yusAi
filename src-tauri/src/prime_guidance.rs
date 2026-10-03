@@ -149,7 +149,7 @@ fn disabled_line(disabled: &DisabledSkill) -> String {
     format!(
         "Skill `{}` du projet désactivée par yusAi : {}. Tous les projets partagent un même environnement Python, deux skills ne peuvent pas y porter le même nom. Renomme-la dans `{}` : dossier, `name` du SKILL.md, paquet `src/<nom_d_import>/` et `name` du pyproject.toml ; elle reviendra à la prochaine ouverture du fil.",
         disabled.skill.name,
-        disabled.reason,
+        disabled.conflict.french(),
         disabled.skill.dir.display()
     )
 }
@@ -376,9 +376,15 @@ mod tests {
                 file: Path::new("/skills").join(name).join("SKILL.md"),
                 python: None,
                 created_ms: 0,
+                proposal_id: None,
             },
-            reason: "nom d'import Python `fmt` déjà pris par la skill `fmt` du niveau global"
-                .to_string(),
+            conflict: crate::prime_skills::Conflict {
+                shared: crate::prime_skills::SharedName::Import("fmt".to_string()),
+                holder: "fmt".to_string(),
+                holder_level: Some(LessonLevel::Global),
+                holder_owner: None,
+                holder_dir: Path::new("/g/fmt").to_path_buf(),
+            },
         };
         let lessons = [lesson(
             "yl_1",

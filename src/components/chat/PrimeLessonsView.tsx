@@ -173,8 +173,34 @@ function ProposalCard({ proposal, act }: { proposal: ProposalView; act: Act }) {
         {(proposal.kind === "change" || proposal.kind === "archive") && (
           <ActionButton label="Accept" primary disabled={!lesson} onClick={() => accept(null)} />
         )}
-        {proposal.kind === "skill" && (
-          <span className="prime-lessons__meta">Skills arrive with the skills folders.</span>
+        {proposal.kind === "skill" && payload.action === "delete" && (
+          <ActionButton
+            label="Archive the skill"
+            primary
+            title="Archive the yusAi skill this refine deletes, if there is one"
+            onClick={() => accept(null)}
+          />
+        )}
+        {proposal.kind === "skill" && payload.action !== "delete" && (
+          <>
+            <ActionButton
+              label="To project"
+              primary
+              title="Keep the skill in this project"
+              onClick={() => accept("project")}
+            />
+            <ActionButton
+              label={proposal.projectType ? `To type ${proposal.projectType}` : "To type"}
+              disabled={!proposal.projectType}
+              title={
+                proposal.projectType
+                  ? "Share with projects of the same type"
+                  : "Choose the project's type first"
+              }
+              onClick={() => accept("type")}
+            />
+            <ActionButton label="To global" onClick={() => accept("global")} />
+          </>
         )}
         <ActionButton label="Reject" onClick={reject} />
       </div>
@@ -189,9 +215,11 @@ function SkillText({ payload }: { payload: Record<string, unknown> }) {
   return (
     <div className="prime-lessons__text">
       <div className="prime-lessons__title">
-        {stringField(entry, "title") ?? stringField(payload, "id") ?? "Skill"}
+        {stringField(entry, "title") ?? stringField(payload, "title") ?? stringField(payload, "id") ?? "Skill"}
       </div>
-      <div className="prime-lessons__body">{stringField(entry, "content") ?? ""}</div>
+      <div className="prime-lessons__body">
+        {stringField(entry, "content") ?? stringField(payload, "content") ?? ""}
+      </div>
       {target && <code className="prime-lessons__code">{target}</code>}
     </div>
   );
@@ -613,6 +641,8 @@ function undoSummary(report: UndoReport): string {
     report.reverted.length && `${report.reverted.length} text${report.reverted.length === 1 ? "" : "s"} brought back`,
     report.restored.length && `${report.restored.length} restored`,
     report.rejectedProposals && `${report.rejectedProposals} proposal${report.rejectedProposals === 1 ? "" : "s"} rejected`,
+    report.archivedSkills.length && `${report.archivedSkills.length} skill${report.archivedSkills.length === 1 ? "" : "s"} archived`,
+    report.restoredSkills.length && `${report.restoredSkills.length} skill${report.restoredSkills.length === 1 ? "" : "s"} restored`,
     report.skipped.length && `${report.skipped.length} left as is (${report.skipped.join("; ")})`,
   ].filter(Boolean);
   return `Undone: ${parts.length ? parts.join(" · ") : "nothing to change"}`;
@@ -680,7 +710,7 @@ function proposalLabel(proposal: ProposalView): string {
     case "archive":
       return `Archive (${levelLabel(proposal.lesson?.level ?? proposal.targetLevel)})`;
     case "skill":
-      return "Skill";
+      return proposal.payload.action === "delete" ? "Delete skill" : "Skill";
   }
 }
 

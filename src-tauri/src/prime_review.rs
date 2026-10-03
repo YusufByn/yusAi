@@ -4,15 +4,28 @@
 //! lui, refine par refine. Et ce qu'on peut y faire : chaque action de
 //! l'utilisateur est notée dans l'historique avec l'auteur `user` ; changer
 //! le niveau d'une leçon soi-même vaut validation.
+//!
+//! Accepter une proposition de skill (une entrée `skill` du harness : une
+//! référence Python et un texte, jamais de code) : si l'import nommé est
+//! une skill Python de yusAi visible du projet, elle est gardée telle
+//! quelle (déplacée si on choisit un niveau) ; sinon une skill markdown est
+//! écrite au niveau choisi (projet par défaut), avec la forme d'appel si
+//! l'import existe chez Prime, sinon la procédure seule. Une proposition de
+//! suppression archive la skill visée. Ce que l'acceptation a fait reste
+//! dans la proposition (`payload.accepted`), pour « Undo ».
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
+use serde_json::{json, Value};
 use sinew_app::store::{
     AppStore, ImportedRefinement, Lesson, LessonEvent, LessonLevel, LessonOrigin, LessonProposal,
     LessonScope, LessonStatus, ProposalKind, ProposalStatus,
 };
+
+use crate::prime_skills::{self, SkillSources};
 
 /// La vue d'un projet.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -193,10 +206,11 @@ fn event_views(store: &AppStore, events: Vec<LessonEvent>) -> Result<Vec<EventVi
 
 /// Accepte une proposition en attente et applique son effet. Pour une
 /// montée, `target_level` remplace le niveau proposé ; le niveau `type`
-/// demande le type confirmé du projet de la leçon. Les propositions de
-/// skill attendent les dossiers de skills.
+/// demande le type confirmé du projet de la leçon. Pour une skill,
+/// `target_level` choisit son niveau (projet par défaut).
 pub fn accept_proposal(
     store: &AppStore,
+    sources: &SkillSources,
     proposal_id: &str,
     target_level: Option<LessonLevel>,
 ) -> Result<()> {
@@ -206,7 +220,8 @@ pub fn accept_proposal(
         .ok_or_else(|| anyhow!("no pending proposal {proposal_id}"))?;
     let user = LessonOrigin::user();
     if proposal.kind == ProposalKind::Skill {
-        bail!("skill proposals wait for the skills folders");
+        let outcome = accept_skill(store, sources, &proposal, target_level)?;
+        return store.accept_proposal_with_outcome(proposal_id, outcome);
     }
     let lesson_id = proposal
         .lesson_id
@@ -248,6 +263,238 @@ pub fn accept_proposal(
     store.decide_lesson_proposal(proposal_id, ProposalStatus::Accepted)?;
     store.close_pending_proposals(&lesson.id, stale)?;
     Ok(())
+}
+
+/// L'effet d'une proposition de skill acceptée, décrit pour « Undo » :
+/// `written` (skill écrite), `existing` et `movedTo` (skill déjà là),
+/// `archived` (suppression).
+fn accept_skill(
+    store: &AppStore,
+    sources: &SkillSources,
+    proposal: &LessonProposal,
+    target_level: Option<LessonLevel>,
+) -> Result<Value> {
+    let workspace_id = match &proposal.workspace_id {
+        Some(workspace_id) => workspace_id.clone(),
+        None => proposal
+            .conversation_id
+            .as_deref()
+            .map(|conversation| store.conversation_workspace_id(conversation))
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| anyhow!("proposal {} has no project", proposal.id))?,
+    };
+    let project_type = store.confirmed_project_type(&workspace_id)?;
+    let cwd = Path::new(&workspace_id);
+    let payload = &proposal.payload;
+    let entry = &payload["entry"];
+    let reference = match &payload["reference"] {
+        Value::Null => &entry["reference"],
+        reference => reference,
+    };
+    let import = text(&reference["import"])
+        .and_then(|import| import.split('.').next().map(str::to_string))
+        .filter(|import| !import.is_empty());
+    // Une skill Python de yusAi visible du projet porte déjà cet import.
+    let chain = [
+        Some(prime_skills::project_skills_dir(
+            &sources.data_dir,
+            &workspace_id,
+        )),
+        project_type
+            .as_deref()
+            .map(|project_type| prime_skills::type_skills_dir(&sources.data_dir, project_type)),
+        Some(prime_skills::global_skills_dir(&sources.data_dir)),
+    ];
+    let ours = prime_skills::our_skills(&sources.data_dir);
+    let existing = import.as_deref().and_then(|import| {
+        ours.iter().find(|skill| {
+            skill
+                .python
+                .as_ref()
+                .is_some_and(|python| python.import_name == import)
+                && chain
+                    .iter()
+                    .flatten()
+                    .any(|level| skill.dir.parent() == Some(level.as_path()))
+        })
+    });
+
+    if text(&payload["action"]).as_deref() == Some("delete") {
+        let target = existing.or_else(|| {
+            let name = skill_name(proposal, import.as_deref())?;
+            ours.iter().find(|skill| {
+                skill.name == name
+                    && chain
+                        .iter()
+                        .flatten()
+                        .any(|level| skill.dir.parent() == Some(level.as_path()))
+            })
+        });
+        return Ok(match target {
+            Some(skill) => json!({
+                "archived": prime_skills::archive_skill(&sources.data_dir, &skill.dir)?,
+            }),
+            None => json!({ "nothing": "no yusAi skill to delete" }),
+        });
+    }
+
+    if let Some(skill) = existing {
+        let mut outcome = json!({ "existing": skill.dir });
+        if let Some(level) = target_level {
+            let target = prime_skills::level_dir(
+                &sources.data_dir,
+                level,
+                &workspace_id,
+                project_type.as_deref(),
+            )?;
+            let moved = prime_skills::move_skill(sources, cwd, &skill.dir, &target)?;
+            if moved != skill.dir {
+                outcome["movedTo"] = json!(moved);
+            }
+        }
+        return Ok(outcome);
+    }
+
+    let prime = prime_skills::prime_skills(sources, cwd);
+    let callable = import.as_deref().is_some_and(|import| {
+        prime.iter().any(|skill| {
+            skill
+                .python
+                .as_ref()
+                .is_some_and(|python| python.import_name == import)
+        })
+    });
+    let mut name = skill_name(proposal, import.as_deref())
+        .ok_or_else(|| anyhow!("this skill has no usable name"))?;
+    // Passée avant les skills de Prime, une skill du même nom masquerait
+    // celle qu'elle documente.
+    if prime.iter().any(|skill| skill.name == name) {
+        name = format!("{name}-usage");
+    }
+    let level = target_level.unwrap_or(LessonLevel::Project);
+    let target = prime_skills::level_dir(
+        &sources.data_dir,
+        level,
+        &workspace_id,
+        project_type.as_deref(),
+    )?;
+    prime_skills::check_free(sources, cwd, &name, None, &target, None)?;
+    let title = text(&entry["title"]).or_else(|| text(&payload["title"]));
+    let content = text(&entry["content"]).or_else(|| text(&payload["content"]));
+    let description = title
+        .clone()
+        .or_else(|| {
+            content
+                .as_deref()
+                .and_then(|content| content.lines().next().map(str::to_string))
+        })
+        .unwrap_or_else(|| name.clone());
+    let body = skill_body(
+        title.as_deref().unwrap_or(&name),
+        content.as_deref().unwrap_or_default(),
+        import.as_deref(),
+        reference,
+        match &payload["arguments"] {
+            Value::Null => &entry["arguments"],
+            arguments => arguments,
+        },
+        callable,
+    );
+    let written = prime_skills::write_skill(&target, &name, &description, &body, &proposal.id)?;
+    Ok(json!({ "written": written, "name": name, "callable": callable }))
+}
+
+/// Le nom d'une skill proposée : celui de son import Python
+/// (`word_count` → `word-count`, la règle de Prime), sinon son id ou son
+/// titre.
+fn skill_name(proposal: &LessonProposal, import: Option<&str>) -> Option<String> {
+    let payload = &proposal.payload;
+    [
+        import.map(|import| import.replace('_', "-")),
+        text(&payload["id"]),
+        text(&payload["entry"]["title"]),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|candidate| prime_skills::skill_name_from(&candidate))
+}
+
+/// Le corps d'une skill acceptée : le texte de l'entrée, puis la forme
+/// d'appel et les arguments si l'import existe, sinon une note.
+fn skill_body(
+    title: &str,
+    content: &str,
+    import: Option<&str>,
+    reference: &Value,
+    arguments: &Value,
+    callable: bool,
+) -> String {
+    let mut body = format!("# {}\n\n{}\n", title.trim(), content.trim());
+    match import {
+        Some(import) if callable => {
+            let call = text(&reference["call_pattern"])
+                .or_else(|| text(&reference["callPattern"]))
+                .unwrap_or_else(|| format!("await {import}(...)"));
+            body.push_str(&format!("\n## Appel\n\n    {call}\n"));
+            if let Some(arguments) = arguments
+                .as_object()
+                .filter(|arguments| !arguments.is_empty())
+            {
+                body.push_str("\nArguments :\n\n");
+                for (name, spec) in arguments {
+                    let mut line = format!("- `{name}`");
+                    let mut traits = Vec::new();
+                    if let Some(kind) = text(&spec["type"]) {
+                        traits.push(kind);
+                    }
+                    if spec["required"] == true {
+                        traits.push("requis".to_string());
+                    }
+                    if !traits.is_empty() {
+                        line.push_str(&format!(" ({})", traits.join(", ")));
+                    }
+                    if let Some(description) = text(&spec["description"]) {
+                        line.push_str(&format!(" : {description}"));
+                    }
+                    body.push_str(&line);
+                    body.push('\n');
+                }
+            }
+        }
+        Some(import) => body.push_str(&format!(
+            "\nLe module Python `{import}` n'est pas installé : suis la procédure ci-dessus.\n"
+        )),
+        None => {}
+    }
+    body
+}
+
+fn text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// Range une skill de yusAi au niveau `level` vu du projet `workspace_id`
+/// (le niveau type prend son type confirmé). Renvoie son dossier.
+pub fn set_skill_level(
+    store: &AppStore,
+    sources: &SkillSources,
+    workspace_id: &str,
+    dir: &Path,
+    level: LessonLevel,
+) -> Result<PathBuf> {
+    let project_type = store.confirmed_project_type(workspace_id)?;
+    let target = prime_skills::level_dir(
+        &sources.data_dir,
+        level,
+        workspace_id,
+        project_type.as_deref(),
+    )?;
+    prime_skills::move_skill(sources, Path::new(workspace_id), dir, &target)
 }
 
 const ALL_LESSON_PROPOSALS: &[ProposalKind] = &[
@@ -316,6 +563,10 @@ pub struct UndoReport {
     pub restored: Vec<String>,
     /// Propositions de la refine encore en attente, refusées.
     pub rejected_proposals: usize,
+    /// Skills écrites par l'acceptation de ses propositions, archivées.
+    pub archived_skills: Vec<String>,
+    /// Skills archivées par l'acceptation de ses propositions, restaurées.
+    pub restored_skills: Vec<String>,
     /// Ce qui n'a pas pu être défait, avec la raison.
     pub skipped: Vec<String>,
 }
@@ -323,8 +574,15 @@ pub struct UndoReport {
 /// Défait une refine : archive les leçons qu'elle a créées, remet l'ancien
 /// texte des leçons qu'elle a modifiées (si personne ne les a retouchées
 /// depuis), restaure celles qu'elle a archivées et refuse ses propositions
-/// encore en attente. Tout est noté avec l'auteur `user`.
-pub fn undo_refine(store: &AppStore, refinement_id: &str) -> Result<UndoReport> {
+/// encore en attente. Tout est noté avec l'auteur `user`. Ses propositions
+/// de skill acceptées : la skill écrite est archivée (où qu'elle soit
+/// passée depuis), une skill archivée revient ; une skill qui existait
+/// avant n'est pas touchée.
+pub fn undo_refine(
+    store: &AppStore,
+    sources: &SkillSources,
+    refinement_id: &str,
+) -> Result<UndoReport> {
     let refinement = store
         .imported_refinement(refinement_id)?
         .ok_or_else(|| anyhow!("unknown refine {refinement_id}"))?;
@@ -385,10 +643,45 @@ pub fn undo_refine(store: &AppStore, refinement_id: &str) -> Result<UndoReport> 
         if proposal.status == ProposalStatus::Pending {
             store.reject_lesson_proposal(&proposal.id, &user)?;
             report.rejected_proposals += 1;
+        } else if proposal.kind == ProposalKind::Skill
+            && proposal.status == ProposalStatus::Accepted
+        {
+            undo_skill(sources, &proposal, &mut report);
         }
     }
     store.mark_refinement_undone(refinement_id)?;
     Ok(report)
+}
+
+fn undo_skill(sources: &SkillSources, proposal: &LessonProposal, report: &mut UndoReport) {
+    let accepted = &proposal.payload["accepted"];
+    if accepted.get("written").is_some() {
+        let written = prime_skills::our_skills(&sources.data_dir)
+            .into_iter()
+            .find(|skill| skill.proposal_id.as_deref() == Some(proposal.id.as_str()));
+        match written {
+            Some(skill) => match prime_skills::archive_skill(&sources.data_dir, &skill.dir) {
+                Ok(_) => report.archived_skills.push(skill.name),
+                Err(error) => report
+                    .skipped
+                    .push(format!("skill {}: {error:#}", skill.name)),
+            },
+            None => report.skipped.push(format!(
+                "skill of proposal {}: already archived or removed",
+                proposal.id
+            )),
+        }
+    } else if let Some(archived) = accepted["archived"].as_str() {
+        let cwd = proposal.workspace_id.as_deref().unwrap_or("/");
+        match prime_skills::restore_skill(sources, Path::new(cwd), Path::new(archived)) {
+            Ok(dir) => report.restored_skills.push(dir.display().to_string()),
+            Err(error) => report.skipped.push(format!("skill {archived}: {error:#}")),
+        }
+    } else if let Some(existing) = accepted["existing"].as_str() {
+        report.skipped.push(format!(
+            "skill {existing}: there before the refine, left in place"
+        ));
+    }
 }
 
 /// Les titres des conversations, lus une fois chacun.
@@ -602,7 +895,13 @@ mod tests {
         let promote = store.pending_lesson_proposals().unwrap().remove(0);
         let lesson_id = promote.lesson_id.clone().unwrap();
         // Vers le type : il faut un type confirmé.
-        assert!(accept_proposal(&store, &promote.id, Some(LessonLevel::Type)).is_err());
+        assert!(accept_proposal(
+            &store,
+            &test_sources(&root),
+            &promote.id,
+            Some(LessonLevel::Type)
+        )
+        .is_err());
         store
             .set_project_type(
                 "/work/a",
@@ -610,7 +909,13 @@ mod tests {
                 sinew_app::store::ProjectTypeSource::User,
             )
             .unwrap();
-        accept_proposal(&store, &promote.id, Some(LessonLevel::Type)).unwrap();
+        accept_proposal(
+            &store,
+            &test_sources(&root),
+            &promote.id,
+            Some(LessonLevel::Type),
+        )
+        .unwrap();
         let moved = store.lesson(&lesson_id).unwrap().unwrap();
         assert_eq!(moved.level, LessonLevel::Type);
         assert_eq!(moved.project_type.as_deref(), Some("rust"));
@@ -660,7 +965,7 @@ mod tests {
             change("r3", "Lancer cargo test --workspace."),
         );
         let accepted = store.pending_lesson_proposals().unwrap().remove(0);
-        accept_proposal(&store, &accepted.id, None).unwrap();
+        accept_proposal(&store, &test_sources(&root), &accepted.id, None).unwrap();
         assert_eq!(
             store.lesson(&lesson_id).unwrap().unwrap().content,
             "Lancer cargo test --workspace."
@@ -676,7 +981,7 @@ mod tests {
             }] }),
         );
         let archive = store.pending_lesson_proposals().unwrap().remove(0);
-        accept_proposal(&store, &archive.id, None).unwrap();
+        accept_proposal(&store, &test_sources(&root), &archive.id, None).unwrap();
         assert_eq!(
             store.lesson(&lesson_id).unwrap().unwrap().status,
             LessonStatus::Archived
@@ -686,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_proposals_wait_and_user_moves_close_promotions() {
+    fn user_moves_close_promotions() {
         let (store, root, thread) = fixture();
         import(
             &store,
@@ -703,11 +1008,6 @@ mod tests {
             ] }),
         );
         let pending = store.pending_lesson_proposals().unwrap();
-        let skill = pending
-            .iter()
-            .find(|proposal| proposal.kind == ProposalKind::Skill)
-            .unwrap();
-        assert!(accept_proposal(&store, &skill.id, None).is_err());
         let promote = pending
             .iter()
             .find(|proposal| proposal.kind == ProposalKind::Promote)
@@ -759,7 +1059,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.pending_lesson_proposals().unwrap().len(), 1);
 
-        let report = undo_refine(&store, "r1").unwrap();
+        let report = undo_refine(&store, &test_sources(&root), "r1").unwrap();
         assert_eq!(report.archived, vec![created.clone()]);
         assert_eq!(report.reverted, vec![kept.id.clone()]);
         assert_eq!(report.skipped.len(), 1, "report: {report:?}");
@@ -788,7 +1088,192 @@ mod tests {
             .unwrap()
             .undone_at_ms
             .is_some());
-        assert!(undo_refine(&store, "r1").is_err());
+        assert!(undo_refine(&store, &test_sources(&root), "r1").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Une skill dans un dossier de niveau ; Python si `python`.
+    fn skill_folder(level_dir: &Path, name: &str, python: bool) -> PathBuf {
+        let dir = level_dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Skill {name}.\n---\n\nCorps.\n"),
+        )
+        .unwrap();
+        if python {
+            let import = name.replace('-', "_");
+            std::fs::write(
+                dir.join("pyproject.toml"),
+                format!("[project]\nname = \"{name}\"\n"),
+            )
+            .unwrap();
+            let package = dir.join("src").join(&import);
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(package.join("__init__.py"), "").unwrap();
+        }
+        dir
+    }
+
+    fn skill_refine(
+        store: &AppStore,
+        root: &Path,
+        thread: &ThreadContext,
+        refinement_id: &str,
+        import_name: &str,
+    ) -> LessonProposal {
+        import(
+            store,
+            root,
+            thread,
+            json!({ "refinementId": refinement_id, "scope": "local", "edits": [{
+                "action": "create", "kind": "skill", "id": import_name, "title": "Formater le code",
+                "content": "Lancer le formateur sur les fichiers touchés.", "applied": true,
+                "reference": { "type": "python", "import": import_name, "callable": "run",
+                               "call_pattern": format!("await {import_name}(paths=[...])") },
+                "arguments": { "paths": { "type": "array", "required": true, "description": "fichiers" } },
+            }] }),
+        );
+        store
+            .refinement_proposals(refinement_id)
+            .unwrap()
+            .into_iter()
+            .find(|proposal| proposal.kind == ProposalKind::Skill)
+            .expect("skill proposal")
+    }
+
+    #[test]
+    fn accepting_a_skill_writes_a_procedure_that_undo_archives_wherever_it_went() {
+        let (store, root, thread) = fixture();
+        let sources = test_sources(&root);
+        let proposal = skill_refine(&store, &root, &thread, "r1", "fmt_code");
+        accept_proposal(&store, &sources, &proposal.id, None).unwrap();
+
+        let skills = prime_skills::our_skills(&root);
+        assert_eq!(skills.len(), 1, "{skills:?}");
+        let skill = &skills[0];
+        assert_eq!(skill.name, "fmt-code");
+        assert_eq!(skill.description, "Formater le code");
+        assert_eq!(skill.level, LessonLevel::Project);
+        assert_eq!(skill.owner.as_deref(), Some("/work/a"));
+        assert_eq!(skill.proposal_id.as_deref(), Some(proposal.id.as_str()));
+        let text = std::fs::read_to_string(&skill.file).unwrap();
+        assert!(text.contains("Lancer le formateur sur les fichiers touchés."));
+        assert!(
+            text.contains("Le module Python `fmt_code` n'est pas installé"),
+            "{text}"
+        );
+        assert!(!text.contains("## Appel"));
+        let accepted = store.lesson_proposal(&proposal.id).unwrap().unwrap();
+        assert_eq!(accepted.status, ProposalStatus::Accepted);
+        assert_eq!(accepted.payload["accepted"]["callable"], false);
+
+        // Montée au global : « Undo » la retrouve quand même.
+        let moved =
+            set_skill_level(&store, &sources, "/work/a", &skill.dir, LessonLevel::Global).unwrap();
+        assert!(moved.starts_with(prime_skills::global_skills_dir(&root)));
+        // Pas de type confirmé : pas de niveau type.
+        assert!(set_skill_level(&store, &sources, "/work/a", &moved, LessonLevel::Type).is_err());
+        let report = undo_refine(&store, &sources, "r1").unwrap();
+        assert_eq!(report.archived_skills, vec!["fmt-code"]);
+        assert!(prime_skills::our_skills(&root).is_empty());
+        let archived = prime_skills::archived_skills(&root);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].from.dir, moved);
+        // La restaurer la remet au global.
+        let restored =
+            prime_skills::restore_skill(&sources, Path::new("/work/a"), &archived[0].skill.dir)
+                .unwrap();
+        assert_eq!(restored, moved);
+        assert_eq!(prime_skills::our_skills(&root).len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_skill_of_prime_gets_its_call_form_under_another_name() {
+        let (store, root, thread) = fixture();
+        let sources = test_sources(&root);
+        skill_folder(&root.join("agent").join("skills"), "fmt-code", true);
+        let proposal = skill_refine(&store, &root, &thread, "r1", "fmt_code");
+        accept_proposal(&store, &sources, &proposal.id, None).unwrap();
+        let skills = prime_skills::our_skills(&root);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(
+            skills[0].name, "fmt-code-usage",
+            "never shadow the skill it documents"
+        );
+        assert!(skills[0].python.is_none());
+        let text = std::fs::read_to_string(&skills[0].file).unwrap();
+        assert!(
+            text.contains("## Appel\n\n    await fmt_code(paths=[...])"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- `paths` (array, requis) : fichiers"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_skill_that_is_already_ours_stays_and_undo_leaves_it() {
+        let (store, root, thread) = fixture();
+        let sources = test_sources(&root);
+        let project = prime_skills::project_skills_dir(&root, "/work/a");
+        prime_skills::ensure_owner_dir(&project, "/work/a").unwrap();
+        let existing = skill_folder(&project, "fmt-code", true);
+        let proposal = skill_refine(&store, &root, &thread, "r1", "fmt_code");
+        accept_proposal(&store, &sources, &proposal.id, Some(LessonLevel::Global)).unwrap();
+        let global = prime_skills::global_skills_dir(&root).join("fmt-code");
+        assert!(global.join("SKILL.md").is_file() && !existing.exists());
+        let accepted = store.lesson_proposal(&proposal.id).unwrap().unwrap();
+        assert_eq!(accepted.payload["accepted"]["movedTo"], json!(global));
+
+        let report = undo_refine(&store, &sources, "r1").unwrap();
+        assert!(report.archived_skills.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert!(report.skipped[0].ends_with("there before the refine, left in place"));
+        assert!(global.join("SKILL.md").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_name_taken_elsewhere_refuses_the_move_and_the_restore() {
+        let (store, root, _) = fixture();
+        let sources = test_sources(&root);
+        let a = prime_skills::project_skills_dir(&root, "/work/a");
+        prime_skills::ensure_owner_dir(&a, "/work/a").unwrap();
+        let b = prime_skills::project_skills_dir(&root, "/work/b");
+        prime_skills::ensure_owner_dir(&b, "/work/b").unwrap();
+        let fmt_a = skill_folder(&a, "fmt", true);
+        let fmt_b = skill_folder(&b, "fmt", true);
+        let error = set_skill_level(&store, &sources, "/work/a", &fmt_a, LessonLevel::Global)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Python import name `fmt` is taken by the skill `fmt` of project /work/b; rename one of them first"
+        );
+        let archived_b = prime_skills::archive_skill(&root, &fmt_b).unwrap();
+        let global_fmt =
+            set_skill_level(&store, &sources, "/work/a", &fmt_a, LessonLevel::Global).unwrap();
+        // b reviendrait sur un nom pris entre-temps par le global.
+        let error = prime_skills::restore_skill(&sources, Path::new("/work/b"), &archived_b)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the global skill `fmt`"), "{error}");
+        assert!(archived_b.is_dir());
+        // Même nom au niveau visé, même en markdown : refusé.
+        let notes = skill_folder(&a, "notes", false);
+        skill_folder(&prime_skills::global_skills_dir(&root), "notes", false);
+        let error = set_skill_level(&store, &sources, "/work/a", &notes, LessonLevel::Global)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("a skill named `notes` already exists there"),
+            "{error}"
+        );
+        assert!(global_fmt.is_dir() && notes.is_dir());
         let _ = std::fs::remove_dir_all(root);
     }
 }
