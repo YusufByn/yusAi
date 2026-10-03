@@ -388,6 +388,7 @@ mod tests {
                 python: None,
                 created_ms: 0,
                 proposal_id: None,
+                invalid: None,
             },
             conflict: Conflict {
                 shared: SharedName::Skill("edit".to_string()),
@@ -417,6 +418,7 @@ mod tests {
                 python: None,
                 created_ms: 0,
                 proposal_id: None,
+                invalid: None,
             },
             conflict: crate::prime_skills::Conflict {
                 shared: crate::prime_skills::SharedName::Import("fmt".to_string()),

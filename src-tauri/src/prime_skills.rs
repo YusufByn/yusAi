@@ -47,7 +47,9 @@ use pa_core::packages::{
 };
 use pa_core::settings::SettingsManager;
 use pa_core::skills::frontmatter::parse_frontmatter;
-use pa_core::skills::{load_skills, load_skills_from_dir, LoadSkillsOptions, Skill};
+use pa_core::skills::{
+    load_skills, load_skills_from_dir, LoadSkillsOptions, ResourceDiagnostic, Skill,
+};
 use serde::{Deserialize, Serialize};
 use sinew_app::store::{normalize_project_type, LessonLevel};
 
@@ -286,6 +288,9 @@ pub struct YusaiSkill {
     pub created_ms: u64,
     /// La proposition dont l'acceptation l'a écrite.
     pub proposal_id: Option<String>,
+    /// Pourquoi Prime ne la charge pas (fichier vide, description
+    /// manquante…) : elle est montrée, jamais passée au `Create`.
+    pub invalid: Option<String>,
 }
 
 /// Une skill de yusAi écartée d'une session.
@@ -329,7 +334,8 @@ pub fn our_skills(data_dir: &Path) -> Vec<YusaiSkill> {
 /// trouverait (pa-core/src/skills/discovery.rs:225-330), sans les `.md` à
 /// la racine.
 pub fn skills_in(dir: &Path, level: LessonLevel, owner: Option<String>) -> Vec<YusaiSkill> {
-    let mut skills: Vec<YusaiSkill> = load_skills_from_dir(dir, "path")
+    let loaded = load_skills_from_dir(dir, "path");
+    let mut skills: Vec<YusaiSkill> = loaded
         .skills
         .into_iter()
         .filter(|skill| {
@@ -348,11 +354,49 @@ pub fn skills_in(dir: &Path, level: LessonLevel, owner: Option<String>) -> Vec<Y
                 owner: owner.clone(),
                 created_ms: created_ms(&dir),
                 proposal_id: proposal_id(&skill.file_path),
+                invalid: None,
                 file: skill.file_path,
                 dir,
             }
         })
         .collect();
+    // Les dossiers dont Prime ne charge pas le `SKILL.md`, avec sa raison.
+    for skill_dir in subdirs(dir) {
+        let file = skill_dir.join("SKILL.md");
+        if !file.is_file() || skills.iter().any(|skill| same_dir(&skill.dir, &skill_dir)) {
+            continue;
+        }
+        let shown = file.display().to_string();
+        let mut reasons: Vec<String> = loaded
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| match diagnostic {
+                ResourceDiagnostic::Warning { message, path }
+                | ResourceDiagnostic::Error { message, path } => {
+                    (path.as_deref() == Some(shown.as_str())).then(|| message.clone())
+                }
+                ResourceDiagnostic::Collision { .. } => None,
+            })
+            .collect();
+        if std::fs::metadata(&file).is_ok_and(|meta| meta.len() == 0) {
+            reasons.insert(0, "SKILL.md is empty".to_string());
+        }
+        if reasons.is_empty() {
+            reasons.push("Prime does not load this skill".to_string());
+        }
+        skills.push(YusaiSkill {
+            name: folder_name(&skill_dir).unwrap_or_default(),
+            description: String::new(),
+            level,
+            owner: owner.clone(),
+            created_ms: created_ms(&skill_dir),
+            proposal_id: None,
+            invalid: Some(reasons.join("; ")),
+            python: None,
+            file,
+            dir: skill_dir,
+        });
+    }
     skills.sort_by(|a, b| a.name.cmp(&b.name).then(a.dir.cmp(&b.dir)));
     skills
 }
@@ -439,6 +483,7 @@ pub fn select_skills(ours: &[YusaiSkill], prime: &[Skill], chain: &[PathBuf]) ->
     for (index, level_dir) in chain.iter().enumerate() {
         for skill in ours
             .iter()
+            .filter(|skill| skill.invalid.is_none())
             .filter(|skill| skill.dir.parent() == Some(level_dir.as_path()))
         {
             let found = conflict(skill, ours, prime)

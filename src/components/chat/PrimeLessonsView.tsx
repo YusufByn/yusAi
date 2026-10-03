@@ -319,9 +319,15 @@ function SkillRow({
         <span className="prime-lessons__title">{skill.name}</span>
         {skill.python && <code className="prime-lessons__code">{skill.python.importName}</code>}
         {skill.disabled && <span className="prime-lessons__flag">Disabled</span>}
+        {skill.invalid && <span className="prime-lessons__flag">Invalid</span>}
         {skill.proposalId && <span className="prime-lessons__flag">From a refine</span>}
       </div>
       <div className="prime-lessons__body">{skill.description}</div>
+      {skill.invalid && (
+        <div className="prime-lessons__warning">
+          Prime does not load this skill: {skill.invalid}.
+        </div>
+      )}
       {skill.disabled && (
         <div className="prime-lessons__warning">
           {skill.disabled}. Rename one of the two skills (folder, SKILL.md name, Python package).

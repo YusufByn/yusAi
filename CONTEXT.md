@@ -315,6 +315,18 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   Masquer une skill markdown reste permis. Ce que yusAi range lui-même ne
   prend jamais le nom d'une skill Python (refus ; une skill acceptée
   devient `<nom>-usage`).
+- **Piège : photo du noyau qui vide un fichier** (bug trouvé le 2026-10-03) :
+  Prime photographie chaque variable du noyau avec `dill`
+  (`prime-agent-runtime/src/rlm/repl.py:812-850`) et la restaure au
+  démarrage du noyau (`pa-core/src/kernel/provisioner.rs:776`). Le `f` d'un
+  `with open(chemin, "w") as f` est restauré par `open(chemin, "w")` : le
+  fichier est vidé (vu sur `resume-diff/SKILL.md`, vidé à la réouverture du
+  fil pour la refine du démarrage). Correctif (`prime_snapshot.rs`) :
+  `open_thread` retire ces variables des photos du fil (sous-agents
+  compris) avant chaque `Create` et les note écartées dans le manifeste.
+  Limite : une relance du noyau en cours de session passe sans nous. Une
+  skill que Prime ne charge pas (vide, sans description) reste dans
+  l'onglet Skills, « Invalid » avec la raison, et n'est pas passée.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

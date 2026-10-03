@@ -145,6 +145,20 @@ pub fn lessons_overview(
             }),
     );
     let chain = prime_skills::chain_dirs(&sources.data_dir, workspace_id, project_type.as_deref());
+    // Les skills que Prime ne charge pas : montrées avec leur raison.
+    skills.extend(
+        ours.iter()
+            .filter(|skill| {
+                skill.invalid.is_some()
+                    && chain
+                        .iter()
+                        .any(|level| skill.dir.parent() == Some(level.as_path()))
+            })
+            .map(|skill| SkillView {
+                skill: skill.clone(),
+                disabled: None,
+            }),
+    );
     let archived_skills = prime_skills::archived_skills(&sources.data_dir)
         .into_iter()
         .filter(|archived| {
@@ -1368,6 +1382,48 @@ mod tests {
             .map(|archived| archived.skill.name.as_str())
             .collect();
         assert_eq!(archived, vec!["old"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// La séquence du bug : skill markdown du projet, To global, To
+    /// project, Archive, Restore, puis son `SKILL.md` vidé (par la
+    /// restauration d'un objet fichier du noyau, voir prime_snapshot.rs) :
+    /// elle reste visible, marquée invalide, et n'est plus passée au `Create`.
+    #[test]
+    fn an_emptied_skill_stays_visible_with_its_reason() {
+        let (store, root, _) = fixture();
+        let sources = test_sources(&root);
+        let project = prime_skills::project_skills_dir(&root, "/work/a");
+        prime_skills::ensure_owner_dir(&project, "/work/a").unwrap();
+        let dir = skill_folder(&project, "resume-diff", false);
+        let global =
+            set_skill_level(&store, &sources, "/work/a", &dir, LessonLevel::Global).unwrap();
+        let back =
+            set_skill_level(&store, &sources, "/work/a", &global, LessonLevel::Project).unwrap();
+        let archived = prime_skills::archive_skill(&root, &back).unwrap();
+        let restored =
+            prime_skills::restore_skill(&sources, Path::new("/work/a"), &archived).unwrap();
+        assert_eq!(restored, dir);
+        assert!(std::fs::read_to_string(dir.join("SKILL.md"))
+            .unwrap()
+            .contains("resume-diff"));
+        std::fs::write(dir.join("SKILL.md"), "").unwrap();
+
+        let overview = lessons_overview(&store, &sources, "/work/a").unwrap();
+        assert_eq!(overview.skills.len(), 1, "{:?}", overview.skills);
+        let shown = &overview.skills[0];
+        assert_eq!(shown.skill.name, "resume-diff");
+        let reason = shown.skill.invalid.as_deref().unwrap();
+        assert!(reason.starts_with("SKILL.md is empty"), "{reason}");
+        assert!(reason.contains("description is required"), "{reason}");
+        let guidance = crate::prime_guidance::thread_guidance(&store, &sources, "/work/a").unwrap();
+        assert!(guidance.skills.is_empty());
+        // Une skill invalide s'archive comme les autres.
+        prime_skills::archive_skill(&root, &dir).unwrap();
+        assert!(lessons_overview(&store, &sources, "/work/a")
+            .unwrap()
+            .skills
+            .is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 }

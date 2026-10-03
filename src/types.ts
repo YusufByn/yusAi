@@ -996,6 +996,8 @@ export type YusaiSkill = {
   createdMs: number;
   // The proposal whose acceptance wrote it.
   proposalId: string | null;
+  // Why Prime does not load it (empty file, missing description...).
+  invalid: string | null;
 };
 
 export type SkillView = YusaiSkill & {

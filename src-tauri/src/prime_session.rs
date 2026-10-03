@@ -325,6 +325,20 @@ pub async fn open_thread_with_metadata(
     if let Some(dir) = session_path.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
+    // Restaurés par le noyau, les objets fichier de ses photos videraient
+    // leurs fichiers (crate::prime_snapshot).
+    let thread_file = session_path.to_path_buf();
+    match tokio::task::spawn_blocking(move || {
+        crate::prime_snapshot::drop_file_handles(&thread_file)
+    })
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format!("{error:#}"), "prime kernel snapshot not cleaned")
+        }
+        Err(error) => tracing::warn!(error = %error, "prime kernel snapshot not cleaned"),
+    }
     let response = client
         .request(create_command(config, runtime_metadata, Some(session_path)))
         .await?;

@@ -114,6 +114,7 @@ pub mod prime_refine;
 pub mod prime_review;
 pub mod prime_session;
 pub mod prime_skills;
+pub mod prime_snapshot;
 mod providers;
 mod remote;
 mod state;
