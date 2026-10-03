@@ -4,7 +4,8 @@
 //! d'événements ou en rattrapage depuis l'historique d'un fil
 //! (`import_thread_outcomes`).
 //!
-//! Une refine arrive en ligne `custom` `refinement_outcome`, dont les
+//! Une refine arrive en ligne `custom` `refinement_outcome` (et/ou
+//! `refinement_notice`, seule trace d'une refine lancée par le modèle), dont les
 //! `details` portent `refinementId`, `summary`, `scope`, `edits` et, pour un
 //! retour arrière, `rollbackOf` (pa-core/src/session_engine/refine.rs:125-145).
 //! Chaque edit est un `AppliedRefinementEdit` : `action`
@@ -310,8 +311,9 @@ static IMPORT_LOCK: Mutex<()> = Mutex::new(());
 /// chaque échec est noté avec la refine. Les erreurs du retrait ne font pas
 /// échouer l'import.
 ///
-/// L'historique des leçons note `refine` comme auteur (déclencheur inconnu :
-/// auto-refine de Prime, `refine.run()` du modèle, refine rattrapée), ou
+/// L'historique des leçons note comme auteur `refine:agent` pour une refine
+/// lancée par le modèle (notice de `source` `self`), `refine` sinon
+/// (déclencheur inconnu : auto-refine de Prime, refine rattrapée), ou
 /// `refine:global` pour une refine globale.
 pub fn import_refinement_outcome(
     store: &AppStore,
@@ -319,8 +321,15 @@ pub fn import_refinement_outcome(
     thread: &ThreadContext,
     details: &Value,
 ) -> Result<Option<ImportReport>> {
-    import_refinement_outcome_as(store, agent_dir, thread, details, REFINE_ACTOR)
+    let actor = match details.get("source").and_then(Value::as_str) {
+        Some("self") => AGENT_ACTOR,
+        _ => REFINE_ACTOR,
+    };
+    import_refinement_outcome_as(store, agent_dir, thread, details, actor)
 }
+
+/// Auteur des refines lancées par le modèle (`refine.run()`).
+pub const AGENT_ACTOR: &str = "refine:agent";
 
 /// Auteur des refines dont on ne connaît pas le déclencheur.
 pub const REFINE_ACTOR: &str = "refine";
@@ -872,14 +881,26 @@ pub fn import_thread_outcomes(
     reports
 }
 
-/// Les `details` d'un message `custom` `refinement_outcome`.
+/// Les `details` d'un message `custom` `refinement_outcome` ou
+/// `refinement_notice` : mêmes champs (`refinementId`, `summary`, `scope`,
+/// `edits`, `rollbackOf`), plus `source` pour la notice
+/// (pa-core/src/session_engine/refine.rs:125-172). Une refine lancée par
+/// le modèle (`refine.run()` dans le noyau) ne laisse qu'une notice dans le
+/// fil, et seulement si une edit s'est appliquée
+/// (pa-daemon/src/agent_engine/turn/boundary.rs:216-229). L'import est
+/// unique par `refinementId` : outcome et notice d'une même refine ne
+/// comptent qu'une fois.
 pub fn refinement_outcome_details(message: &Value) -> Option<&Value> {
-    (message.get("customType").and_then(Value::as_str) == Some(REFINEMENT_OUTCOME))
-        .then(|| message.get("details"))
-        .flatten()
+    matches!(
+        message.get("customType").and_then(Value::as_str),
+        Some(REFINEMENT_OUTCOME | REFINEMENT_NOTICE)
+    )
+    .then(|| message.get("details"))
+    .flatten()
 }
 
 const REFINEMENT_OUTCOME: &str = "refinement_outcome";
+const REFINEMENT_NOTICE: &str = "refinement_notice";
 
 fn text(value: Option<&Value>) -> Option<String> {
     value
@@ -1773,6 +1794,100 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(report.proposals.len(), 1, "a change proposal: {report:?}");
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    fn notice(id: &str, scope: &str, edits: Vec<Value>) -> Value {
+        json!({
+            "role": "custom",
+            "customType": "refinement_notice",
+            "display": false,
+            "details": {
+                "refinementId": id,
+                "summary": "remember the vendor rule",
+                "scope": scope,
+                "edits": edits,
+                "source": "self",
+            },
+        })
+    }
+
+    #[test]
+    fn refines_of_the_model_are_read_from_their_notice() {
+        let row = notice("refine_1", "local", vec![]);
+        assert_eq!(refinement_outcome_details(&row), Some(&row["details"]));
+        let outcome =
+            json!({ "customType": "refinement_outcome", "details": { "refinementId": "r" } });
+        assert!(refinement_outcome_details(&outcome).is_some());
+        let other = json!({ "customType": "agent_message", "details": {} });
+        assert_eq!(refinement_outcome_details(&other), None);
+    }
+
+    /// `refine.run()` du modèle : une notice seule, importée avec l'auteur
+    /// `refine:agent` ; une notice et un outcome de la même refine ne
+    /// comptent qu'une fois.
+    #[test]
+    fn a_model_refine_is_imported_once_from_its_notice() {
+        let (store, agent_dir) =
+            import_fixture(&[("memory", "vendor", "Ne pas modifier vendor/.")]);
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        let row = notice(
+            "refine_1",
+            "local",
+            vec![create_edit("memory", "vendor", "Ne pas modifier vendor/.")],
+        );
+        let mut outcome = row.clone();
+        outcome["customType"] = json!("refinement_outcome");
+        let reports = import_thread_outcomes(&store, &agent_dir, &thread, &[row, outcome]);
+        assert_eq!(reports.len(), 1, "reports: {reports:?}");
+        assert_eq!(reports[0].created.len(), 1);
+        assert_eq!(reports[0].removed_entries, 1);
+        let history = store.lesson_events(&reports[0].created[0]).unwrap();
+        assert_eq!(history[0].actor, "refine:agent");
+        let imported = store.imported_refinement("refine_1").unwrap().unwrap();
+        assert_eq!(imported.actor.as_deref(), Some("refine:agent"));
+        assert!(harness_ids(&agent_dir, "memory").is_empty());
+        let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
+    }
+
+    /// Une notice globale suit la règle d'un outcome global : leçon projet
+    /// et proposition de montée vers global.
+    #[test]
+    fn a_global_notice_lands_at_project_level_with_a_promotion() {
+        let (store, agent_dir) = import_fixture(&[]);
+        let global = refine_harness_file(&agent_dir, true);
+        std::fs::write(
+            &global,
+            json!({ "schema": 1, "entries": { "memory": {
+                "vendor": entry("vendor", "memory", "Title", "Ne pas modifier vendor/."),
+            } }, "refinements": [] })
+            .to_string(),
+        )
+        .unwrap();
+        let thread = ThreadContext {
+            conversation_id: "conv-1".to_string(),
+            workspace_id: "/work/a".to_string(),
+        };
+        let row = notice(
+            "refine_1",
+            "global",
+            vec![create_edit("memory", "vendor", "Ne pas modifier vendor/.")],
+        );
+        let report = import_refinement_outcome(&store, &agent_dir, &thread, &row["details"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.created.len(), 1, "report: {report:?}");
+        assert_eq!(report.proposals.len(), 1, "report: {report:?}");
+        assert_eq!(report.removed_entries, 1, "report: {report:?}");
+        let lesson = store.lesson(&report.created[0]).unwrap().unwrap();
+        assert_eq!(lesson.level, LessonLevel::Project);
+        let proposals = store.pending_lesson_proposals().unwrap();
+        assert_eq!(proposals[0].kind, ProposalKind::Promote);
+        assert_eq!(proposals[0].target_level, Some(LessonLevel::Global));
+        assert_eq!(proposals[0].lesson_id.as_ref(), Some(&lesson.id));
         let _ = std::fs::remove_dir_all(agent_dir.parent().unwrap());
     }
 }

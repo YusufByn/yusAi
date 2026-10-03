@@ -423,6 +423,13 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   refine est admis et son tour se joue aussitôt ; une refine lancée pendant
   un tour part tout de suite. Le planificateur ne voit que le fil d'avant
   son départ ; aucune ligne ne se perd.
+  Une refine lancée par le modèle (`await refine.run(…)` dans une cellule)
+  s'applique à la fin du tour et ne laisse dans le fil qu'une ligne
+  `refinement_notice` (`source: "self"`), seulement si une edit s'applique
+  (`pa-daemon/src/agent_engine/turn/boundary.rs:216-229`) : la capture lit
+  donc aussi les notices (auteur `refine:agent`, « Model »), unique par
+  `refinementId`. `rlm.harness.create_*` en local échoue (pas de
+  `RLM_SESSION_DIR`) et l'erreur suggère `global_=True`.
   Une refine d'une autre conversation peut voir nos `yl_…` amorcés : son
   import ignore les edits sur des leçons qui ne s'appliquent pas à sa
   conversation (`LessonTarget::Elsewhere`).

@@ -343,10 +343,13 @@ async fn wait_for_outcome(
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(OUTCOME_POLL).await;
         let outcomes = thread_outcomes(client, active_session_id).await?;
+        // Une notice porte `source` : celle d'une refine du modèle, arrivée
+        // entre-temps, n'est pas la nôtre.
         if let Some(details) = outcomes.into_iter().find(|details| {
-            details["refinementId"]
-                .as_str()
-                .is_some_and(|id| !before.contains(id))
+            details.get("source").is_none()
+                && details["refinementId"]
+                    .as_str()
+                    .is_some_and(|id| !before.contains(id))
         }) {
             return Ok(details);
         }

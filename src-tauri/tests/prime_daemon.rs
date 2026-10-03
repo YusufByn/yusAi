@@ -1601,6 +1601,163 @@ async fn model_global_harness_writes_become_proposed_project_lessons() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Refine lancée par le modèle, avec un vrai noyau (sauté sans `uv`) : une
+/// cellule `await refine.run(…)` ; la refine s'applique à la fin du tour
+/// et ne laisse dans le fil qu'une ligne `refinement_notice`
+/// (pa-daemon/src/agent_engine/turn/boundary.rs:216-229), d'où l'on importe
+/// la leçon (auteur `refine:agent`) et retire l'entrée du harness partagé.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refine_run_by_the_model_is_captured_from_its_notice() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::{AppStore, LessonLevel, LessonScope};
+    use sinew_desktop_lib::prime::ensure_daemon_running_with_kernel_venv;
+    use sinew_desktop_lib::prime_lessons::{
+        import_refinement_outcome, refine_harness_file, refinement_outcome_details, ThreadContext,
+    };
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+
+    if !uv_available() {
+        eprintln!("uv not found; skipping the live-kernel model refine e2e");
+        return;
+    }
+    let kernel_venv = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prime-kernel-venv");
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let plan = serde_json::json!({
+        "summary": "vendor rule",
+        "rationale": "the user asked to remember it",
+        "expectedOutcome": "reused",
+        "edits": [{ "action": "create", "kind": "memory", "id": "ne_pas_modifier_vendor",
+                    "title": "Vendor", "content": "Ne jamais modifier vendor/prime-agent/." }],
+    });
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [
+            { "content": [{
+                "type": "toolCall",
+                "name": "ipython",
+                "arguments": { "code": "await refine.run(\"Retenir : ne jamais modifier vendor/prime-agent/.\")" },
+            }] },
+            { "text": "noté" },
+            { "text": plan.to_string() },
+        ] })
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let socket_path = root.join("daemon.sock");
+    #[cfg(not(unix))]
+    let socket_path = PathBuf::from(format!(
+        r"\\.\pipe\yusai-prime-test-{}",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) =
+        ensure_daemon_running_with_kernel_venv(&exe, &socket_path, &agent_dir, &kernel_venv)
+            .await
+            .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-agent").unwrap();
+    let opened = open_thread(
+        &client,
+        serde_json::json!({
+            "cwd": workspace.to_string_lossy(),
+            "script": script.to_string_lossy(),
+        }),
+        &path,
+    )
+    .await
+    .expect("thread opened");
+    let session = opened.active_session_id.clone();
+    prompt(
+        &client,
+        &session,
+        "retiens : ne jamais modifier vendor/prime-agent/",
+    )
+    .await
+    .expect("prompt admitted");
+    // La première construction du venv peut prendre quelques minutes.
+    let mut notice = None;
+    let mut outcomes = 0;
+    let mut turn_ended = false;
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "tool_execution_end" {
+                    assert_ne!(event["isError"], true, "cell failed: {event}");
+                }
+                if event["type"] == "message_end" {
+                    match event["message"]["customType"].as_str() {
+                        Some("refinement_notice") => notice = Some(event["message"].clone()),
+                        Some("refinement_outcome") => outcomes += 1,
+                        _ => {}
+                    }
+                }
+                if event["type"] == "agent_end" {
+                    turn_ended = true;
+                }
+                if turn_ended && notice.is_some() {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(seen.is_ok(), "turn ended: {turn_ended}, notice: {notice:?}");
+    let notice = notice.expect("refinement_notice row");
+    assert_eq!(outcomes, 0, "a model refine leaves no refinement_outcome");
+    let details = refinement_outcome_details(&notice).expect("notice details");
+    assert_eq!(details["source"], "self");
+    let local_file = refine_harness_file(&agent_dir, false);
+    assert_eq!(
+        harness_entry_ids(&local_file, "memory"),
+        vec!["ne_pas_modifier_vendor"]
+    );
+
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let thread = ThreadContext {
+        conversation_id: "conv-agent".to_string(),
+        workspace_id: workspace.to_string_lossy().into_owned(),
+    };
+    let report = import_refinement_outcome(&store, &agent_dir, &thread, details)
+        .unwrap()
+        .expect("model refine imported");
+    assert_eq!(report.created.len(), 1, "report: {report:?}");
+    assert_eq!(report.removed_entries, 1, "report: {report:?}");
+    assert!(harness_entry_ids(&local_file, "memory").is_empty());
+    let lessons = store
+        .applicable_lessons(&LessonScope {
+            workspace_id: thread.workspace_id.clone(),
+            project_type: None,
+        })
+        .unwrap();
+    assert_eq!(lessons.len(), 1);
+    assert_eq!(lessons[0].level, LessonLevel::Project);
+    assert_eq!(
+        lessons[0].content,
+        "Ne jamais modifier vendor/prime-agent/."
+    );
+    assert_eq!(
+        store.lesson_events(&lessons[0].id).unwrap()[0].actor,
+        "refine:agent"
+    );
+
+    kill_session(&client, &session)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// La file des refines est commune au processus : les tests qui lancent
 /// des refines (et mesurent leur durée) passent l'un après l'autre.
 static REFINE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

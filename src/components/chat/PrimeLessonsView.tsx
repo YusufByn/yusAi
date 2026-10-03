@@ -628,6 +628,8 @@ function actorLabel(actor: string | null): string {
       return "Remember";
     case "refine:close":
       return "Closing";
+    case "refine:agent":
+      return "Model";
     case "refine:global":
       return "Prime (global)";
     case "harness:global":
