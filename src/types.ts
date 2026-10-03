@@ -875,6 +875,99 @@ export type PrimeProjectType = {
   knownTypes: string[];
 };
 
+// Leçons retenues par yusAi (crates/sinew-app/src/store/lessons.rs) et vue
+// « Lessons » du chat Prime (src-tauri/src/prime_review.rs).
+export type LessonLevel = "project" | "type" | "global";
+export type LessonKind = "memory" | "prompt" | "subagent";
+
+export type Lesson = {
+  id: string;
+  level: LessonLevel;
+  workspaceId: string | null;
+  projectType: string | null;
+  kind: LessonKind;
+  title: string;
+  content: string;
+  status: "active" | "archived";
+  pinned: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type LessonEvent = {
+  id: number;
+  lessonId: string;
+  atMs: number;
+  action: string;
+  actor: string;
+  conversationId: string | null;
+  refinementId: string | null;
+  before: Lesson | null;
+  after: Lesson | null;
+};
+
+export type LessonProposal = {
+  id: string;
+  lessonId: string | null;
+  kind: "promote" | "change" | "archive" | "skill";
+  targetLevel: LessonLevel | null;
+  payload: Record<string, unknown>;
+  status: "pending" | "accepted" | "rejected";
+  workspaceId: string | null;
+  conversationId: string | null;
+  refinementId: string | null;
+  createdAtMs: number;
+  decidedAtMs: number | null;
+};
+
+export type ImportedRefinement = {
+  refinementId: string;
+  conversationId: string | null;
+  workspaceId: string | null;
+  actor: string | null;
+  summary: string | null;
+  importedAtMs: number;
+  skipped: string[];
+  failures: string[];
+  undoneAtMs: number | null;
+};
+
+export type ProposalView = LessonProposal & {
+  lesson: Lesson | null;
+  project: string | null;
+  projectType: string | null;
+  conversationTitle: string | null;
+};
+
+export type LessonView = Lesson & { injected: boolean };
+
+export type RefineView = ImportedRefinement & {
+  conversationTitle: string | null;
+  created: number;
+  updated: number;
+  archived: number;
+  duplicates: number;
+  proposals: number;
+};
+
+export type LessonEventView = LessonEvent & {
+  lesson: Lesson | null;
+  conversationTitle: string | null;
+};
+
+export type RefineDetail = {
+  events: LessonEventView[];
+  proposals: LessonProposal[];
+};
+
+export type LessonsOverview = {
+  workspaceId: string;
+  projectType: string | null;
+  proposals: ProposalView[];
+  lessons: LessonView[];
+  refines: RefineView[];
+};
+
 // Ce qu'une refine a fait dans le magasin des leçons (prime_lessons.rs,
 // ImportReport) : ids des leçons et propositions, edits écartées.
 export type PrimeImportReport = {

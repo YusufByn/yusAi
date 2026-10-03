@@ -29,6 +29,7 @@ import type {
 } from "../../types";
 import { AIThinkingBlock } from "./AIThinkingBlock";
 import { Markdown } from "./Markdown";
+import { PrimeLessonsView } from "./PrimeLessonsView";
 import { AiAgentGlyph, ToolCard, type ToolOutputLimit } from "./ToolCard";
 
 // Minimal Prime Agent chat: one daemon session per pane (Workspace mounts
@@ -591,12 +592,45 @@ export function PrimeChatPane({
     [workspacePath, pushMessage],
   );
 
+  // The Lessons view (PrimeLessonsView) replaces the thread in this column;
+  // its button shows the pending proposals of every project.
+  const [showLessons, setShowLessons] = useState(false);
+  const [lessonsRefresh, setLessonsRefresh] = useState(0);
+  const [pendingProposals, setPendingProposals] = useState(0);
+  const refreshPending = useCallback(() => {
+    api.primePendingProposalCount().then(setPendingProposals).catch(console.error);
+  }, []);
+  useEffect(() => {
+    if (!active) return;
+    refreshPending();
+    const timer = window.setInterval(refreshPending, PENDING_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [active, refreshPending]);
+  useEffect(() => {
+    if (!retainNote) return;
+    refreshPending();
+    setLessonsRefresh((count) => count + 1);
+  }, [retainNote, refreshPending]);
+
   const busy = status !== "idle";
   const pickersDisabled = busy || configBusy || !config;
 
   return (
     <div className="chat-col prime-chat">
       <div className="chat-head">
+        {showLessons && (
+          <button
+            type="button"
+            className="chat-head__back"
+            title="Back to the conversation"
+            onClick={() => {
+              setShowLessons(false);
+              refreshPending();
+            }}
+          >
+            <Icon icon="solar:alt-arrow-left-linear" width={14} height={14} />
+          </button>
+        )}
         <span className="chat-head__title">
           <Icon
             icon="solar:chat-square-code-bold-duotone"
@@ -604,7 +638,7 @@ export function PrimeChatPane({
             height={16}
             style={{ color: "var(--text-3)" }}
           />
-          <span>Prime</span>
+          <span>{showLessons ? "Lessons" : "Prime"}</span>
         </span>
         {projectType && (
           <ProjectTypePicker
@@ -619,9 +653,30 @@ export function PrimeChatPane({
           note={retainNote}
           onRetain={(instructions) => void retain(instructions)}
         />
+        <button
+          type="button"
+          className="prime-lessons-btn"
+          data-active={showLessons ? "true" : "false"}
+          title={
+            pendingProposals
+              ? `Lessons: ${pendingProposals} waiting for your review`
+              : "Lessons kept by yusAi"
+          }
+          onClick={() => {
+            setShowLessons((now) => !now);
+            refreshPending();
+          }}
+        >
+          <Icon icon="solar:notebook-linear" width={13} height={13} />
+          <span>Lessons</span>
+          {pendingProposals > 0 && <span className="prime-lessons__count">{pendingProposals}</span>}
+        </button>
         <span className="chat-head__dot" data-status={busy ? "streaming" : "idle"} />
       </div>
-      <div className="chat-body" ref={bodyRef}>
+      {showLessons && (
+        <PrimeLessonsView workspacePath={workspacePath} refreshKey={lessonsRefresh} />
+      )}
+      <div className="chat-body" ref={bodyRef} hidden={showLessons}>
         <div className="chat-body__content">
           {messages.length === 0 ? (
             <div className="chat-empty">
@@ -702,7 +757,7 @@ export function PrimeChatPane({
           )}
         </div>
       </div>
-      <div className={`composer${busy ? " composer--selector-locked" : ""}`}>
+      <div className={`composer${busy ? " composer--selector-locked" : ""}`} hidden={showLessons}>
         <div className="composer__box">
           <div className="composer__input-wrap">
             <textarea
@@ -916,6 +971,9 @@ function ProjectTypePicker({
     </div>
   );
 }
+
+// How often a pane on screen re-reads the number of pending proposals.
+const PENDING_POLL_MS = 60_000;
 
 // How long the result of "Remember" stays in the header.
 const RETAIN_NOTE_MS = 8000;

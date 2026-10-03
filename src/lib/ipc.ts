@@ -31,12 +31,15 @@ import type {
   OpenRouterModelSearchResult,
   OpenRouterProviderStatus,
   PlanControl,
+  LessonEventView,
+  LessonsOverview,
   PrimeImportReport,
   PrimeOpenedSession,
   PrimeProjectType,
   PrimeSubAgent,
   PrimeSessionConfig,
   QuestionAnswer,
+  RefineDetail,
   SavedConversation,
   ServiceTier,
   SkillSettings,
@@ -781,6 +784,19 @@ export const api = {
       workspacePath,
       projectType,
     });
+  },
+  // Vue « Lessons » (prime_review.rs).
+  primeLessonsOverview(workspacePath: string) {
+    return invoke<LessonsOverview>("prime_lessons_overview", { workspacePath });
+  },
+  primeRefineDetail(refinementId: string) {
+    return invoke<RefineDetail>("prime_refine_detail", { refinementId });
+  },
+  primeLessonHistory(lessonId: string) {
+    return invoke<LessonEventView[]>("prime_lesson_history", { lessonId });
+  },
+  primePendingProposalCount() {
+    return invoke<number>("prime_pending_proposal_count");
   },
   primeAbort(activeSessionId: string) {
     return invoke<void>("prime_abort", { activeSessionId });

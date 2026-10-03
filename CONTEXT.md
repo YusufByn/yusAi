@@ -240,7 +240,12 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `src-tauri/src/prime_review.rs`) : sqlite v12 garde avec chaque refine
   importée son projet, son déclencheur, son résumé, ses edits écartées et
   son annulation, et le projet de chaque proposition ; les refines d'avant
-  la v12 sont retrouvées par leur conversation, sans résumé.
+  la v12 sont retrouvées par leur conversation, sans résumé. Vue (`src/components/chat/PrimeLessonsView.tsx`) :
+  bouton « Lessons » de l'en-tête (badge : propositions en attente de tous
+  les projets, relu toutes les 60 s et après « Remember »), qui remplace le
+  fil dans la colonne ; onglets Review, Lessons (par niveau, historique
+  dépliable, « Not injected », « Show archived ») et Refines (déclencheur,
+  résumé, compteurs, détail dépliable). Vérifiée dans le banc d'essai.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

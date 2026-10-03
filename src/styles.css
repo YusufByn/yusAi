@@ -6349,6 +6349,196 @@ textarea {
   font-size: var(--fs-sm);
   padding: 4px 0;
 }
+/* Lessons view of the Prime chat (PrimeLessonsView), in place of the thread. */
+.prime-chat [hidden] {
+  display: none !important;
+}
+.prime-lessons-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: var(--r-med);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  transition: background 150ms ease, color 150ms ease;
+}
+.prime-lessons-btn:hover,
+.prime-lessons-btn[data-active="true"] {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+.prime-lessons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.prime-lessons__tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 2px;
+  gap: 2px;
+  border-radius: var(--r-med);
+  background: var(--bg-2);
+}
+.prime-lessons__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: var(--r-med);
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  transition: background 150ms ease, color 150ms ease;
+}
+.prime-lessons__tab:hover {
+  color: var(--text-0);
+}
+.prime-lessons__tab[data-active="true"] {
+  background: var(--bg-4);
+  color: var(--text-0);
+}
+.prime-lessons__count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-5);
+  color: var(--text-0);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+.prime-lessons__content,
+.prime-lessons__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prime-lessons__group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.prime-lessons__group-title {
+  margin: 6px 0 0;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.prime-lessons__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.prime-lessons__card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--r-card);
+  background: var(--bg-2);
+}
+.prime-lessons__card[data-archived="true"] {
+  opacity: 0.6;
+}
+.prime-lessons__card-head,
+.prime-lessons__row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  text-align: left;
+}
+.prime-lessons__row-head {
+  width: 100%;
+}
+.prime-lessons__chevron {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-3);
+}
+.prime-lessons__badge {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: var(--r-small);
+  background: var(--bg-4);
+  color: var(--text-1);
+  font-size: 11px;
+  line-height: 18px;
+}
+.prime-lessons__flag {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.prime-lessons__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-0);
+  font-size: var(--fs-sm);
+}
+.prime-lessons__body {
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.prime-lessons__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.prime-lessons__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.prime-lessons__text[data-muted="true"] {
+  opacity: 0.6;
+}
+.prime-lessons__diff {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-3);
+}
+.prime-lessons__code {
+  align-self: flex-start;
+  padding: 0 4px;
+  border-radius: var(--r-small);
+  background: var(--bg-3);
+  color: var(--text-1);
+  font-size: var(--fs-xs);
+}
+.prime-lessons__history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line-strong);
+}
+.prime-lessons__event {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.prime-lessons__event-action {
+  color: var(--text-1);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+.prime-lessons__event[data-failed="true"] .prime-lessons__event-action {
+  color: var(--danger);
+}
+
 /* Project type in the Prime chat header (PrimeChatPane, ProjectTypePicker). */
 .prime-type {
   position: relative;
