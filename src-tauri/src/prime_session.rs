@@ -726,7 +726,7 @@ pub fn refine_pending_at_startup(app: AppHandle) {
                 state.session_of(&conversation_id),
                 |workspace| match crate::prime_guidance::thread_guidance(
                     &guidance_store,
-                    &crate::prime::data_dir(),
+                    &crate::prime_skills::SkillSources::app(),
                     workspace,
                 ) {
                     Ok(guidance) => with_guidance(create_config(workspace), &guidance),
@@ -1033,7 +1033,11 @@ async fn thread_guidance(app: &AppHandle, workspace_path: &str) -> Option<Guidan
         .map(|desktop| desktop.store.clone())?;
     let workspace_path = workspace_path.to_string();
     let computed = tauri::async_runtime::spawn_blocking(move || {
-        crate::prime_guidance::thread_guidance(&store, &crate::prime::data_dir(), &workspace_path)
+        crate::prime_guidance::thread_guidance(
+            &store,
+            &crate::prime_skills::SkillSources::app(),
+            &workspace_path,
+        )
     })
     .await;
     match computed {
@@ -1041,6 +1045,8 @@ async fn thread_guidance(app: &AppHandle, workspace_path: &str) -> Option<Guidan
             tracing::info!(
                 injected = guidance.injected.len(),
                 left_out = guidance.left_out.len(),
+                skills = guidance.skills.len(),
+                disabled_skills = guidance.disabled_skills.len(),
                 "prime lessons injected"
             );
             Some(guidance)
@@ -1325,7 +1331,11 @@ pub async fn prime_lessons_overview(
 ) -> Result<crate::prime_review::LessonsOverview, String> {
     let store = app_store(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        crate::prime_review::lessons_overview(&store, &crate::prime::data_dir(), &workspace_path)
+        crate::prime_review::lessons_overview(
+            &store,
+            &crate::prime_skills::SkillSources::app(),
+            &workspace_path,
+        )
     })
     .await
     .map_err(|error| error.to_string())?

@@ -228,6 +228,24 @@ pub fn disable_telemetry_mirror(agent_dir: &Path) -> Result<()> {
     )
 }
 
+/// Le dossier des ressources de Prime que voient les workers : celui de dev
+/// (posé sur le superviseur), sinon `PI_PACKAGE_DIR` ou le dossier de
+/// l'exécutable (pa-core/src/packages/mod.rs:52-62).
+pub fn package_dir() -> PathBuf {
+    #[cfg(debug_assertions)]
+    return dev_package_dir();
+    #[cfg(not(debug_assertions))]
+    {
+        if let Some(dir) = std::env::var_os(PACKAGE_DIR_ENV).filter(|dir| !dir.is_empty()) {
+            return PathBuf::from(dir);
+        }
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
 /// En dev, les ressources de Prime viennent de vendor/prime-agent (les
 /// ressources de l'app viendront avec le packaging).
 #[cfg(debug_assertions)]

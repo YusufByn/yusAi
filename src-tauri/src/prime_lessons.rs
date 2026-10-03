@@ -1837,7 +1837,12 @@ mod tests {
         };
         let data_dir = agent_dir.parent().unwrap();
         let injected = |store: &AppStore| {
-            crate::prime_guidance::thread_guidance(store, data_dir, "/work/a")
+            let sources = crate::prime_skills::SkillSources {
+                data_dir: data_dir.to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                package_dir: data_dir.join("package"),
+            };
+            crate::prime_guidance::thread_guidance(store, &sources, "/work/a")
                 .unwrap()
                 .injected
         };

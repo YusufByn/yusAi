@@ -20,12 +20,19 @@
 //! l'ordre du magasin (épinglées, puis projet, type, global ; les plus
 //! récentes d'abord) ; celles qui ne tiennent pas restent en base et une
 //! dernière puce dit combien.
+//!
+//! Les skills de yusAi partent dans `config.skills` au même `Create`
+//! ([`crate::prime_skills`]) ; chaque skill du projet écartée pour un
+//! conflit de nom Python a sa puce, avec la raison et la consigne de la
+//! renommer, avant les leçons : toujours présente, elle prend sur leur place.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use serde::Serialize;
 use sinew_app::store::{AppStore, Lesson, LessonKind, LessonLevel, LessonScope};
+
+use crate::prime_skills::{project_skills_dir, thread_skills, DisabledSkill, SkillSources};
 
 /// Taille maximale d'une leçon injectée, en caractères.
 pub const LESSON_CHARS: usize = 300;
@@ -42,39 +49,53 @@ pub struct Guidance {
     pub injected: Vec<String>,
     /// Les leçons applicables qui n'ont pas tenu dans la limite.
     pub left_out: Vec<String>,
+    /// Les `SKILL.md` de `config.skills`, dans l'ordre.
+    pub skills: Vec<String>,
+    /// Les skills des niveaux de la session écartées (conflit Python).
+    pub disabled_skills: Vec<DisabledSkill>,
 }
 
-/// Le dossier des skills d'un projet, où `skill-creator` doit écrire :
-/// `<données yusAi>/prime-skills/projects/<hash du chemin du projet>/`.
-pub fn project_skills_dir(data_dir: &Path, workspace_id: &str) -> PathBuf {
-    data_dir
-        .join("prime-skills")
-        .join("projects")
-        .join(pa_daemon::paths::hash_key(workspace_id, 16))
-}
-
-/// La config d'un `Create` avec ce texte dans `appendSystemPrompt`.
+/// La config d'un `Create` avec ce texte dans `appendSystemPrompt` et nos
+/// skills dans `skills`.
 pub fn with_guidance(mut config: serde_json::Value, guidance: &Guidance) -> serde_json::Value {
     config["appendSystemPrompt"] = serde_json::json!(guidance.lines);
+    config["skills"] = serde_json::json!(guidance.skills);
     config
 }
 
-/// Le texte pour une conversation du projet `workspace_id`.
-pub fn thread_guidance(store: &AppStore, data_dir: &Path, workspace_id: &str) -> Result<Guidance> {
+/// Le texte et les skills pour une conversation du projet `workspace_id`.
+pub fn thread_guidance(
+    store: &AppStore,
+    sources: &SkillSources,
+    workspace_id: &str,
+) -> Result<Guidance> {
     let project_type = store.confirmed_project_type(workspace_id)?;
+    let skills = thread_skills(sources, workspace_id, project_type.as_deref());
     let lessons = store.applicable_lessons(&LessonScope {
         workspace_id: workspace_id.to_string(),
         project_type,
     })?;
-    Ok(guidance(
+    let mut guidance = guidance(
         &lessons,
-        &project_skills_dir(data_dir, workspace_id),
-    ))
+        &project_skills_dir(&sources.data_dir, workspace_id),
+        &skills.disabled,
+    );
+    guidance.skills = skills.files;
+    guidance.disabled_skills = skills.disabled;
+    Ok(guidance)
 }
 
-/// Le texte pour des leçons déjà triées par priorité.
-pub fn guidance(lessons: &[Lesson], skills_dir: &Path) -> Guidance {
+/// Le texte pour des leçons déjà triées par priorité ; `disabled` : les
+/// skills écartées de la session (seules celles du projet ont leur puce,
+/// le modèle ne touche pas aux autres niveaux).
+pub fn guidance(lessons: &[Lesson], skills_dir: &Path, disabled: &[DisabledSkill]) -> Guidance {
     let mut lines = vec![rules(skills_dir)];
+    lines.extend(
+        disabled
+            .iter()
+            .filter(|disabled| disabled.skill.level == LessonLevel::Project)
+            .map(disabled_line),
+    );
     let mut injected = Vec::new();
     if !lessons.is_empty() {
         lines.push(LESSONS_INTRO.to_string());
@@ -111,6 +132,7 @@ pub fn guidance(lessons: &[Lesson], skills_dir: &Path) -> Guidance {
         lines,
         injected,
         left_out,
+        ..Guidance::default()
     }
 }
 
@@ -118,8 +140,17 @@ const LESSONS_INTRO: &str = "Leçons retenues par yusAi pour ce projet, de la pl
 
 fn rules(skills_dir: &Path) -> String {
     format!(
-        "Consignes de yusAi : pour retenir quelque chose, appelle `await refine.run(\"…\")` sans `global_=True` ; yusAi range la leçon dans ce projet, l'utilisateur la partage s'il le veut. N'appelle jamais `rlm.harness.*` (create, update, delete) : en local ces appels échouent ici, et `global_=True` contournerait la validation de l'utilisateur. Crée les skills de ce projet dans `{}`, pas dans `.prime/agent/skills/` ni `~/.prime/agent/skills/`.",
+        "Consignes de yusAi : pour retenir quelque chose, appelle `await refine.run(\"…\")` sans `global_=True` ; yusAi range la leçon dans ce projet, l'utilisateur la partage s'il le veut. N'appelle jamais `rlm.harness.*` (create, update, delete) : en local ces appels échouent ici, et `global_=True` contournerait la validation de l'utilisateur. Crée les skills de ce projet dans `{}`, pas dans `.prime/agent/skills/` ni `~/.prime/agent/skills/` ; une skill Python y prend un nom qu'aucune autre skill ne porte (tous les projets partagent un même environnement Python).",
         skills_dir.display()
+    )
+}
+
+fn disabled_line(disabled: &DisabledSkill) -> String {
+    format!(
+        "Skill `{}` du projet désactivée par yusAi : {}. Tous les projets partagent un même environnement Python, deux skills ne peuvent pas y porter le même nom. Renomme-la dans `{}` : dossier, `name` du SKILL.md, paquet `src/<nom_d_import>/` et `name` du pyproject.toml ; elle reviendra à la prochaine ouverture du fil.",
+        disabled.skill.name,
+        disabled.reason,
+        disabled.skill.dir.display()
     )
 }
 
@@ -199,7 +230,7 @@ mod tests {
 
     #[test]
     fn without_lessons_only_the_rules_go_in() {
-        let guidance = guidance(&[], Path::new("/data/prime-skills/projects/abc"));
+        let guidance = guidance(&[], Path::new("/data/prime-skills/projects/abc"), &[]);
         assert_eq!(guidance.lines.len(), 1);
         assert!(guidance.lines[0].contains("`/data/prime-skills/projects/abc`"));
         assert!(guidance.lines[0].contains("`await refine.run(\"…\")` sans `global_=True`"));
@@ -232,7 +263,7 @@ mod tests {
                 "Relit les diffs.",
             ),
         ];
-        let guidance = guidance(&lessons, Path::new("/skills"));
+        let guidance = guidance(&lessons, Path::new("/skills"), &[]);
         assert_eq!(
             guidance.lines[2..],
             [
@@ -258,6 +289,7 @@ mod tests {
                 &content,
             )],
             Path::new("/skills"),
+            &[],
         );
         let line = &guidance.lines[2];
         assert_eq!(chars(line), LESSON_CHARS);
@@ -278,7 +310,7 @@ mod tests {
                 )
             })
             .collect();
-        let guidance = guidance(&lessons, Path::new("/skills"));
+        let guidance = guidance(&lessons, Path::new("/skills"), &[]);
         assert!(
             total(&guidance) <= GUIDANCE_CHARS,
             "{} chars",
@@ -321,7 +353,7 @@ mod tests {
         let mut lessons: Vec<Lesson> = (0..full).map(|index| line(index, 100)).collect();
         lessons.push(line(full, filler));
         lessons.push(line(full + 1, 100));
-        let guidance = guidance(&lessons, Path::new("/skills"));
+        let guidance = guidance(&lessons, Path::new("/skills"), &[]);
         assert!(total(&guidance) <= GUIDANCE_CHARS);
         assert_eq!(guidance.injected.len(), full, "the filler made room");
         assert_eq!(guidance.left_out.len(), 2);
@@ -332,11 +364,56 @@ mod tests {
     }
 
     #[test]
-    fn the_skills_folder_is_per_project() {
-        let data = Path::new("/data");
-        let a = project_skills_dir(data, "/work/a");
-        assert_eq!(a, project_skills_dir(data, "/work/a"));
-        assert_ne!(a, project_skills_dir(data, "/work/b"));
-        assert!(a.starts_with("/data/prime-skills/projects"));
+    fn a_disabled_project_skill_gets_a_line_before_the_lessons() {
+        use crate::prime_skills::YusaiSkill;
+        let disabled = |name: &str, level: LessonLevel| DisabledSkill {
+            skill: YusaiSkill {
+                name: name.to_string(),
+                description: "d".to_string(),
+                level,
+                owner: None,
+                dir: Path::new("/skills").join(name),
+                file: Path::new("/skills").join(name).join("SKILL.md"),
+                python: None,
+                created_ms: 0,
+            },
+            reason: "nom d'import Python `fmt` déjà pris par la skill `fmt` du niveau global"
+                .to_string(),
+        };
+        let lessons = [lesson(
+            "yl_1",
+            LessonLevel::Project,
+            LessonKind::Memory,
+            "T",
+            "C",
+        )];
+        let guidance = guidance(
+            &lessons,
+            Path::new("/skills"),
+            &[
+                disabled("fmt", LessonLevel::Project),
+                disabled("g", LessonLevel::Global),
+            ],
+        );
+        assert_eq!(guidance.lines.len(), 4, "{:?}", guidance.lines);
+        assert!(guidance.lines[1].starts_with(
+            "Skill `fmt` du projet désactivée par yusAi : nom d'import Python `fmt` déjà pris"
+        ));
+        assert!(guidance.lines[1].contains("Renomme-la dans `/skills/fmt`"));
+        assert_eq!(guidance.lines[2], LESSONS_INTRO);
+        assert_eq!(guidance.injected, vec!["yl_1"]);
+    }
+
+    #[test]
+    fn the_create_config_carries_the_skills() {
+        let guidance = Guidance {
+            lines: vec!["r".to_string()],
+            skills: vec!["/s/a/SKILL.md".to_string()],
+            ..Guidance::default()
+        };
+        let config = with_guidance(serde_json::json!({ "cwd": "/w" }), &guidance);
+        assert_eq!(config["skills"], serde_json::json!(["/s/a/SKILL.md"]));
+        assert_eq!(config["appendSystemPrompt"], serde_json::json!(["r"]));
+        assert_eq!(config["cwd"], "/w");
     }
 }

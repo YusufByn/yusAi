@@ -2305,7 +2305,12 @@ async fn lessons_reach_the_system_prompt_when_a_thread_opens() {
         }
     };
 
-    let guidance = thread_guidance(&store, &root, &workspace_id).unwrap();
+    let sources = sinew_desktop_lib::prime_skills::SkillSources {
+        data_dir: root.clone(),
+        agent_dir: agent_dir.clone(),
+        package_dir: root.join("package"),
+    };
+    let guidance = thread_guidance(&store, &sources, &workspace_id).unwrap();
     assert!(!guidance.left_out.is_empty(), "guidance: {guidance:?}");
     let opened = open_thread(&client, with_guidance(base.clone(), &guidance), &path)
         .await
@@ -2342,7 +2347,7 @@ async fn lessons_reach_the_system_prompt_when_a_thread_opens() {
     kill_session(&client, &opened.active_session_id)
         .await
         .expect("session killed");
-    let guidance = thread_guidance(&store, &root, &workspace_id).unwrap();
+    let guidance = thread_guidance(&store, &sources, &workspace_id).unwrap();
     let reopened = open_thread(&client, with_guidance(base, &guidance), &path)
         .await
         .expect("thread reopened");
@@ -2351,6 +2356,315 @@ async fn lessons_reach_the_system_prompt_when_a_thread_opens() {
         .contains("\n- [projet · fait] Nouvelle : Toujours relire le diff."));
 
     kill_session(&client, &reopened.active_session_id)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Une skill dans un dossier de yusAi : markdown, ou Python (paquet
+/// `src/<import>/`, `run()` qui renvoie `answer`) si `answer` est donné.
+fn write_yusai_skill(
+    level_dir: &std::path::Path,
+    name: &str,
+    description: &str,
+    answer: Option<&str>,
+) {
+    let dir = level_dir.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n\nCorps.\n"),
+    )
+    .unwrap();
+    let Some(answer) = answer else { return };
+    let import = name.replace('-', "_");
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        format!(
+            "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\nrequires-python = \">=3.10\"\ndependencies = []\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"src/{import}\"]\n"
+        ),
+    )
+    .unwrap();
+    let package = dir.join("src").join(&import);
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("__init__.py"),
+        format!("async def run() -> str:\n    \"\"\"Probe.\"\"\"\n    return \"{answer}\"\n"),
+    )
+    .unwrap();
+}
+
+/// Les skills de yusAi passent au `Create` par `config.skills` : celle du
+/// projet masque la skill globale du même nom, une skill Python en conflit
+/// (avec une skill globale de yusAi, avec une skill intégrée de Prime)
+/// reste dehors et le modèle le lit dans ses consignes. La réouverture du
+/// fil retrouve la même liste.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn our_skills_reach_the_session_by_level_without_python_conflicts() {
+    use sinew_app::store::AppStore;
+    use sinew_desktop_lib::prime_guidance::{thread_guidance, with_guidance};
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, thread_path};
+    use sinew_desktop_lib::prime_skills::{global_skills_dir, project_skills_dir, SkillSources};
+
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_id = workspace.to_string_lossy().into_owned();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let sources = SkillSources {
+        data_dir: root.clone(),
+        agent_dir: agent_dir.clone(),
+        // Les skills intégrées que voient les workers en dev.
+        package_dir: sinew_desktop_lib::prime::package_dir(),
+    };
+    let global = global_skills_dir(&root);
+    write_yusai_skill(&global, "notes", "Notes globales.", None);
+    write_yusai_skill(&global, "release", "Publier une version.", None);
+    write_yusai_skill(&global, "fmt", "Formater (global).", Some("global"));
+    write_yusai_skill(&global, "edit", "Éditer autrement.", Some("edit"));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let project = project_skills_dir(&root, &workspace_id);
+    write_yusai_skill(&project, "notes", "Notes du projet.", None);
+    write_yusai_skill(&project, "fmt", "Formater (projet).", Some("project"));
+
+    let guidance = thread_guidance(&store, &sources, &workspace_id).unwrap();
+    let mut disabled: Vec<&str> = guidance
+        .disabled_skills
+        .iter()
+        .map(|disabled| disabled.skill.name.as_str())
+        .collect();
+    disabled.sort_unstable();
+    assert_eq!(disabled, vec!["edit", "fmt"], "guidance: {guidance:?}");
+    assert_eq!(guidance.skills.len(), 4, "skills: {:?}", guidance.skills);
+
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, _events) = ensure_daemon_running_with(&exe, &socket_path, &agent_dir)
+        .await
+        .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-skills").unwrap();
+    let base = serde_json::json!({
+        "cwd": workspace_id,
+        "script": script.to_string_lossy(),
+    });
+    let loaded = |session: String| {
+        let client = &client;
+        async move {
+            let snapshot = client
+                .request_ok(pa_types::daemon::DaemonCommand::GetResourceSnapshot {
+                    id: None,
+                    active_session_id: session,
+                    rest: serde_json::Map::default(),
+                })
+                .await
+                .expect("get_resource_snapshot");
+            snapshot["skills"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|skill| {
+                    (
+                        skill["name"].as_str().unwrap_or_default().to_string(),
+                        skill["filePath"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect::<std::collections::HashMap<String, String>>()
+        }
+    };
+    let check = |skills: &std::collections::HashMap<String, String>| {
+        let file = |name: &str| {
+            skills
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing: {skills:?}"))
+        };
+        assert!(
+            file("notes").starts_with(&*project.to_string_lossy()),
+            "{skills:?}"
+        );
+        assert!(
+            file("release").starts_with(&*global.to_string_lossy()),
+            "{skills:?}"
+        );
+        assert!(
+            file("fmt").starts_with(&*global.to_string_lossy()),
+            "{skills:?}"
+        );
+        assert!(
+            !file("edit").starts_with(&*root.to_string_lossy()),
+            "Prime keeps its edit: {skills:?}"
+        );
+    };
+
+    // La session se construit à la première lecture de son prompt
+    // système ; avant, l'état des ressources est vide
+    // (pa-daemon/src/agent_engine/session_engine_impl.rs:1155-1170).
+    let system_prompt = |session: String| {
+        let client = &client;
+        async move {
+            client
+                .request_ok(pa_types::daemon::DaemonCommand::GetSystemPrompt {
+                    id: None,
+                    active_session_id: session,
+                    rest: serde_json::Map::default(),
+                })
+                .await
+                .expect("get_system_prompt")["systemPrompt"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        }
+    };
+    let opened = open_thread(&client, with_guidance(base.clone(), &guidance), &path)
+        .await
+        .expect("thread opened");
+    let prompt = system_prompt(opened.active_session_id.clone()).await;
+    check(&loaded(opened.active_session_id.clone()).await);
+    assert!(
+        prompt.contains("\n- Skill `fmt` du projet désactivée par yusAi : nom d'import Python `fmt` déjà pris par la skill `fmt` du niveau global."),
+        "prompt: {prompt}"
+    );
+    assert!(!prompt.contains("Skill `edit` du projet"), "edit is global");
+
+    kill_session(&client, &opened.active_session_id)
+        .await
+        .expect("session killed");
+    let guidance = thread_guidance(&store, &sources, &workspace_id).unwrap();
+    let reopened = open_thread(&client, with_guidance(base, &guidance), &path)
+        .await
+        .expect("thread reopened");
+    system_prompt(reopened.active_session_id.clone()).await;
+    check(&loaded(reopened.active_session_id.clone()).await);
+
+    kill_session(&client, &reopened.active_session_id)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Une skill Python d'un dossier de yusAi est installée dans le venv du
+/// noyau et s'importe pour de vrai : une cellule l'appelle.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_python_skill_of_our_folders_runs_in_the_kernel() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::AppStore;
+    use sinew_desktop_lib::prime::ensure_daemon_running_with_kernel_venv;
+    use sinew_desktop_lib::prime_guidance::{thread_guidance, with_guidance};
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+    use sinew_desktop_lib::prime_skills::{project_skills_dir, SkillSources};
+
+    if !uv_available() {
+        eprintln!("uv not found; skipping the live-kernel skill e2e");
+        return;
+    }
+    let kernel_venv = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prime-kernel-venv");
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_id = workspace.to_string_lossy().into_owned();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let sources = SkillSources {
+        data_dir: root.clone(),
+        agent_dir: agent_dir.clone(),
+        package_dir: sinew_desktop_lib::prime::package_dir(),
+    };
+    // Un nom propre au test : le venv est partagé entre les tests.
+    let name = format!("yusai-probe-{}", std::process::id());
+    let import = name.replace('-', "_");
+    write_yusai_skill(
+        &project_skills_dir(&root, &workspace_id),
+        &name,
+        "Sonde de test.",
+        Some("probe-ok-42"),
+    );
+    let guidance = thread_guidance(&store, &sources, &workspace_id).unwrap();
+    assert_eq!(guidance.skills.len(), 1, "guidance: {guidance:?}");
+
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [
+            { "content": [{
+                "type": "toolCall",
+                "name": "ipython",
+                "arguments": { "code": format!("print(await {import}())") },
+            }] },
+            { "text": "fini" },
+        ] })
+        .to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) =
+        ensure_daemon_running_with_kernel_venv(&exe, &socket_path, &agent_dir, &kernel_venv)
+            .await
+            .expect("daemon starts");
+    let path = thread_path(&agent_dir, "conv-skill-kernel").unwrap();
+    let opened = open_thread(
+        &client,
+        with_guidance(
+            serde_json::json!({
+                "cwd": workspace_id,
+                "script": script.to_string_lossy(),
+            }),
+            &guidance,
+        ),
+        &path,
+    )
+    .await
+    .expect("thread opened");
+    let session = opened.active_session_id.clone();
+    prompt(&client, &session, "appelle la sonde")
+        .await
+        .expect("prompt admitted");
+    // La première construction du venv peut prendre quelques minutes.
+    let mut cell = None;
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        while let Some(event) = events.recv().await {
+            if let DaemonClientEvent::SessionEvent { event, .. } = event {
+                if event["type"] == "tool_execution_end" {
+                    cell = Some(event.clone());
+                }
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "turn ended, cell: {cell:?}");
+    let cell = cell.expect("the cell ran");
+    assert_ne!(cell["isError"], true, "cell failed: {cell}");
+    assert!(cell.to_string().contains("probe-ok-42"), "cell: {cell}");
+
+    kill_session(&client, &session)
         .await
         .expect("session killed");
     let _ = client

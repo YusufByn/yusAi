@@ -257,6 +257,26 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   (sauf retouchées depuis), restaure celles qu'elle a archivées, refuse
   ses propositions en attente, et la marque annulée. Vérifiée dans le
   banc d'essai, pas encore dans l'app.
+- **Skills par niveau, 11a** (`src-tauri/src/prime_skills.rs`) : dossiers
+  `<données>/prime-skills/{projects/<hash du chemin>, types/<hash du nom
+  normalisé>, global}/<skill>/SKILL.md`, `archive/` hors du relevé ; un
+  `.yusai-owner` nomme le projet ou le type d'un dossier. Au `Create`
+  (`thread_guidance`), `config.skills` reçoit chaque `SKILL.md` un par un :
+  projet, type confirmé, global (premier nom gagnant chez Prime, donc le
+  projet masque le global). Conflit Python (venv partagé, installation
+  éditable par nom d'import et chemin) : une skill Python de yusAi doit être
+  seule sur son nom d'import et sa distribution (`[project] name`) dans
+  tout `prime-skills/` et parmi les skills que Prime charge lui-même pour le
+  projet (résolution de Prime sans installer de paquet : `<agent_dir>/skills/`,
+  `~/.agents/skills/`, intégrées, `.prime/agent/skills/`, `.agents/skills/`
+  du projet et de ses parents jusqu'à la racine git, tableaux `skills` des
+  réglages, paquets). Prime gagne toujours ; entre les nôtres, niveau le
+  plus haut puis dossier le plus ancien. Une perdante n'est pas passée et,
+  au niveau projet, a sa puce dans `appendSystemPrompt` (raison, consigne
+  de la renommer). Tests e2e : skills visibles dans la session
+  (`get_resource_snapshot`, après une première lecture du prompt système :
+  la session se construit paresseusement), skill Python importée par une
+  cellule avec vrai noyau.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :
@@ -459,6 +479,16 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
     échoue sur nos fils (« Unknown active session ») : le réveil ne retrouve
     pas un fichier hors de `sessions/`. Pour refiner, il faut rouvrir le fil
     (`open_thread`, nouveau worker, nouvel id).
+- **Skills de yusAi, limites acceptées** :
+  - descendre une skill Python (global → projet) pendant qu'un noyau d'un
+    autre projet tourne casse l'import dans ce noyau : son chemin éditable
+    a disparu ; le fil retrouve la skill (ou la perd) à sa réouverture ;
+  - un fil ouvert garde la liste de skills de son `Create` ;
+  - les dépôts des autres projets ne sont pas relus : une skill Python de
+    `.prime/agent/skills/` d'un autre dépôt peut encore déloger une des
+    nôtres (même limite que Prime seul entre deux dépôts) ;
+  - changer le type d'un projet ne renomme pas le type : leçons et skills
+    de l'ancien type restent à ce type (pour les autres projets qui l'ont).
 - Prime se présente avec une version Claude Code figée dans vendor
   (`claude-cli/2.1.281`) : un modèle qui exige plus récent serait refusé.
 

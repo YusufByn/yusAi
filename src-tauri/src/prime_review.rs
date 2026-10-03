@@ -6,7 +6,6 @@
 //! le niveau d'une leçon soi-même vaut validation.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
@@ -88,12 +87,12 @@ pub struct EventView {
 /// La vue du projet `workspace_id`.
 pub fn lessons_overview(
     store: &AppStore,
-    data_dir: &Path,
+    sources: &crate::prime_skills::SkillSources,
     workspace_id: &str,
 ) -> Result<LessonsOverview> {
     let mut titles = Titles::new(store);
     let project_type = store.confirmed_project_type(workspace_id)?;
-    let injected = crate::prime_guidance::thread_guidance(store, data_dir, workspace_id)?.injected;
+    let injected = crate::prime_guidance::thread_guidance(store, sources, workspace_id)?.injected;
     let lessons = store
         .project_lessons(
             &LessonScope {
@@ -425,6 +424,15 @@ mod tests {
     use crate::prime_lessons::{import_refinement_outcome_as, ThreadContext};
     use serde_json::json;
     use sinew_app::store::{InsertLessonOutcome, LessonKind, LessonLevel, LessonOrigin, NewLesson};
+    use std::path::Path;
+
+    fn test_sources(root: &Path) -> crate::prime_skills::SkillSources {
+        crate::prime_skills::SkillSources {
+            data_dir: root.to_path_buf(),
+            agent_dir: root.join("agent"),
+            package_dir: root.join("package"),
+        }
+    }
 
     #[test]
     fn the_overview_shows_proposals_lessons_and_refines_of_the_project() {
@@ -479,7 +487,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-        let overview = lessons_overview(&store, &root, "/work/a").unwrap();
+        let overview = lessons_overview(&store, &test_sources(&root), "/work/a").unwrap();
         assert_eq!(overview.lessons.len(), 1);
         assert_eq!(overview.lessons[0].lesson.id, report.created[0]);
         assert!(overview.lessons[0].injected);
@@ -523,7 +531,7 @@ mod tests {
 
         // La vue d'un autre projet voit la proposition (Review de tous les
         // projets), pas la leçon ni la refine.
-        let other = lessons_overview(&store, &root, "/work/b").unwrap();
+        let other = lessons_overview(&store, &test_sources(&root), "/work/b").unwrap();
         assert_eq!(other.proposals.len(), 1);
         assert_eq!(other.lessons.len(), 1);
         assert!(other.refines.is_empty());

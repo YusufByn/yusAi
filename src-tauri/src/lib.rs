@@ -113,6 +113,7 @@ pub mod prime_project;
 pub mod prime_refine;
 pub mod prime_review;
 pub mod prime_session;
+pub mod prime_skills;
 mod providers;
 mod remote;
 mod state;
