@@ -1,6 +1,9 @@
 //! Ce que yusAi ajoute au prompt système d'une session Prime : les leçons
 //! qui s'appliquent à la conversation (projet, type du projet, global) et
-//! nos consignes, passées au `Create` dans `appendSystemPrompt`.
+//! nos consignes, passées au `Create` dans `appendSystemPrompt`. Les
+//! consignes gardent `refine.run()` (sa notice est importée, auteur
+//! `refine:agent`) et interdisent `rlm.harness.*` : en local il échoue
+//! (pas de `RLM_SESSION_DIR`), et son erreur pousse vers `global_=True`.
 //!
 //! Prime rend chaque chaîne en puce `- …` sous `# Additional Guidance`,
 //! dans la partie dynamique du prompt système, sans les espaces autour et
@@ -115,7 +118,7 @@ const LESSONS_INTRO: &str = "Leçons retenues par yusAi pour ce projet, de la pl
 
 fn rules(skills_dir: &Path) -> String {
     format!(
-        "Consignes de yusAi : n'écris jamais dans le harness global (`global_=True` dans `rlm.harness.*` ou `refine.run`), yusAi range lui-même les leçons. Crée les skills de ce projet dans `{}`, pas dans `.prime/agent/skills/` ni `~/.prime/agent/skills/`.",
+        "Consignes de yusAi : pour retenir quelque chose, appelle `await refine.run(\"…\")` sans `global_=True` ; yusAi range la leçon dans ce projet, l'utilisateur la partage s'il le veut. N'appelle jamais `rlm.harness.*` (create, update, delete) : en local ces appels échouent ici, et `global_=True` contournerait la validation de l'utilisateur. Crée les skills de ce projet dans `{}`, pas dans `.prime/agent/skills/` ni `~/.prime/agent/skills/`.",
         skills_dir.display()
     )
 }
@@ -199,7 +202,8 @@ mod tests {
         let guidance = guidance(&[], Path::new("/data/prime-skills/projects/abc"));
         assert_eq!(guidance.lines.len(), 1);
         assert!(guidance.lines[0].contains("`/data/prime-skills/projects/abc`"));
-        assert!(guidance.lines[0].contains("global_=True"));
+        assert!(guidance.lines[0].contains("`await refine.run(\"…\")` sans `global_=True`"));
+        assert!(guidance.lines[0].contains("N'appelle jamais `rlm.harness.*`"));
         assert!(guidance.injected.is_empty() && guidance.left_out.is_empty());
     }
 

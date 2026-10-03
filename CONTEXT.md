@@ -196,7 +196,8 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   décider). Pas encore d'appelant : « Retenir » (commit 7) et la fermeture
   (commit 8). Injection (`src-tauri/src/prime_guidance.rs`) : à chaque
   ouverture d'un fil, `appendSystemPrompt` porte une puce de consignes
-  (pas d'écriture dans le harness global ; skills du projet dans
+  (retenir avec `await refine.run(…)` sans `global_=True`, jamais
+  `rlm.harness.*` ; skills du projet dans
   `<données>/prime-skills/projects/<hash du chemin>/`, que `config.skills`
   ne charge qu'au commit 11), puis une puce par leçon
   (`[projet · fait] Titre : contenu`, 300 caractères au plus), 4 000 au

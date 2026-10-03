@@ -2314,7 +2314,10 @@ async fn lessons_reach_the_system_prompt_when_a_thread_opens() {
     let section = &prompt[prompt
         .find("# Additional Guidance")
         .expect("guidance section")..];
-    assert!(section.contains("\n- Consignes de yusAi : n'écris jamais dans le harness global"));
+    assert!(section.contains(
+        "\n- Consignes de yusAi : pour retenir quelque chose, appelle `await refine.run("
+    ));
+    assert!(section.contains("N'appelle jamais `rlm.harness.*`"));
     assert!(section.contains(&format!("{}", root.join("prime-skills/projects").display())));
     // La leçon la plus récente d'abord, coupée à 300 caractères.
     assert!(section.contains("\n- [projet · fait] Règle 14 : 14 détail"));
