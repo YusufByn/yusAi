@@ -200,7 +200,8 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   `rlm.harness.*` ; skills du projet dans
   `<données>/prime-skills/projects/<hash du chemin>/`, que `config.skills`
   ne charge qu'au commit 11), puis une puce par leçon
-  (`[projet · fait] Titre : contenu`, 300 caractères au plus), 4 000 au
+  (`[projet · fait] Titre : contenu`, 300 caractères au plus, coupée à la
+  fin d'un mot par « … », jamais au milieu, commit 12a), 4 000 au
   total, et une puce qui compte les leçons restées dehors. Figé au
   `Create` : une leçon nouvelle n'arrive qu'à la réouverture du fil. Bouton
   « Remember » (« Retenir », en-tête du chat Prime, commande `prime_retain`) :

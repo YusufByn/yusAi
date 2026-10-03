@@ -15,9 +15,9 @@
 //! Le texte est figé au `Create` : une leçon apprise ou validée en cours de
 //! route n'arrive qu'à la prochaine ouverture du fil.
 //!
-//! Taille (décision du plan) : 300 caractères au plus par leçon, coupée par
-//! « … », et 4 000 au total, consignes comprises. Les leçons arrivent dans
-//! l'ordre du magasin (épinglées, puis projet, type, global ; les plus
+//! Taille (décision du plan) : 300 caractères au plus par leçon, coupée à
+//! la fin d'un mot par « … », jamais au milieu, et 4 000 au total,
+//! consignes comprises. Les leçons arrivent dans l'ordre du magasin (épinglées, puis projet, type, global ; les plus
 //! récentes d'abord) ; celles qui ne tiennent pas restent en base et une
 //! dernière puce dit combien.
 //!
@@ -165,8 +165,8 @@ fn disabled_line(disabled: &DisabledSkill) -> String {
     )
 }
 
-/// `[niveau · genre] Titre : contenu`, sur une ligne, coupée à
-/// [`LESSON_CHARS`].
+/// `[niveau · genre] Titre : contenu`, sur une ligne, coupée à la fin
+/// d'un mot pour tenir dans [`LESSON_CHARS`].
 fn lesson_line(lesson: &Lesson) -> String {
     let level = match lesson.level {
         LessonLevel::Project => "projet",
@@ -186,8 +186,17 @@ fn lesson_line(lesson: &Lesson) -> String {
     if chars(&line) <= LESSON_CHARS {
         return line;
     }
-    let mut cut: String = line.chars().take(LESSON_CHARS - 1).collect();
-    cut.truncate(cut.trim_end().len());
+    // Dernier espace dans les LESSON_CHARS premiers caractères : le mot
+    // qui le suit ne tient pas avec « … », il part en entier. Le préfixe
+    // `[niveau · genre]` a toujours un espace.
+    let window = line
+        .char_indices()
+        .nth(LESSON_CHARS)
+        .map_or(line.len(), |(end, _)| end);
+    let end = line[..window].rfind(' ').unwrap_or(0);
+    let mut cut = line[..end]
+        .trim_end_matches([' ', ',', ';', ':'])
+        .to_string();
     cut.push('…');
     cut
 }
@@ -288,9 +297,28 @@ mod tests {
         assert!(guidance.left_out.is_empty());
     }
 
+    fn memory(title: &str, content: &str) -> String {
+        lesson_line(&lesson(
+            "yl_1",
+            LessonLevel::Project,
+            LessonKind::Memory,
+            title,
+            content,
+        ))
+    }
+
+    /// La ligne coupée, sans « … », est un début de `full` qui s'arrête
+    /// devant un espace : aucun mot n'est coupé.
+    fn assert_cut_at_word_end(cut: &str, full: &str) {
+        assert!(chars(cut) <= LESSON_CHARS, "{} chars", chars(cut));
+        let kept = cut.strip_suffix('…').expect("ends with …");
+        assert!(full.starts_with(kept));
+        assert_eq!(full[kept.len()..].chars().next(), Some(' '), "{kept:?}");
+    }
+
     #[test]
-    fn a_long_lesson_is_cut_at_300_characters() {
-        let content = "é".repeat(400);
+    fn a_long_lesson_is_cut_at_the_end_of_a_word() {
+        let content = "abcdefghij ".repeat(40);
         let guidance = guidance(
             &[lesson(
                 "yl_1",
@@ -303,9 +331,47 @@ mod tests {
             &[],
         );
         let line = &guidance.lines[2];
-        assert_eq!(chars(line), LESSON_CHARS);
-        assert!(line.ends_with("é…"));
-        assert!(line.starts_with("[projet · fait] Long : é"));
+        assert!(line.starts_with("[projet · fait] Long : abcdefghij"));
+        assert!(line.ends_with(" abcdefghij…"), "{line}");
+        assert_cut_at_word_end(
+            line,
+            &format!("[projet · fait] Long : {}", content.trim_end()),
+        );
+    }
+
+    #[test]
+    fn an_accented_lesson_keeps_whole_words() {
+        let content = "évité ".repeat(80);
+        let line = memory("Été", &content);
+        assert!(line.ends_with(" évité…"), "{line}");
+        assert_cut_at_word_end(
+            &line,
+            &format!("[projet · fait] Été : {}", content.trim_end()),
+        );
+    }
+
+    #[test]
+    fn punctuation_before_the_cut_goes_with_it() {
+        let line = memory("Liste", &"mot, ".repeat(100));
+        assert!(line.ends_with(" mot…"), "{line}");
+        assert!(chars(&line) <= LESSON_CHARS);
+    }
+
+    #[test]
+    fn a_lesson_of_exactly_300_characters_stays_whole() {
+        let prefix = chars("[projet · fait] T : ");
+        let content = format!("{} fin", "x".repeat(LESSON_CHARS - prefix - 4));
+        let line = memory("T", &content);
+        assert_eq!(chars(&line), LESSON_CHARS);
+        assert!(line.ends_with(" fin"));
+    }
+
+    #[test]
+    fn a_word_too_long_to_fit_leaves_whole() {
+        let line = memory("Long", &"é".repeat(400));
+        assert_eq!(line, "[projet · fait] Long…");
+        let line = memory("Chemin", &format!("voir {}", "/a".repeat(200)));
+        assert_eq!(line, "[projet · fait] Chemin : voir…");
     }
 
     #[test]
@@ -317,7 +383,7 @@ mod tests {
                     LessonLevel::Project,
                     LessonKind::Memory,
                     "Règle",
-                    &format!("{index:02} {}", "x".repeat(280)),
+                    &format!("{index:02} {}", "mots ".repeat(56)),
                 )
             })
             .collect();
