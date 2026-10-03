@@ -405,9 +405,13 @@ fn accept_skill(
     });
     let mut name = skill_name(proposal, import.as_deref())
         .ok_or_else(|| anyhow!("this skill has no usable name"))?;
-    // Passée avant les skills de Prime, une skill du même nom masquerait
-    // celle qu'elle documente.
-    if prime.iter().any(|skill| skill.name == name) {
+    // Une skill du même nom masquerait celle de Prime (toujours chargée
+    // après les nôtres) ou une skill Python de yusAi.
+    if prime.iter().any(|skill| skill.name == name)
+        || ours
+            .iter()
+            .any(|skill| skill.name == name && skill.python.is_some())
+    {
         name = format!("{name}-usage");
     }
     let level = target_level.unwrap_or(LessonLevel::Project);

@@ -32,7 +32,9 @@ use anyhow::Result;
 use serde::Serialize;
 use sinew_app::store::{AppStore, Lesson, LessonKind, LessonLevel, LessonScope};
 
-use crate::prime_skills::{project_skills_dir, thread_skills, DisabledSkill, SkillSources};
+use crate::prime_skills::{
+    project_skills_dir, thread_skills, DisabledSkill, SharedName, SkillSources,
+};
 
 /// Taille maximale d'une leçon injectée, en caractères.
 pub const LESSON_CHARS: usize = 300;
@@ -146,8 +148,17 @@ fn rules(skills_dir: &Path) -> String {
 }
 
 fn disabled_line(disabled: &DisabledSkill) -> String {
+    let why = match disabled.conflict.shared {
+        SharedName::Skill(_) => "",
+        _ => " Tous les projets partagent un même environnement Python, deux skills ne peuvent pas y porter le même nom.",
+    };
+    let what = if disabled.skill.python.is_some() {
+        "dossier, `name` du SKILL.md, paquet `src/<nom_d_import>/` et `name` du pyproject.toml"
+    } else {
+        "dossier et `name` du SKILL.md"
+    };
     format!(
-        "Skill `{}` du projet désactivée par yusAi : {}. Tous les projets partagent un même environnement Python, deux skills ne peuvent pas y porter le même nom. Renomme-la dans `{}` : dossier, `name` du SKILL.md, paquet `src/<nom_d_import>/` et `name` du pyproject.toml ; elle reviendra à la prochaine ouverture du fil.",
+        "Skill `{}` du projet désactivée par yusAi : {}.{why} Renomme-la dans `{}` : {what} ; elle reviendra à la prochaine ouverture du fil.",
         disabled.skill.name,
         disabled.conflict.french(),
         disabled.skill.dir.display()
@@ -360,6 +371,35 @@ mod tests {
         assert_eq!(
             guidance.lines.last().unwrap(),
             "2 autres leçons de yusAi ne sont pas injectées (limite de taille)."
+        );
+    }
+
+    #[test]
+    fn a_hiding_skill_is_told_to_rename_its_folder_and_name() {
+        use crate::prime_skills::{Conflict, YusaiSkill};
+        let line = disabled_line(&DisabledSkill {
+            skill: YusaiSkill {
+                name: "edit".to_string(),
+                description: "d".to_string(),
+                level: LessonLevel::Project,
+                owner: None,
+                dir: Path::new("/skills/edit").to_path_buf(),
+                file: Path::new("/skills/edit/SKILL.md").to_path_buf(),
+                python: None,
+                created_ms: 0,
+                proposal_id: None,
+            },
+            conflict: Conflict {
+                shared: SharedName::Skill("edit".to_string()),
+                holder: "edit".to_string(),
+                holder_level: None,
+                holder_owner: None,
+                holder_dir: Path::new("/prime/skills/edit").to_path_buf(),
+            },
+        });
+        assert_eq!(
+            line,
+            "Skill `edit` du projet désactivée par yusAi : nom `edit` déjà pris par la skill Python `edit` de Prime (/prime/skills/edit) : elle la masquerait et sa fonction disparaîtrait du noyau. Renomme-la dans `/skills/edit` : dossier et `name` du SKILL.md ; elle reviendra à la prochaine ouverture du fil."
         );
     }
 

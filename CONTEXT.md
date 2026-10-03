@@ -304,6 +304,17 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   de ces niveaux, Restore. Les messages de refus d'une action restent
   affichés après la relecture de la vue (avant : effacés aussitôt, pour
   toutes les actions de la vue). Vérifié dans le banc d'essai.
+- **Skills : masquage** : une skill de yusAi (même markdown) qui porte le
+  nom d'une skill Python chargée après elle dans la session (une skill de
+  Prime, toujours après les nôtres, ou une des nôtres d'un niveau suivant)
+  la masque : Prime garde le premier nom (`pa-core/src/skills/loader.rs:93-104`)
+  et ne pré-importe que les skills Python restées
+  (`pa-core/src/session_engine/engine.rs:318`), la fonction disparaît du
+  noyau (`NameError`, vérifié par e2e). Traité comme un conflit
+  (`SharedName::Skill`) : skill écartée, « Disabled », puce de renommage.
+  Masquer une skill markdown reste permis. Ce que yusAi range lui-même ne
+  prend jamais le nom d'une skill Python (refus ; une skill acceptée
+  devient `<nom>-usage`).
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

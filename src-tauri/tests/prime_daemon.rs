@@ -2678,6 +2678,173 @@ async fn a_python_skill_of_our_folders_runs_in_the_kernel() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Une skill markdown de yusAi qui porte le nom d'une skill Python de Prime
+/// la masque : passée au `Create`, `edit` n'existe plus dans le noyau. yusAi
+/// l'écarte donc, et le modèle lit la consigne de la renommer.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skill_hiding_a_python_skill_of_prime_stays_out() {
+    use pa_tui::daemon_client::DaemonClientEvent;
+    use sinew_app::store::AppStore;
+    use sinew_desktop_lib::prime::ensure_daemon_running_with_kernel_venv;
+    use sinew_desktop_lib::prime_guidance::{thread_guidance, with_guidance};
+    use sinew_desktop_lib::prime_session::{kill_session, open_thread, prompt, thread_path};
+    use sinew_desktop_lib::prime_skills::{project_skills_dir, SharedName, SkillSources};
+
+    if !uv_available() {
+        eprintln!("uv not found; skipping the live-kernel hidden skill e2e");
+        return;
+    }
+    let kernel_venv = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prime-kernel-venv");
+    let root = scratch_dir();
+    let agent_dir = root.join("agent");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_id = workspace.to_string_lossy().into_owned();
+    let store = AppStore::open_at(root.join("desktop-state.sqlite3")).unwrap();
+    let sources = SkillSources {
+        data_dir: root.clone(),
+        agent_dir: agent_dir.clone(),
+        package_dir: sinew_desktop_lib::prime::package_dir(),
+    };
+    let project = project_skills_dir(&root, &workspace_id);
+    write_yusai_skill(&project, "edit", "Éditer à la main.", None);
+    let ours = project.join("edit").join("SKILL.md");
+
+    let guidance = thread_guidance(&store, &sources, &workspace_id).unwrap();
+    assert_eq!(guidance.disabled_skills.len(), 1, "guidance: {guidance:?}");
+    assert_eq!(
+        guidance.disabled_skills[0].conflict.shared,
+        SharedName::Skill("edit".to_string())
+    );
+    assert!(guidance.skills.is_empty(), "skills: {:?}", guidance.skills);
+
+    let script = root.join("faux.json");
+    std::fs::write(
+        &script,
+        serde_json::json!({ "engine": "faux", "responses": [
+            { "content": [{
+                "type": "toolCall",
+                "name": "ipython",
+                "arguments": { "code": "print('edit is', type(edit).__name__, callable(edit))" },
+            }] },
+            { "text": "fini" },
+        ] })
+        .to_string(),
+    )
+    .unwrap();
+    let socket_path = root.join("daemon.sock");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_Sinew"));
+    let (client, mut events) =
+        ensure_daemon_running_with_kernel_venv(&exe, &socket_path, &agent_dir, &kernel_venv)
+            .await
+            .expect("daemon starts");
+    let base = serde_json::json!({
+        "cwd": workspace_id,
+        "script": script.to_string_lossy(),
+    });
+
+    // Le tour d'une session : la fin de sa cellule.
+    async fn run_cell(
+        client: &pa_tui::daemon_client::DaemonClient,
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<DaemonClientEvent>,
+        session: String,
+    ) -> serde_json::Value {
+        prompt(client, &session, "appelle edit")
+            .await
+            .expect("prompt admitted");
+        let mut cell = None;
+        // La première construction du venv peut prendre quelques minutes.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+            while let Some(event) = events.recv().await {
+                let DaemonClientEvent::SessionEvent {
+                    active_session_id,
+                    event,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                if active_session_id != session {
+                    continue;
+                }
+                if event["type"] == "tool_execution_end" {
+                    cell = Some(event.clone());
+                }
+                if event["type"] == "agent_end" {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "turn ended, cell: {cell:?}");
+        cell.expect("the cell ran")
+    }
+
+    // Sans yusAi : notre `edit` passé au `Create` masque celui de Prime.
+    let mut hiding = with_guidance(base.clone(), &guidance);
+    hiding["skills"] = serde_json::json!([ours.to_string_lossy()]);
+    let hidden = open_thread(
+        &client,
+        hiding,
+        &thread_path(&agent_dir, "conv-hiding").unwrap(),
+    )
+    .await
+    .expect("thread opened");
+    let cell = run_cell(&client, &mut events, hidden.active_session_id.clone()).await;
+    assert!(
+        cell.to_string().contains("NameError"),
+        "edit should be gone: {cell}"
+    );
+    kill_session(&client, &hidden.active_session_id)
+        .await
+        .expect("session killed");
+
+    // Avec yusAi : notre skill reste dehors, `edit` est là.
+    let opened = open_thread(
+        &client,
+        with_guidance(base, &guidance),
+        &thread_path(&agent_dir, "conv-kept").unwrap(),
+    )
+    .await
+    .expect("thread opened");
+    let cell = run_cell(&client, &mut events, opened.active_session_id.clone()).await;
+    assert_ne!(cell["isError"], true, "cell failed: {cell}");
+    assert!(cell.to_string().contains("edit is"), "cell: {cell}");
+    assert!(
+        cell.to_string().contains("True"),
+        "edit is callable: {cell}"
+    );
+    let system_prompt = client
+        .request_ok(pa_types::daemon::DaemonCommand::GetSystemPrompt {
+            id: None,
+            active_session_id: opened.active_session_id.clone(),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("get_system_prompt")["systemPrompt"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        system_prompt.contains("\n- Skill `edit` du projet désactivée par yusAi : nom `edit` déjà pris par la skill Python `edit` de Prime ("),
+        "prompt: {system_prompt}"
+    );
+
+    kill_session(&client, &opened.active_session_id)
+        .await
+        .expect("session killed");
+    let _ = client
+        .request_ok(pa_types::daemon::DaemonCommand::Shutdown {
+            id: None,
+            force: Some(true),
+            rest: serde_json::Map::default(),
+        })
+        .await;
+    client.close();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Une refine et un tour qui se chevauchent, dans les deux sens : un
 /// prompt envoyé pendant une refine (« Retenir » est actif hors tour, mais
 /// un tour peut partir pendant la refine), et une refine lancée pendant un

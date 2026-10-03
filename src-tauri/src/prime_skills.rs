@@ -166,6 +166,11 @@ pub struct PythonNames {
 pub enum SharedName {
     Import(String),
     Distribution(String),
+    /// Le nom de skill d'une skill Python qu'elle masquerait : Prime garde
+    /// la première skill d'un nom (pa-core/src/skills/loader.rs:93-104) et
+    /// ne pré-importe dans le noyau que les skills Python restées
+    /// (pa-core/src/session_engine/engine.rs:318), la fonction disparaîtrait.
+    Skill(String),
 }
 
 impl PythonNames {
@@ -211,6 +216,7 @@ impl Conflict {
         let shared = match &self.shared {
             SharedName::Import(name) => format!("nom d'import Python `{name}`"),
             SharedName::Distribution(name) => format!("distribution Python `{name}`"),
+            SharedName::Skill(name) => format!("nom `{name}`"),
         };
         let place = match (self.holder_level, self.holder_owner.as_deref()) {
             (None, _) => format!("de Prime ({})", self.holder_dir.display()),
@@ -220,7 +226,13 @@ impl Conflict {
             (Some(LessonLevel::Project), Some(owner)) => format!("du projet {owner}"),
             (Some(LessonLevel::Project), None) => "d'un projet".to_string(),
         };
-        format!("{shared} déjà pris par la skill `{}` {place}", self.holder)
+        match &self.shared {
+            SharedName::Skill(_) => format!(
+                "{shared} déjà pris par la skill Python `{}` {place} : elle la masquerait et sa fonction disparaîtrait du noyau",
+                self.holder
+            ),
+            _ => format!("{shared} déjà pris par la skill `{}` {place}", self.holder),
+        }
     }
 
     /// Pour la vue et les erreurs : « Python import name `fmt` is taken by
@@ -229,6 +241,7 @@ impl Conflict {
         let shared = match &self.shared {
             SharedName::Import(name) => format!("Python import name `{name}`"),
             SharedName::Distribution(name) => format!("Python distribution `{name}`"),
+            SharedName::Skill(name) => format!("Skill name `{name}`"),
         };
         let holder = match (self.holder_level, self.holder_owner.as_deref()) {
             (None, _) => format!(
@@ -246,7 +259,12 @@ impl Conflict {
             }
             (Some(LessonLevel::Project), None) => format!("the project skill `{}`", self.holder),
         };
-        format!("{shared} is taken by {holder}")
+        match &self.shared {
+            SharedName::Skill(_) => format!(
+                "{shared} is taken by {holder}, a Python skill this one would hide (its function would leave the kernel)"
+            ),
+            _ => format!("{shared} is taken by {holder}"),
+        }
     }
 }
 
@@ -418,12 +436,14 @@ pub fn chain_dirs(data_dir: &Path, workspace_id: &str, project_type: Option<&str
 /// (dans l'ordre de `chain`), moins celles qui perdent un conflit Python.
 pub fn select_skills(ours: &[YusaiSkill], prime: &[Skill], chain: &[PathBuf]) -> ThreadSkills {
     let mut selected = ThreadSkills::default();
-    for level_dir in chain {
+    for (index, level_dir) in chain.iter().enumerate() {
         for skill in ours
             .iter()
             .filter(|skill| skill.dir.parent() == Some(level_dir.as_path()))
         {
-            match conflict(skill, ours, prime) {
+            let found = conflict(skill, ours, prime)
+                .or_else(|| masking(skill, ours, prime, &chain[index + 1..]));
+            match found {
                 Some(conflict) => selected.disabled.push(DisabledSkill {
                     skill: skill.clone(),
                     conflict,
@@ -445,6 +465,48 @@ pub fn conflict(skill: &YusaiSkill, ours: &[YusaiSkill], prime: &[Skill]) -> Opt
                 let shared = names.shares_with(other.python.as_ref()?)?;
                 Some(Conflict::with_ours(shared, other))
             })
+    })
+}
+
+/// La skill Python qu'une skill de yusAi masquerait dans une session :
+/// une skill de Prime du même nom (toujours chargée après les nôtres), ou
+/// une des nôtres d'un niveau suivant de la session (`later`).
+fn masking(
+    skill: &YusaiSkill,
+    ours: &[YusaiSkill],
+    prime: &[Skill],
+    later: &[PathBuf],
+) -> Option<Conflict> {
+    let shared = || SharedName::Skill(skill.name.clone());
+    ours.iter()
+        .find(|other| {
+            other.name == skill.name
+                && other.python.is_some()
+                && !same_dir(&other.dir, &skill.dir)
+                && later
+                    .iter()
+                    .any(|level| other.dir.parent() == Some(level.as_path()))
+        })
+        .map(|other| Conflict::with_ours(shared(), other))
+        .or_else(|| prime_python_named(&skill.name, &skill.dir, prime, shared()))
+}
+
+/// Une skill Python de Prime nommée `name`, hors du dossier `dir`.
+fn prime_python_named(
+    name: &str,
+    dir: &Path,
+    prime: &[Skill],
+    shared: SharedName,
+) -> Option<Conflict> {
+    prime.iter().find_map(|other| {
+        let python = other.python.as_ref()?;
+        (other.name == name && !same_dir(&python.package_path, dir)).then(|| Conflict {
+            shared: shared.clone(),
+            holder: other.name.clone(),
+            holder_level: None,
+            holder_owner: None,
+            holder_dir: python.package_path.clone(),
+        })
     })
 }
 
@@ -507,18 +569,26 @@ pub fn check_free(
             taken.display()
         );
     }
-    let Some(names) = python else {
-        return Ok(());
-    };
-    if let Some(conflict) = our_skills(&sources.data_dir)
+    let ours = our_skills(&sources.data_dir);
+    let prime = prime_skills(sources, cwd);
+    let here = itself.unwrap_or(&taken);
+    // Une skill Python du même nom, à nous ou à Prime : l'une masquerait
+    // l'autre là où les deux se chargent.
+    let named = ours
         .iter()
-        .filter(|other| !is_itself(&other.dir))
-        .find_map(|other| {
-            let shared = names.shares_with(other.python.as_ref()?)?;
-            Some(Conflict::with_ours(shared, other))
-        })
-        .or_else(|| prime_conflict(names, itself.unwrap_or(&taken), &prime_skills(sources, cwd)))
-    {
+        .find(|other| other.name == name && other.python.is_some() && !is_itself(&other.dir))
+        .map(|other| Conflict::with_ours(SharedName::Skill(name.to_string()), other))
+        .or_else(|| prime_python_named(name, here, &prime, SharedName::Skill(name.to_string())));
+    let python_names = python.and_then(|names| {
+        ours.iter()
+            .filter(|other| !is_itself(&other.dir))
+            .find_map(|other| {
+                let shared = names.shares_with(other.python.as_ref()?)?;
+                Some(Conflict::with_ours(shared, other))
+            })
+            .or_else(|| prime_conflict(names, here, &prime))
+    });
+    if let Some(conflict) = python_names.or(named) {
         bail!("{}; rename one of them first", conflict.english());
     }
     Ok(())
@@ -968,7 +1038,8 @@ mod tests {
         write_skill(&other, "lint-old", Some("shared-lint"));
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_skill(&project, "lint-new", Some("Shared_Lint"));
-        // Une skill markdown du même nom qu'une Python : pas de conflit.
+        // Une skill markdown du projet b du même nom que la Python globale :
+        // elle la masquerait dans b, pas dans a.
         write_skill(&other, "fmt", None);
 
         let skills = thread_skills(&sources, &workspace_id, None);
@@ -1001,10 +1072,18 @@ mod tests {
             disabled[1].1
         );
         assert_eq!(names(&skills.files), vec!["global/fmt".to_string()]);
-        // Le projet b garde ses deux skills.
+        // Le projet b garde sa skill Python, pas son markdown `fmt`.
         let b = thread_skills(&sources, &other_id, None);
-        assert!(b.disabled.is_empty(), "{:?}", b.disabled);
-        assert_eq!(b.files.len(), 3);
+        assert_eq!(b.disabled.len(), 1, "{:?}", b.disabled);
+        assert_eq!(b.disabled[0].skill.name, "fmt");
+        assert_eq!(
+            b.disabled[0].conflict.shared,
+            SharedName::Skill("fmt".to_string())
+        );
+        assert_eq!(
+            names(&b.files),
+            vec!["projects/lint-old".to_string(), "global/fmt".to_string()]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1074,6 +1153,103 @@ mod tests {
             "Python import name `agent_tool` is taken by the Prime skill `agent-tool`"
         ));
         assert_eq!(names(&skills.files), vec!["global/free-tool".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_skill_never_hides_a_python_skill_of_the_same_name() {
+        let root = scratch();
+        let sources = sources(&root);
+        let data = &sources.data_dir;
+        let workspace = root.join("work-a");
+        let workspace_id = workspace.to_string_lossy().into_owned();
+        // Prime : une skill Python et une skill markdown.
+        write_skill(&sources.agent_dir.join("skills"), "edit", Some("edit"));
+        write_skill(&sources.agent_dir.join("skills"), "guide", None);
+        let project = project_skills_dir(data, &workspace_id);
+        ensure_owner_dir(&project, &workspace_id).unwrap();
+        let global = global_skills_dir(data);
+        // Masquent une skill Python : écartées.
+        write_skill(&project, "edit", None);
+        write_skill(&global, "fmt", Some("fmt"));
+        write_skill(&project, "fmt", None);
+        // Masquent une skill markdown, ou une Python chargée avant : gardées.
+        write_skill(&project, "guide", None);
+        write_skill(&global, "notes", None);
+        write_skill(&project, "notes", None);
+        write_skill(&project, "lint", Some("lint"));
+        write_skill(&global, "lint", None);
+
+        let skills = thread_skills(&sources, &workspace_id, None);
+        let disabled: Vec<(&str, String)> = skills
+            .disabled
+            .iter()
+            .map(|disabled| (disabled.skill.name.as_str(), disabled.conflict.french()))
+            .collect();
+        assert_eq!(disabled.len(), 2, "{disabled:?}");
+        assert_eq!(disabled[0].0, "edit");
+        assert!(
+            disabled[0]
+                .1
+                .starts_with("nom `edit` déjà pris par la skill Python `edit` de Prime ("),
+            "{}",
+            disabled[0].1
+        );
+        assert!(disabled[0]
+            .1
+            .ends_with(": elle la masquerait et sa fonction disparaîtrait du noyau"));
+        assert_eq!(
+            skills.disabled[0].conflict.shared,
+            SharedName::Skill("edit".to_string())
+        );
+        assert_eq!(disabled[1].0, "fmt");
+        assert!(
+            disabled[1]
+                .1
+                .contains("la skill Python `fmt` du niveau global"),
+            "{}",
+            disabled[1].1
+        );
+        assert_eq!(
+            names(&skills.files),
+            vec![
+                "projects/guide".to_string(),
+                "projects/lint".to_string(),
+                "projects/notes".to_string(),
+                "global/fmt".to_string(),
+                "global/lint".to_string(),
+                "global/notes".to_string(),
+            ]
+        );
+        // Un autre projet n'a pas le markdown `fmt` : rien n'y est masqué.
+        assert!(thread_skills(&sources, "/work/b", None)
+            .disabled
+            .iter()
+            .all(|disabled| disabled.skill.name != "fmt"));
+
+        // Ce que yusAi range lui-même ne prend jamais le nom d'une skill Python.
+        let error = check_free(&sources, &workspace, "edit", None, &global, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("Skill name `edit` is taken by the Prime skill `edit`"),
+            "{error}"
+        );
+        let error = check_free(
+            &sources,
+            &workspace,
+            "lint",
+            None,
+            &root.join("elsewhere"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!("the skill `lint` of project {workspace_id}")),
+            "{error}"
+        );
+        check_free(&sources, &workspace, "guide", None, &global, None).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
