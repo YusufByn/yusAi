@@ -1351,6 +1351,118 @@ pub async fn prime_pending_proposal_count(app: AppHandle) -> Result<usize, Strin
         .map_err(error_text)
 }
 
+/// Une action de la vue « Lessons » sur le magasin, hors du thread async.
+async fn with_store<T: Send + 'static>(
+    app: &AppHandle,
+    action: impl FnOnce(&sinew_app::store::AppStore) -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    let store = app_store(app)?;
+    tauri::async_runtime::spawn_blocking(move || action(&store))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(error_text)
+}
+
+/// Accepte une proposition ; pour une montée, `target_level` choisit
+/// entre type et global.
+#[tauri::command]
+pub async fn prime_accept_proposal(
+    app: AppHandle,
+    proposal_id: String,
+    target_level: Option<sinew_app::store::LessonLevel>,
+) -> Result<(), String> {
+    with_store(&app, move |store| {
+        crate::prime_review::accept_proposal(store, &proposal_id, target_level)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn prime_reject_proposal(app: AppHandle, proposal_id: String) -> Result<(), String> {
+    with_store(&app, move |store| {
+        crate::prime_review::reject_proposal(store, &proposal_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn prime_update_lesson(
+    app: AppHandle,
+    lesson_id: String,
+    title: String,
+    content: String,
+) -> Result<(), String> {
+    with_store(&app, move |store| {
+        store
+            .update_lesson(
+                &lesson_id,
+                &title,
+                &content,
+                &sinew_app::store::LessonOrigin::user(),
+            )
+            .map(drop)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn prime_set_lesson_pinned(
+    app: AppHandle,
+    lesson_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    with_store(&app, move |store| {
+        store
+            .set_lesson_pinned(&lesson_id, pinned, &sinew_app::store::LessonOrigin::user())
+            .map(drop)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn prime_archive_lesson(app: AppHandle, lesson_id: String) -> Result<(), String> {
+    with_store(&app, move |store| {
+        crate::prime_review::archive_lesson(store, &lesson_id).map(drop)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn prime_restore_lesson(app: AppHandle, lesson_id: String) -> Result<(), String> {
+    with_store(&app, move |store| {
+        store
+            .restore_lesson(&lesson_id, &sinew_app::store::LessonOrigin::user())
+            .map(drop)
+    })
+    .await
+}
+
+/// Change le niveau d'une leçon : la décision de l'utilisateur vaut
+/// validation.
+#[tauri::command]
+pub async fn prime_set_lesson_level(
+    app: AppHandle,
+    lesson_id: String,
+    level: sinew_app::store::LessonLevel,
+) -> Result<(), String> {
+    with_store(&app, move |store| {
+        crate::prime_review::set_lesson_level(store, &lesson_id, level).map(drop)
+    })
+    .await
+}
+
+/// « Undo » sur une refine de la vue « Lessons ».
+#[tauri::command]
+pub async fn prime_undo_refine(
+    app: AppHandle,
+    refinement_id: String,
+) -> Result<crate::prime_review::UndoReport, String> {
+    with_store(&app, move |store| {
+        crate::prime_review::undo_refine(store, &refinement_id)
+    })
+    .await
+}
+
 fn app_store(app: &AppHandle) -> Result<sinew_app::store::AppStore, String> {
     app.try_state::<crate::DesktopState>()
         .map(|desktop| desktop.store.clone())

@@ -6538,6 +6538,49 @@ textarea {
 .prime-lessons__event[data-failed="true"] .prime-lessons__event-action {
   color: var(--danger);
 }
+.prime-lessons__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.prime-lessons__action {
+  padding: 2px 9px;
+  border-radius: var(--r-med);
+  background: var(--bg-3);
+  color: var(--text-1);
+  font-size: var(--fs-xs);
+  transition: background 150ms ease, color 150ms ease;
+}
+.prime-lessons__action:hover:not(:disabled) {
+  background: var(--bg-4);
+  color: var(--text-0);
+}
+.prime-lessons__action:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.prime-lessons__action[data-variant="primary"] {
+  background: var(--bg-5);
+  color: var(--text-0);
+}
+.prime-lessons__action[data-variant="danger"]:hover:not(:disabled) {
+  color: var(--danger);
+}
+.prime-lessons__editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.prime-lessons__input {
+  resize: vertical;
+  padding: 5px 8px;
+  border-radius: var(--r-small);
+  background: var(--bg-3);
+  color: var(--text-0);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+}
 
 /* Project type in the Prime chat header (PrimeChatPane, ProjectTypePicker). */
 .prime-type {

@@ -960,6 +960,15 @@ export type RefineDetail = {
   proposals: LessonProposal[];
 };
 
+// Ce que « Undo » a fait d'une refine (prime_review.rs, UndoReport).
+export type UndoReport = {
+  archived: string[];
+  reverted: string[];
+  restored: string[];
+  rejectedProposals: number;
+  skipped: string[];
+};
+
 export type LessonsOverview = {
   workspaceId: string;
   projectType: string | null;

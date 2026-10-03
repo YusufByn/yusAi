@@ -1101,6 +1101,71 @@ impl AppStore {
         proposals_where(&self.connection()?, "status = 'pending'", [])
     }
 
+    pub fn lesson_proposal(&self, id: &str) -> Result<Option<LessonProposal>> {
+        Ok(proposals_where(&self.connection()?, "id = ?1", params![id])?.pop())
+    }
+
+    /// Refuse une proposition en attente ; le refus est noté dans
+    /// l'historique de sa leçon.
+    pub fn reject_lesson_proposal(&self, id: &str, origin: &LessonOrigin) -> Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn
+            .transaction()
+            .context("unable to start proposal transaction")?;
+        let proposal = proposals_where(&tx, "id = ?1 and status = 'pending'", params![id])?
+            .pop()
+            .ok_or_else(|| anyhow!("no pending proposal {id}"))?;
+        tx.execute(
+            "update lesson_proposals set status = 'rejected', decided_at_ms = ?2 where id = ?1",
+            params![id, now_ms()],
+        )
+        .context("unable to reject lesson proposal")?;
+        if let Some(lesson_id) = &proposal.lesson_id {
+            if lesson_by_id(&tx, lesson_id)?.is_some() {
+                record_event(&tx, lesson_id, "rejected", origin, None, None)?;
+            }
+        }
+        tx.commit()
+            .context("unable to commit proposal transaction")?;
+        Ok(())
+    }
+
+    /// Ferme, comme refusées, les propositions en attente d'une leçon dont
+    /// le genre est donné (rendues caduques par une décision de
+    /// l'utilisateur). Renvoie leur nombre.
+    pub fn close_pending_proposals(
+        &self,
+        lesson_id: &str,
+        kinds: &[ProposalKind],
+    ) -> Result<usize> {
+        let conn = self.connection()?;
+        let mut closed = 0;
+        for kind in kinds {
+            closed += conn
+                .execute(
+                    "update lesson_proposals set status = 'rejected', decided_at_ms = ?3
+                     where lesson_id = ?1 and kind = ?2 and status = 'pending'",
+                    params![lesson_id, kind.as_str(), now_ms()],
+                )
+                .context("unable to close lesson proposals")?;
+        }
+        Ok(closed)
+    }
+
+    /// Note qu'une refine a été annulée (« Undo ») ; faux si elle l'était
+    /// déjà.
+    pub fn mark_refinement_undone(&self, refinement_id: &str) -> Result<bool> {
+        let conn = self.connection()?;
+        let changed = conn
+            .execute(
+                "update prime_imported_refinements set undone_at_ms = ?2
+                 where refinement_id = ?1 and undone_at_ms is null",
+                params![refinement_id, now_ms()],
+            )
+            .context("unable to mark refinement undone")?;
+        Ok(changed == 1)
+    }
+
     /// Clôt une proposition en attente (son effet sur la leçon est appliqué
     /// par l'appelant).
     pub fn decide_lesson_proposal(&self, id: &str, status: ProposalStatus) -> Result<()> {
@@ -1751,6 +1816,64 @@ mod tests {
             actor: "refine".to_string(),
             ..NewImportedRefinement::default()
         }
+    }
+
+    #[test]
+    fn a_rejection_is_kept_in_the_lesson_history_and_stale_proposals_close() {
+        let (store, path) = temp_store();
+        let lesson = created(
+            store
+                .insert_lesson(&project_lesson("/work/a", "À promouvoir."), &origin("r1"))
+                .unwrap(),
+        );
+        let propose = |kind: ProposalKind| {
+            store
+                .create_lesson_proposal(&NewProposal {
+                    lesson_id: Some(lesson.id.clone()),
+                    kind,
+                    target_level: Some(LessonLevel::Global),
+                    payload: serde_json::json!({}),
+                    workspace_id: Some("/work/a".to_string()),
+                    conversation_id: None,
+                    refinement_id: Some("r1".to_string()),
+                })
+                .unwrap()
+        };
+        let first = propose(ProposalKind::Promote);
+        store
+            .reject_lesson_proposal(&first.id, &LessonOrigin::user())
+            .unwrap();
+        assert!(store
+            .reject_lesson_proposal(&first.id, &LessonOrigin::user())
+            .is_err());
+        let rejected = store.lesson_proposal(&first.id).unwrap().unwrap();
+        assert_eq!(rejected.status, ProposalStatus::Rejected);
+        let history = store.lesson_events(&lesson.id).unwrap();
+        assert_eq!(history.last().unwrap().action, "rejected");
+        assert_eq!(history.last().unwrap().actor, "user");
+
+        propose(ProposalKind::Promote);
+        propose(ProposalKind::Change);
+        assert_eq!(
+            store
+                .close_pending_proposals(&lesson.id, &[ProposalKind::Promote])
+                .unwrap(),
+            1
+        );
+        let pending = store.pending_lesson_proposals().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, ProposalKind::Change);
+
+        store.mark_refinement_imported(&record("r1")).unwrap();
+        assert!(store.mark_refinement_undone("r1").unwrap());
+        assert!(!store.mark_refinement_undone("r1").unwrap());
+        assert!(store
+            .imported_refinement("r1")
+            .unwrap()
+            .unwrap()
+            .undone_at_ms
+            .is_some());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

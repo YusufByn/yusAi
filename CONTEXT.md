@@ -245,7 +245,17 @@ permanentes sont dans `CLAUDE.md` ; ce fichier décrit l'état du travail.
   les projets, relu toutes les 60 s et après « Remember »), qui remplace le
   fil dans la colonne ; onglets Review, Lessons (par niveau, historique
   dépliable, « Not injected », « Show archived ») et Refines (déclencheur,
-  résumé, compteurs, détail dépliable). Vérifiée dans le banc d'essai.
+  résumé, compteurs, détail dépliable). Actions (`prime_review.rs`, auteur
+  `user`) : accepter (montée vers type ou global, changement, archivage) ou
+  refuser une proposition (refus noté dans l'historique ; les skills
+  attendent le commit 11) ; éditer, épingler, archiver, restaurer une
+  leçon, changer son niveau (vaut validation ; le niveau type prend le
+  type confirmé du projet de la leçon) ; une décision ferme les
+  propositions qu'elle rend caduques. « Undo » sur une refine : archive
+  ses leçons créées, remet l'ancien texte de celles qu'elle a modifiées
+  (sauf retouchées depuis), restaure celles qu'elle a archivées, refuse
+  ses propositions en attente, et la marque annulée. Vérifiée dans le
+  banc d'essai, pas encore dans l'app.
 - **Workers orphelins** : `8395689` (Exit + démarrage, marquage pid +
   identité de démarrage de l'IDE, test d'intégration), `5674bf8` (correctif :
   le nettoyage faisait avorter l'IDE à la fermeture). Vérifié dans l'app :

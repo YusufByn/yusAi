@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Icon } from "@iconify/react";
 import { api } from "../../lib/ipc";
 import type {
+  Lesson,
   LessonEventView,
   LessonKind,
   LessonLevel,
@@ -10,11 +11,14 @@ import type {
   ProposalView,
   RefineDetail,
   RefineView,
+  UndoReport,
 } from "../../types";
 
 // The "Lessons" view of the Prime chat (prime_review.rs): pending proposals
 // of every project (Review), the project's lessons (Lessons) and the
-// refines imported for it, refine by refine (Refines).
+// refines imported for it, refine by refine (Refines). Every action is
+// recorded in the lesson history with the author "user"; moving a lesson
+// yourself counts as validation.
 
 type Tab = "review" | "lessons" | "refines";
 
@@ -22,9 +26,14 @@ type Props = {
   workspacePath: string;
   // Bumped by the pane to re-read (after Remember, for instance).
   refreshKey: number;
+  // Something changed (the pane re-reads its pending count).
+  onChanged: () => void;
 };
 
-export function PrimeLessonsView({ workspacePath, refreshKey }: Props) {
+// Runs an action, then re-reads the view.
+type Act = (action: () => Promise<unknown>) => Promise<void>;
+
+export function PrimeLessonsView({ workspacePath, refreshKey, onChanged }: Props) {
   const [tab, setTab] = useState<Tab>("review");
   const [overview, setOverview] = useState<LessonsOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +50,20 @@ export function PrimeLessonsView({ workspacePath, refreshKey }: Props) {
   useEffect(() => {
     void load();
   }, [load, refreshKey]);
+
+  const act: Act = useCallback(
+    async (action) => {
+      try {
+        await action();
+        setError(null);
+      } catch (err) {
+        setError(String(err));
+      }
+      await load();
+      onChanged();
+    },
+    [load, onChanged],
+  );
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "review", label: "Review", count: overview?.proposals.length },
@@ -69,9 +92,9 @@ export function PrimeLessonsView({ workspacePath, refreshKey }: Props) {
       <div className="prime-lessons__content">
         {error && <div className="prime-chat__error">{error}</div>}
         {!overview && !error && <div className="prime-chat__status">Loading…</div>}
-        {overview && tab === "review" && <ReviewTab overview={overview} />}
-        {overview && tab === "lessons" && <LessonsTab overview={overview} />}
-        {overview && tab === "refines" && <RefinesTab overview={overview} />}
+        {overview && tab === "review" && <ReviewTab overview={overview} act={act} />}
+        {overview && tab === "lessons" && <LessonsTab overview={overview} act={act} />}
+        {overview && tab === "refines" && <RefinesTab overview={overview} act={act} />}
       </div>
     </div>
   );
@@ -79,22 +102,25 @@ export function PrimeLessonsView({ workspacePath, refreshKey }: Props) {
 
 // ---------------------------------------------------------------- Review
 
-function ReviewTab({ overview }: { overview: LessonsOverview }) {
+function ReviewTab({ overview, act }: { overview: LessonsOverview; act: Act }) {
   if (overview.proposals.length === 0) {
     return <Empty text="Nothing waits for your review." />;
   }
   return (
     <div className="prime-lessons__list">
       {overview.proposals.map((proposal) => (
-        <ProposalCard key={proposal.id} proposal={proposal} />
+        <ProposalCard key={proposal.id} proposal={proposal} act={act} />
       ))}
     </div>
   );
 }
 
-function ProposalCard({ proposal }: { proposal: ProposalView }) {
+function ProposalCard({ proposal, act }: { proposal: ProposalView; act: Act }) {
   const lesson = proposal.lesson;
   const payload = proposal.payload;
+  const accept = (level: LessonLevel | null) =>
+    void act(() => api.primeAcceptProposal(proposal.id, level));
+  const reject = () => void act(() => api.primeRejectProposal(proposal.id));
   return (
     <div className="prime-lessons__card">
       <div className="prime-lessons__card-head">
@@ -123,6 +149,35 @@ function ProposalCard({ proposal }: { proposal: ProposalView }) {
       ) : (
         <div className="prime-chat__status">The lesson no longer exists.</div>
       )}
+      <div className="prime-lessons__actions">
+        {proposal.kind === "promote" && (
+          <>
+            <ActionButton
+              label={proposal.projectType ? `To type ${proposal.projectType}` : "To type"}
+              disabled={!proposal.projectType || !lesson}
+              title={
+                proposal.projectType
+                  ? "Share with projects of the same type"
+                  : "Choose the project's type first"
+              }
+              onClick={() => accept("type")}
+            />
+            <ActionButton
+              label="To global"
+              primary
+              disabled={!lesson}
+              onClick={() => accept("global")}
+            />
+          </>
+        )}
+        {(proposal.kind === "change" || proposal.kind === "archive") && (
+          <ActionButton label="Accept" primary disabled={!lesson} onClick={() => accept(null)} />
+        )}
+        {proposal.kind === "skill" && (
+          <span className="prime-lessons__meta">Skills arrive with the skills folders.</span>
+        )}
+        <ActionButton label="Reject" onClick={reject} />
+      </div>
     </div>
   );
 }
@@ -144,7 +199,7 @@ function SkillText({ payload }: { payload: Record<string, unknown> }) {
 
 // ---------------------------------------------------------------- Lessons
 
-function LessonsTab({ overview }: { overview: LessonsOverview }) {
+function LessonsTab({ overview, act }: { overview: LessonsOverview; act: Act }) {
   const [showArchived, setShowArchived] = useState(false);
   const lessons = overview.lessons.filter(
     (lesson) => showArchived || lesson.status === "active",
@@ -175,7 +230,7 @@ function LessonsTab({ overview }: { overview: LessonsOverview }) {
           <section key={level} className="prime-lessons__group">
             <h3 className="prime-lessons__group-title">{label}</h3>
             {inGroup.map((lesson) => (
-              <LessonRow key={lesson.id} lesson={lesson} />
+              <LessonRow key={lesson.id} lesson={lesson} overview={overview} act={act} />
             ))}
           </section>
         );
@@ -184,13 +239,47 @@ function LessonsTab({ overview }: { overview: LessonsOverview }) {
   );
 }
 
-function LessonRow({ lesson }: { lesson: LessonView }) {
+function LessonRow({
+  lesson,
+  overview,
+  act,
+}: {
+  lesson: LessonView;
+  overview: LessonsOverview;
+  act: Act;
+}) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState<LessonEventView[] | null>(null);
   useEffect(() => {
     if (!open || history) return;
     api.primeLessonHistory(lesson.id).then(setHistory).catch(console.error);
   }, [open, history, lesson.id]);
+  // A change re-reads the history.
+  useEffect(() => {
+    setHistory(null);
+  }, [lesson.updatedAtMs, lesson.status]);
+  const ownProject = lesson.workspaceId === overview.workspaceId;
+  const active = lesson.status === "active";
+  const levels: { level: LessonLevel; label: string; disabled: boolean; title?: string }[] = [
+    {
+      level: "project",
+      label: "To project",
+      disabled: !ownProject,
+      title: ownProject ? undefined : "This lesson comes from another project",
+    },
+    {
+      level: "type",
+      label: overview.projectType ? `To type ${overview.projectType}` : "To type",
+      disabled: !ownProject || !overview.projectType,
+      title: !overview.projectType
+        ? "Choose the project's type first"
+        : ownProject
+          ? undefined
+          : "This lesson comes from another project",
+    },
+    { level: "global", label: "To global", disabled: false },
+  ];
   return (
     <div className="prime-lessons__card" data-archived={lesson.status === "archived"}>
       <button
@@ -217,41 +306,144 @@ function LessonRow({ lesson }: { lesson: LessonView }) {
           className="prime-lessons__chevron"
         />
       </button>
-      <div className="prime-lessons__body">{lesson.content}</div>
-      {open && (
-        <div className="prime-lessons__history">
-          {!history && <div className="prime-chat__status">Loading…</div>}
-          {history?.map((event) => (
-            <EventLine key={event.id} event={event} />
-          ))}
-        </div>
+      {editing ? (
+        <LessonEditor
+          lesson={lesson}
+          onCancel={() => setEditing(false)}
+          onSave={(title, content) => {
+            setEditing(false);
+            void act(() => api.primeUpdateLesson(lesson.id, title, content));
+          }}
+        />
+      ) : (
+        <div className="prime-lessons__body">{lesson.content}</div>
       )}
+      {open && (
+        <>
+          <div className="prime-lessons__actions">
+            {active && !editing && (
+              <ActionButton label="Edit" onClick={() => setEditing(true)} />
+            )}
+            {active && (
+              <ActionButton
+                label={lesson.pinned ? "Unpin" : "Pin"}
+                title="Pinned lessons are injected first"
+                onClick={() => void act(() => api.primeSetLessonPinned(lesson.id, !lesson.pinned))}
+              />
+            )}
+            {active &&
+              levels
+                .filter((entry) => entry.level !== lesson.level)
+                .map((entry) => (
+                  <ActionButton
+                    key={entry.level}
+                    label={entry.label}
+                    disabled={entry.disabled}
+                    title={entry.title}
+                    onClick={() => void act(() => api.primeSetLessonLevel(lesson.id, entry.level))}
+                  />
+                ))}
+            {active ? (
+              <ActionButton
+                label="Archive"
+                danger
+                onClick={() => void act(() => api.primeArchiveLesson(lesson.id))}
+              />
+            ) : (
+              <ActionButton
+                label="Restore"
+                onClick={() => void act(() => api.primeRestoreLesson(lesson.id))}
+              />
+            )}
+          </div>
+          <div className="prime-lessons__history">
+            {!history && <div className="prime-chat__status">Loading…</div>}
+            {history?.map((event) => (
+              <EventLine key={event.id} event={event} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LessonEditor({
+  lesson,
+  onCancel,
+  onSave,
+}: {
+  lesson: Lesson;
+  onCancel: () => void;
+  onSave: (title: string, content: string) => void;
+}) {
+  const [title, setTitle] = useState(lesson.title);
+  const [content, setContent] = useState(lesson.content);
+  return (
+    <div className="prime-lessons__editor">
+      <input
+        className="prime-lessons__input"
+        value={title}
+        onChange={(event) => setTitle(event.target.value)}
+        placeholder="Title"
+      />
+      <textarea
+        className="prime-lessons__input"
+        rows={3}
+        value={content}
+        onChange={(event) => setContent(event.target.value)}
+        onFocus={(event) => {
+          const end = event.currentTarget.value.length;
+          event.currentTarget.setSelectionRange(end, end);
+        }}
+        autoFocus
+      />
+      <div className="prime-lessons__actions">
+        <ActionButton
+          label="Save"
+          primary
+          disabled={!content.trim()}
+          onClick={() => onSave(title.trim() || lesson.title, content.trim())}
+        />
+        <ActionButton label="Cancel" onClick={onCancel} />
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------- Refines
 
-function RefinesTab({ overview }: { overview: LessonsOverview }) {
+function RefinesTab({ overview, act }: { overview: LessonsOverview; act: Act }) {
   if (overview.refines.length === 0) {
     return <Empty text="No refine imported for this project yet." />;
   }
   return (
     <div className="prime-lessons__list">
       {overview.refines.map((refine) => (
-        <RefineRow key={refine.refinementId} refine={refine} />
+        <RefineRow key={refine.refinementId} refine={refine} act={act} />
       ))}
     </div>
   );
 }
 
-function RefineRow({ refine }: { refine: RefineView }) {
+function RefineRow({ refine, act }: { refine: RefineView; act: Act }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<RefineDetail | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [undone, setUndone] = useState<string | null>(null);
   useEffect(() => {
     if (!open || detail) return;
     api.primeRefineDetail(refine.refinementId).then(setDetail).catch(console.error);
   }, [open, detail, refine.refinementId]);
+  // An undo re-reads the detail.
+  useEffect(() => {
+    setDetail(null);
+  }, [refine.undoneAtMs]);
+  const undo = () =>
+    void act(async () => {
+      setConfirming(false);
+      setUndone(undoSummary(await api.primeUndoRefine(refine.refinementId)));
+    });
   const counts = [
     refine.created && `${refine.created} created`,
     refine.updated && `${refine.updated} updated`,
@@ -283,6 +475,22 @@ function RefineRow({ refine }: { refine: RefineView }) {
       </button>
       {refine.summary && <div className="prime-lessons__title">{refine.summary}</div>}
       <div className="prime-lessons__meta">{counts.length ? counts.join(" · ") : "Nothing kept"}</div>
+      {undone && <div className="prime-lessons__meta">{undone}</div>}
+      {open && refine.undoneAtMs === null && (
+        <div className="prime-lessons__actions">
+          {confirming ? (
+            <>
+              <ActionButton label="Undo this refine" danger onClick={undo} />
+              <ActionButton label="Cancel" onClick={() => setConfirming(false)} />
+              <span className="prime-lessons__meta">
+                Archives its new lessons and brings back the texts it changed.
+              </span>
+            </>
+          ) : (
+            <ActionButton label="Undo" onClick={() => setConfirming(true)} />
+          )}
+        </div>
+      )}
       {open && (
         <div className="prime-lessons__history">
           {!detail && <div className="prime-chat__status">Loading…</div>}
@@ -367,6 +575,47 @@ function LessonText({
       <div className="prime-lessons__body">{content}</div>
     </div>
   );
+}
+
+function ActionButton({
+  label,
+  onClick,
+  disabled,
+  title,
+  primary,
+  danger,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  title?: string;
+  primary?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className="prime-lessons__action"
+      data-variant={primary ? "primary" : danger ? "danger" : undefined}
+      disabled={disabled}
+      title={title}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
+}
+
+// "Undone: 1 lesson archived · 1 text brought back · 1 left as is".
+function undoSummary(report: UndoReport): string {
+  const parts = [
+    report.archived.length && `${report.archived.length} archived`,
+    report.reverted.length && `${report.reverted.length} text${report.reverted.length === 1 ? "" : "s"} brought back`,
+    report.restored.length && `${report.restored.length} restored`,
+    report.rejectedProposals && `${report.rejectedProposals} proposal${report.rejectedProposals === 1 ? "" : "s"} rejected`,
+    report.skipped.length && `${report.skipped.length} left as is (${report.skipped.join("; ")})`,
+  ].filter(Boolean);
+  return `Undone: ${parts.length ? parts.join(" · ") : "nothing to change"}`;
 }
 
 function Empty({ text }: { text: string }) {

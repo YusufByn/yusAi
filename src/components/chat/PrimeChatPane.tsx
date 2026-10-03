@@ -674,7 +674,11 @@ export function PrimeChatPane({
         <span className="chat-head__dot" data-status={busy ? "streaming" : "idle"} />
       </div>
       {showLessons && (
-        <PrimeLessonsView workspacePath={workspacePath} refreshKey={lessonsRefresh} />
+        <PrimeLessonsView
+          workspacePath={workspacePath}
+          refreshKey={lessonsRefresh}
+          onChanged={refreshPending}
+        />
       )}
       <div className="chat-body" ref={bodyRef} hidden={showLessons}>
         <div className="chat-body__content">

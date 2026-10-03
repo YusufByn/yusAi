@@ -32,6 +32,7 @@ import type {
   OpenRouterProviderStatus,
   PlanControl,
   LessonEventView,
+  LessonLevel,
   LessonsOverview,
   PrimeImportReport,
   PrimeOpenedSession,
@@ -40,6 +41,7 @@ import type {
   PrimeSessionConfig,
   QuestionAnswer,
   RefineDetail,
+  UndoReport,
   SavedConversation,
   ServiceTier,
   SkillSettings,
@@ -797,6 +799,30 @@ export const api = {
   },
   primePendingProposalCount() {
     return invoke<number>("prime_pending_proposal_count");
+  },
+  primeAcceptProposal(proposalId: string, targetLevel: LessonLevel | null) {
+    return invoke<void>("prime_accept_proposal", { proposalId, targetLevel });
+  },
+  primeRejectProposal(proposalId: string) {
+    return invoke<void>("prime_reject_proposal", { proposalId });
+  },
+  primeUpdateLesson(lessonId: string, title: string, content: string) {
+    return invoke<void>("prime_update_lesson", { lessonId, title, content });
+  },
+  primeSetLessonPinned(lessonId: string, pinned: boolean) {
+    return invoke<void>("prime_set_lesson_pinned", { lessonId, pinned });
+  },
+  primeArchiveLesson(lessonId: string) {
+    return invoke<void>("prime_archive_lesson", { lessonId });
+  },
+  primeRestoreLesson(lessonId: string) {
+    return invoke<void>("prime_restore_lesson", { lessonId });
+  },
+  primeSetLessonLevel(lessonId: string, level: LessonLevel) {
+    return invoke<void>("prime_set_lesson_level", { lessonId, level });
+  },
+  primeUndoRefine(refinementId: string) {
+    return invoke<UndoReport>("prime_undo_refine", { refinementId });
   },
   primeAbort(activeSessionId: string) {
     return invoke<void>("prime_abort", { activeSessionId });
